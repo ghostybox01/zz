@@ -16,14 +16,14 @@ max_requests_jitter = 50
 timeout = 120
 keepalive = 5
 
-# Logging
-accesslog = "/opt/raven-dashboard/logs/access.log"
-errorlog = "/opt/raven-dashboard/logs/error.log"
+# Logging — send to stdout/stderr so systemd-journald captures everything
+accesslog = "-"
+errorlog = "-"
 loglevel = "info"
 access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
 
 # Process Naming
-proc_name = "raven-dashboard"
+proc_name = "reconx-dashboard"
 
 # Server Mechanics
 daemon = False
