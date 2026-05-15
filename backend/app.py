@@ -1061,6 +1061,10 @@ def handle_vps_stop_monitoring():
         manager.stop_monitoring()
         emit('vps_monitoring_stopped', {'success': True})
 
+# ==================== STARTUP ====================
+# Run at module-load time so gunicorn workers (which import app:app, never hit __main__) initialize the DB.
+init_db()
+
 # ==================== MAIN ====================
 
 if __name__ == '__main__':
@@ -1073,8 +1077,6 @@ if __name__ == '__main__':
     print(f"📁 Local Results: {RESULTS_DIR}")
     print(f"🔐 SSH Available: {SSH_AVAILABLE}")
     print("=" * 70)
-    
-    init_db()
     
     print(f"📥 Importing existing results...")
     imported_valid, imported_hits = import_from_files()
