@@ -162,14 +162,14 @@ def build_scanner(args: argparse.Namespace) -> None:
     if args.dry_run:
         warn('  (dry run, skipping go build)')
         return
-    sum_file = raven / 'go.sum'
+    sum_file = backend / 'go.sum'
     if sum_file.exists():
         sum_file.unlink()
-    if not (raven / 'go.mod').exists():
-        run(['go', 'mod', 'init', 'reconx-scanner'], user=SERVICE_USER, cwd=raven, check=False)
-    run(['go', 'mod', 'tidy'], user=SERVICE_USER, cwd=raven, check=False)
+    if not (backend / 'go.mod').exists():
+        run(['go', 'mod', 'init', 'reconx-scanner'], user=SERVICE_USER, cwd=backend, check=False)
+    run(['go', 'mod', 'tidy'], user=SERVICE_USER, cwd=backend, check=False)
     run(['go', 'build', '-o', 'reconx-scanner', 'main.go'],
-        user=SERVICE_USER, cwd=raven,
+        user=SERVICE_USER, cwd=backend,
         env={'GOOS': 'linux', 'GOARCH': 'amd64'})
 
 
