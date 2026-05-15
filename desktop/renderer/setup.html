@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ReconX — connect</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { background: #0a0c12; color: #e5e7eb; font-family: -apple-system, "Segoe UI", system-ui, sans-serif; margin: 0; padding: 0; height: 100%; }
+    main { display: flex; flex-direction: column; padding: 1.4rem 1.6rem; gap: .85rem; height: 100%; box-sizing: border-box; }
+    h1 { margin: 0; font-size: 1.05rem; font-weight: 700; letter-spacing: .02em; }
+    p { margin: 0; color: #9ca3af; font-size: .82rem; line-height: 1.45; }
+    label { display: flex; flex-direction: column; gap: .35rem; font-size: .72rem; color: #9ca3af; letter-spacing: .04em; text-transform: uppercase; }
+    input { padding: .65rem .8rem; border-radius: 9px; border: 1px solid rgba(255,255,255,.12); background: #11141c; color: #e5e7eb; font-family: ui-monospace, SF Mono, Menlo, monospace; font-size: .92rem; }
+    input:focus { outline: none; border-color: #d4af37; box-shadow: 0 0 0 3px rgba(212,175,55,.18); }
+    .row { display: flex; gap: .5rem; margin-top: auto; }
+    button { padding: .65rem 1rem; border-radius: 9px; border: 1px solid rgba(255,255,255,.14); background: transparent; color: #e5e7eb; font-weight: 600; cursor: pointer; font-size: .85rem; }
+    button.primary { background: #d4af37; color: #0a0c12; border-color: #d4af37; }
+    button:hover { border-color: rgba(255,255,255,.28); }
+    button.primary:hover { background: #c19f30; }
+    code { font-family: ui-monospace, SF Mono, Menlo, monospace; color: #d4af37; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Connect to your ReconX controller</h1>
+    <p>The desktop app is a thin wrapper. Point it at the dashboard URL of your controller VPS (e.g. <code>http://203.0.113.10</code>).</p>
+    <label>
+      Backend URL
+      <input id="u" type="url" placeholder="http://your-controller-vps/" autofocus />
+    </label>
+    <div class="row">
+      <button class="primary" id="ok">Connect</button>
+      <button id="cancel">Cancel</button>
+    </div>
+  </main>
+  <script>
+    const params = new URLSearchParams(location.search)
+    const u = document.getElementById('u')
+    u.value = params.get('current') || ''
+    document.getElementById('ok').addEventListener('click', () => {
+      const v = (u.value || '').trim()
+      if (!v) return
+      window.reconx.submitBackend(v)
+    })
+    document.getElementById('cancel').addEventListener('click', () => window.reconx.submitBackend(''))
+    u.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('ok').click() })
+  </script>
+</body>
+</html>

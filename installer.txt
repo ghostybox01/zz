@@ -1,0 +1,104 @@
+ReconX — controller deploy manifest
+====================================
+
+This file is a quick reference. The actual installer is installer/deploy.py.
+
+PURPOSE
+-------
+Install ReconX on a hub VPS that:
+  • serves the dashboard (nginx)
+  • runs the Flask backend (gunicorn + eventlet socket.io)
+  • runs the fleet HTTP API (paramiko-backed control plane)
+  • compiles the Go scanner binary and SFTPs it to workers
+  • DOES NOT run scans locally
+
+REQUIREMENTS
+------------
+  • Ubuntu 22.04+/24.04 or Debian 12+
+  • Root SSH access
+  • ~2 GB RAM, ~4 GB disk
+  • Outbound network to apt repos + NodeSource + golang
+
+ONE-LINE INSTALL (on the VPS)
+-----------------------------
+  sudo python3 installer/deploy.py
+
+FLAGS
+-----
+  --dry-run        Print plan, make no changes
+  --skip-system    Skip apt-get install (assume packages present)
+  --port N         nginx HTTP port (default 80)
+
+WHAT THE INSTALLER DOES (idempotent — safe to re-run)
+-----------------------------------------------------
+  1. apt-get install python3 python3-venv golang-go nginx redis-server …
+  2. apt-get install nodejs (NodeSource 20.x if missing)
+  3. useradd reconx (system user, home /opt/reconx)
+  4. rsync project source → /opt/reconx
+  5. Python venv at /opt/reconx/venv with flask + paramiko + gunicorn + eventlet
+  6. npm ci && npm run build in dashboard/
+  7. go build -o reconx-scanner main.go (Linux/amd64, in /opt/reconx/raven)
+  8. Generate ed25519 SSH key at /opt/reconx/.ssh/id_ed25519
+  9. Write /etc/systemd/system/reconx-dashboard.service (gunicorn :5000)
+ 10. Write /etc/systemd/system/reconx-fleet-api.service (fleet_api.py :8787)
+ 11. Write /etc/nginx/sites-available/reconx (HTTP :80 → SPA + reverse-proxy)
+ 12. systemctl enable --now redis-server reconx-dashboard reconx-fleet-api
+ 13. nginx -t && systemctl reload nginx
+
+PORTS
+-----
+  80    nginx (public)
+  5000  gunicorn (loopback only)
+  8787  fleet_api (loopback only)
+
+ENV OVERRIDES
+-------------
+  RECONX_INSTALL_DIR=/opt/reconx
+  RECONX_USER=reconx
+  RECONX_DASH_PORT=5000
+  RECONX_FLEET_PORT=8787
+  RECONX_HTTP_PORT=80
+
+AFTER INSTALL
+-------------
+  1. Open  http://<vps-ip>/
+  2. Dashboard → Settings → Fleet bootstrap
+       Paste worker SSH credentials OR upload a creds file.
+       (Format below.)
+  3. Click "Test SSH" — the dashboard contacts each worker via paramiko
+     and reports OK/FAIL per row. OK rows are added to server_ips.txt.
+  4. Dashboard → Lists → Upload a target list → Fleet → Deploy.
+
+BULK SSH CREDS FILE FORMAT
+--------------------------
+Plain text, one connection per line. Three accepted styles:
+
+    # 1) Simplest — IP only (uses controller's SSH key, root user)
+    198.51.100.10
+    198.51.100.11
+
+    # 2) user@host
+    root@198.51.100.10
+    deploy@worker-02.example.com:2222
+
+    # 3) user@host:port:auth_kind:secret
+    #    where auth_kind ∈ {key, password}
+    #    secret is either a private-key path or a password string
+    root@198.51.100.10:22:key:/root/.ssh/worker-01.pem
+    root@198.51.100.11:22:password:s3cret!
+
+Lines starting with # are comments. Empty lines are skipped.
+
+UPGRADE / RE-DEPLOY
+-------------------
+  Re-run sudo python3 installer/deploy.py.
+  It will: rsync new source, rebuild dashboard + binary, restart services.
+
+UNINSTALL
+---------
+  systemctl disable --now reconx-dashboard reconx-fleet-api
+  rm -f /etc/systemd/system/reconx-{dashboard,fleet-api}.service
+  rm -f /etc/nginx/sites-enabled/reconx /etc/nginx/sites-available/reconx
+  systemctl reload nginx
+  userdel -r reconx
+  rm -rf /opt/reconx

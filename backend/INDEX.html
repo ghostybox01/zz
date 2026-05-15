@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAVEN X 2.0 - Automated Setup Guide</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1e3a 100%);
+            color: #e0e7ff;
+            line-height: 1.6;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: rgba(16, 24, 48, 0.8);
+            border: 1px solid rgba(0, 243, 255, 0.3);
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
+        }
+        h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, #00f3ff, #b700ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-align: center;
+            margin-bottom: 10px;
+            font-weight: 900;
+            letter-spacing: 2px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #8b92b8;
+            margin-bottom: 30px;
+            font-size: 1.1rem;
+        }
+        .section {
+            margin: 30px 0;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.3);
+            border-left: 4px solid #00f3ff;
+            border-radius: 5px;
+        }
+        h2 {
+            color: #00f3ff;
+            margin-bottom: 15px;
+            font-size: 1.5rem;
+        }
+        h3 {
+            color: #b700ff;
+            margin: 15px 0 10px 0;
+        }
+        .step {
+            background: rgba(0, 243, 255, 0.05);
+            border: 1px solid rgba(0, 243, 255, 0.2);
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+        .step-number {
+            display: inline-block;
+            background: #00f3ff;
+            color: #0a0e27;
+            width: 30px;
+            height: 30px;
+            line-height: 30px;
+            text-align: center;
+            border-radius: 50%;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        code {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 2px 8px;
+            border-radius: 3px;
+            color: #00ff9f;
+            font-family: 'Courier New', monospace;
+        }
+        pre {
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin: 10px 0;
+            border: 1px solid rgba(0, 243, 255, 0.2);
+        }
+        pre code {
+            background: none;
+            padding: 0;
+        }
+        .button {
+            display: inline-block;
+            background: linear-gradient(135deg, #00f3ff, #b700ff);
+            color: #0a0e27;
+            padding: 12px 30px;
+            text-decoration: none;
+            border-radius: 25px;
+            font-weight: bold;
+            margin: 5px;
+            transition: transform 0.2s;
+        }
+        .button:hover {
+            transform: scale(1.05);
+        }
+        .warning {
+            background: rgba(255, 214, 0, 0.1);
+            border-left-color: #ffd600;
+            color: #ffd600;
+        }
+        .success {
+            background: rgba(0, 255, 159, 0.1);
+            border-left-color: #00ff9f;
+            color: #00ff9f;
+        }
+        .links {
+            text-align: center;
+            margin-top: 30px;
+        }
+        ul {
+            margin-left: 20px;
+        }
+        li {
+            margin: 8px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 RAVEN X 2.0</h1>
+        <p class="subtitle">Fully Automated Scanner Deployment System</p>
+
+        <div class="section success">
+            <h2>✨ What's New: 100% Automated</h2>
+            <p>Everything is now automated! No manual builds, no manual SSH commands, no manual deployments.</p>
+            <p><strong>Just ONE command and you're scanning!</strong></p>
+        </div>
+
+        <div class="section">
+            <h2>🎯 Quick Start (3 Steps)</h2>
+            
+            <div class="step">
+                <span class="step-number">1</span>
+                <strong>Edit Configuration Files</strong>
+                <ul>
+                    <li><code>server_ips.txt</code> - Add your VPS IP addresses (one per line)</li>
+                    <li><code>targets.txt</code> - Add URLs to scan (one per line)</li>
+                    <li><code>ssh_config.json</code> - Optional, defaults are fine</li>
+                </ul>
+            </div>
+
+            <div class="step">
+                <span class="step-number">2</span>
+                <strong>Run ONE Command</strong>
+                <h3>Windows:</h3>
+                <pre><code>Double-click: START.bat
+
+Or from Command Prompt:
+python start.py</code></pre>
+                
+                <h3>Linux/macOS:</h3>
+                <pre><code>chmod +x START.sh
+./START.sh
+
+Or:
+python3 start.py</code></pre>
+            </div>
+
+            <div class="step">
+                <span class="step-number">3</span>
+                <strong>Access Dashboard</strong>
+                <ul>
+                    <li>Dashboard: <a href="http://localhost:5000" target="_blank">http://localhost:5000</a></li>
+                    <li>VPS Control: <a href="http://localhost:5000/vps" target="_blank">http://localhost:5000/vps</a></li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>⚡ What Happens Automatically</h2>
+            <ul>
+                <li>✅ Checks if Go is installed (auto-installs on Linux)</li>
+                <li>✅ Downloads Go dependencies</li>
+                <li>✅ Builds <code>raven-scanner</code> binary</li>
+                <li>✅ Creates deployment package</li>
+                <li>✅ Tests SSH connections to all VPS</li>
+                <li>✅ Uploads scanner to all VPS</li>
+                <li>✅ Splits targets equally across VPS</li>
+                <li>✅ Starts scanning on all VPS</li>
+                <li>✅ Launches real-time dashboard</li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <h2>🎮 Command Options</h2>
+            <pre><code># Full automation (default)
+python start.py
+
+# Skip deployment, just build and run dashboard
+python start.py --no-deploy
+
+# Only run dashboard (skip build and deploy)
+python start.py --dashboard-only
+
+# Force rebuild even if scanner exists
+python start.py --rebuild
+
+# Show help
+python start.py --help</code></pre>
+        </div>
+
+        <div class="section warning">
+            <h2>⚠️ Prerequisites</h2>
+            <ul>
+                <li><strong>Python 3.7+</strong> - Must be installed</li>
+                <li><strong>Go 1.21+</strong> - Auto-installs on Linux, manual on Windows</li>
+                <li><strong>SSH Key</strong> - At path specified in <code>ssh_config.json</code></li>
+                <li><strong>VPS Servers</strong> - With root access</li>
+            </ul>
+
+            <h3>Windows: Install Go</h3>
+            <p>If "Go not found" error appears:</p>
+            <ol>
+                <li>Download: <a href="https://go.dev/dl/go1.21.6.windows-amd64.msi" target="_blank">go1.21.6.windows-amd64.msi</a></li>
+                <li>Install and restart terminal</li>
+                <li>Run <code>START.bat</code> again</li>
+            </ol>
+        </div>
+
+        <div class="section">
+            <h2>🔐 SSH Key Setup (If Needed)</h2>
+            <p>If you don't have SSH key yet:</p>
+            <pre><code># Generate SSH key
+ssh-keygen -t rsa -b 4096 -f /root/ssh/1
+
+# Copy to each VPS
+ssh-copy-id -i /root/ssh/1.pub root@66.228.42.201
+ssh-copy-id -i /root/ssh/1.pub root@66.228.42.244</code></pre>
+        </div>
+
+        <div class="section">
+            <h2>📊 Dashboard Features</h2>
+            <h3>Main Dashboard (http://localhost:5000)</h3>
+            <ul>
+                <li>Real-time credential updates via WebSocket</li>
+                <li>Statistics and charts</li>
+                <li>Recent findings display</li>
+                <li>Credential type breakdown</li>
+            </ul>
+
+            <h3>VPS Control Panel (http://localhost:5000/vps)</h3>
+            <ul>
+                <li>Live server status monitoring</li>
+                <li>Start/Stop/Restart individual servers</li>
+                <li>Bulk operations (start all, stop all)</li>
+                <li>Progress tracking per server</li>
+                <li>Log viewing</li>
+                <li>Results collection</li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <h2>🛠️ Troubleshooting</h2>
+            
+            <h3>Problem: "Go not found" on Windows</h3>
+            <p><strong>Fix:</strong> Install Go from <a href="https://go.dev/dl/" target="_blank">go.dev/dl/</a> and restart terminal</p>
+
+            <h3>Problem: "SSH connection failed"</h3>
+            <p><strong>Fix:</strong></p>
+            <pre><code># Test manual SSH
+ssh -i /root/ssh/1 root@<VPS-IP>
+
+# Check key permissions
+chmod 600 /root/ssh/1
+
+# Verify config
+cat ssh_config.json</code></pre>
+
+            <h3>Problem: "No servers reachable"</h3>
+            <p><strong>Fix:</strong></p>
+            <ul>
+                <li>Check <code>server_ips.txt</code> has correct IPs</li>
+                <li>Verify SSH key copied to servers</li>
+                <li>Check firewall allows port 22</li>
+            </ul>
+
+            <h3>Problem: "targets.txt not found"</h3>
+            <p><strong>Fix:</strong></p>
+            <pre><code>echo "https://example.com/config.php" > targets.txt</code></pre>
+        </div>
+
+        <div class="section success">
+            <h2>✅ Success Indicators</h2>
+            <p>After running START.bat/START.sh, you should see:</p>
+            <pre><code>✓ Go installed: go version go1.21.6
+✓ Binary built: raven-scanner (15MB)
+✓ Package created: scanner_package.tar.gz
+✓ SSH key OK: RSA
+✓ 9 server(s) reachable
+✓ Targets file ready: 10,000 URLs
+✓ Deployed to 9/9 servers
+✓ Dashboard running!
+
+🎉 RAVEN X 2.0 READY!
+
+Dashboard:    http://0.0.0.0:5000
+VPS Control:  http://0.0.0.0:5000/vps
+
+Press Ctrl+C to stop</code></pre>
+        </div>
+
+        <div class="section">
+            <h2>📖 Documentation Files</h2>
+            <ul>
+                <li><strong>QUICKSTART.txt</strong> - 2-minute quick start guide</li>
+                <li><strong>README_AUTOMATED.md</strong> - Complete documentation</li>
+                <li><strong>FILES_EXPLAINED.md</strong> - Explanation of all files</li>
+                <li><strong>VPS_DEPLOYMENT.md</strong> - VPS deployment details</li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <h2>🚀 Production Setup</h2>
+            <p>To install as system service with auto-restart:</p>
+            <pre><code># Linux only
+sudo bash install_cron.sh
+
+# Service commands
+systemctl status raven-x
+systemctl restart raven-x
+systemctl stop raven-x
+journalctl -u raven-x -f</code></pre>
+            <p><strong>Features:</strong></p>
+            <ul>
+                <li>Auto-starts on boot</li>
+                <li>Auto-restarts on failure</li>
+                <li>Auto-redeploys when targets.txt changes (every 5 minutes)</li>
+            </ul>
+        </div>
+
+        <div class="links">
+            <h2>🎉 You're All Set!</h2>
+            <p>Just run <code>START.bat</code> (Windows) or <code>START.sh</code> (Linux) and you're scanning!</p>
+            <br>
+            <a href="http://localhost:5000" class="button">Open Dashboard</a>
+            <a href="http://localhost:5000/vps" class="button">VPS Control</a>
+        </div>
+
+        <div style="text-align: center; margin-top: 40px; color: #8b92b8; font-size: 0.9rem;">
+            <p>RAVEN X 2.0 - Built with ❤️ for maximum automation</p>
+            <p>One command. Zero hassle. Full power.</p>
+        </div>
+    </div>
+</body>
+</html>

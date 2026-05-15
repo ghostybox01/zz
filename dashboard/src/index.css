@@ -1,0 +1,66 @@
+:root {
+  --text: #9ca8ba;
+  --text-strong: #e8eef8;
+  --muted: #6b7688;
+  --bg: #0c0f14;
+  --surface: #131822;
+  --surface-2: #0f1219;
+  --border: #242b38;
+  --hairline: #1e2430;
+  --shadow-sm: rgba(0, 0, 0, 0.35) 0 8px 24px;
+  --accent: #63d9c4;
+  --accent-2: #39b89f;
+  --accent-soft: #8fe3d4;
+  --chip-bg: rgba(99, 217, 196, 0.08);
+  --chip-border: rgba(99, 217, 196, 0.25);
+  --ok: #6ee7b7;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --track-bg: #1a2130;
+  --gold: #d4af37;
+  --gold-dim: color-mix(in srgb, var(--gold), #1a1510 55%);
+  --violet: #a78bfa;
+  --violet-bg: color-mix(in srgb, var(--violet), transparent 88%);
+  --surface-elevated: #161a26;
+  --glow-teal: rgba(99, 217, 196, 0.14);
+  --glow-gold: rgba(212, 175, 55, 0.12);
+
+  --sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    sans-serif;
+  --mono: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  color-scheme: dark;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100svh;
+  background:
+    radial-gradient(ellipse 900px 420px at 8% -20%, var(--glow-gold), transparent 55%),
+    radial-gradient(ellipse 1000px 500px at 92% 10%, var(--glow-teal), transparent 50%),
+    radial-gradient(ellipse 800px 400px at 50% 120%, rgba(99, 102, 241, 0.06), transparent 45%),
+    var(--bg);
+}
+
+#root {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  min-height: 100svh;
+  border: none;
+}

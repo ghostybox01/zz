@@ -1,0 +1,15 @@
+{
+  "ssh_key_path": "/root/ssh/1",
+  "remote_user": "root",
+  "server_list_file": "server_ips.txt",
+  "work_dir": "/root/python_job",
+  "results_dir": "./collected_results",
+  "result_subdir": "Result",
+  "dedup_file": "dedup_log.txt",
+  "batch_size": 100000,
+  "ssh_timeout": 10,
+  "scanner_file": "main.py",
+  "runner_file": "batch_runner.sh",
+  "target_file": "targets.txt",
+  "deploy_package": "scanner_package.tar.gz"
+}

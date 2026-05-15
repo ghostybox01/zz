@@ -1,0 +1,199 @@
+/** Subscribes to the real backend for stats + recent findings.
+ *  - Initial GET /api/stats on mount
+ *  - Listens for `stats_update` socket events (pushed every 2s by background_file_monitor in app.py)
+ *  - Falls back to 10s polling if the socket disconnects
+ *
+ *  Output is mapped into the dashboard's existing Finding / RunSnapshot shapes so no other component changes.
+ */
+import { useEffect, useRef, useState } from 'react'
+import { stats as statsApi, type ReconStats, type ReconRecentFinding } from '../lib/reconApi'
+import { getReconSocket } from '../lib/reconSocket'
+import type { Finding, FindingSeverity, RunSnapshot } from '../types'
+
+export type ReconConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'
+
+export type UseReconStatsResult = {
+  state: ReconConnectionState
+  lastError: string | null
+  /** Raw payload from the most recent /api/stats response or socket push. */
+  raw: ReconStats | null
+  /** Mapped to the dashboard's existing types. */
+  findings: Finding[]
+  run: RunSnapshot | null
+  /** Manual refresh, returns the new payload. */
+  refresh: () => Promise<ReconStats | null>
+}
+
+const PROVIDER_SEVERITY: Record<string, FindingSeverity> = {
+  AWS: 'critical',
+  Stripe: 'critical',
+  Mnemonic: 'critical',
+  TruffleHog: 'high',
+  GitLeaks: 'high',
+  GitHub: 'high',
+  OpenAI: 'high',
+  Anthropic: 'high',
+  SendGrid: 'high',
+  Mailgun: 'high',
+  Twilio: 'high',
+  Brevo: 'medium',
+  Mandrill: 'medium',
+  MailerSend: 'medium',
+  Nexmo: 'medium',
+  Telnyx: 'medium',
+  MessageBird: 'medium',
+  SMTP: 'high',
+  GCP: 'critical',
+}
+
+function severityFor(provider: string): FindingSeverity {
+  return PROVIDER_SEVERITY[provider] ?? 'medium'
+}
+
+function hostnameFromUrl(url: string): string {
+  if (!url) return ''
+  try {
+    return new URL(url).host
+  } catch {
+    const m = url.match(/^https?:\/\/([^/?#]+)/)
+    return m && m[1] ? m[1] : url
+  }
+}
+
+function pathFromUrl(url: string): string | undefined {
+  if (!url) return undefined
+  try {
+    return new URL(url).pathname
+  } catch {
+    return undefined
+  }
+}
+
+/** [type, key_value, source_url, timestamp, metadata] from app.py's recent_findings tuple */
+function mapRecent(row: ReconRecentFinding, i: number): Finding {
+  const [type, keyValue, sourceUrl, ts, metadata] = row
+  const provider = String(type ?? 'Unknown')
+  return {
+    id: `rs-${provider}-${i}-${ts}`,
+    at: ts ?? new Date().toISOString(),
+    provider,
+    ruleLabel: `${provider} credential`,
+    hostname: hostnameFromUrl(sourceUrl ?? ''),
+    url: sourceUrl ?? undefined,
+    path: pathFromUrl(sourceUrl ?? ''),
+    detail: keyValue ?? '',
+    details: {
+      validated: true,
+      raw: keyValue ?? '',
+      extra: metadata ? [{ key: 'Metadata', value: metadata }] : undefined,
+    },
+    severity: severityFor(provider),
+    reportedByHost: 'recon-backend',
+  }
+}
+
+function mapRun(s: ReconStats): RunSnapshot {
+  return {
+    id: 'live',
+    label: 'Live · Raven backend',
+    startedAt: s.last_update,
+    snapshots: [],
+    targetLiveDomains: s.progress_total,
+    liveDomains: s.progress_current,
+    totalExtracted: s.total_valid,
+    totalTested: s.total_urls,
+    filesProcessed: 0,
+    filesTotal: 0,
+    elapsedSeconds: 0,
+    extractWorkers: undefined,
+    testWorkers: undefined,
+  }
+}
+
+export function useReconStats(): UseReconStatsResult {
+  const [state, setState] = useState<ReconConnectionState>('connecting')
+  const [lastError, setLastError] = useState<string | null>(null)
+  const [raw, setRaw] = useState<ReconStats | null>(null)
+  const [findings, setFindings] = useState<Finding[]>([])
+  const [run, setRun] = useState<RunSnapshot | null>(null)
+  const pollIdRef = useRef<number | null>(null)
+  const mountedRef = useRef(true)
+
+  const apply = (payload: ReconStats) => {
+    if (!mountedRef.current) return
+    setRaw(payload)
+    setFindings((payload.recent_findings ?? []).map((row, i) => mapRecent(row, i)))
+    setRun(mapRun(payload))
+    setLastError(null)
+  }
+
+  const refresh = async (): Promise<ReconStats | null> => {
+    try {
+      const payload = await statsApi.get()
+      apply(payload)
+      return payload
+    } catch (err) {
+      const msg = (err as Error).message || 'Failed to fetch /api/stats'
+      if (mountedRef.current) setLastError(msg)
+      return null
+    }
+  }
+
+  useEffect(() => {
+    mountedRef.current = true
+    setState('connecting')
+
+    // Initial REST hit so the UI populates immediately even if socket is slow.
+    void (async () => {
+      const ok = await refresh()
+      if (!mountedRef.current) return
+      setState(ok ? 'connected' : 'error')
+    })()
+
+    // Socket subscription for live pushes.
+    const socket = getReconSocket()
+
+    const onConnect = () => {
+      if (!mountedRef.current) return
+      setState('connected')
+      setLastError(null)
+    }
+    const onDisconnect = (reason: string) => {
+      if (!mountedRef.current) return
+      setState('disconnected')
+      setLastError(`socket disconnected: ${reason}`)
+    }
+    const onError = (err: Error) => {
+      if (!mountedRef.current) return
+      setLastError(err.message || 'socket error')
+    }
+    const onStatsUpdate = (payload: ReconStats) => {
+      apply(payload)
+    }
+
+    socket.on('connect', onConnect)
+    socket.on('disconnect', onDisconnect)
+    socket.on('connect_error', onError)
+    socket.on('stats_update', onStatsUpdate)
+
+    // Fallback poll every 10s in case the socket is wedged.
+    pollIdRef.current = window.setInterval(() => {
+      if (state !== 'connected') void refresh()
+    }, 10_000)
+
+    return () => {
+      mountedRef.current = false
+      socket.off('connect', onConnect)
+      socket.off('disconnect', onDisconnect)
+      socket.off('connect_error', onError)
+      socket.off('stats_update', onStatsUpdate)
+      if (pollIdRef.current !== null) {
+        window.clearInterval(pollIdRef.current)
+        pollIdRef.current = null
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  return { state, lastError, raw, findings, run, refresh }
+}

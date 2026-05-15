@@ -1,0 +1,67 @@
+# Node / dashboard
+node_modules/
+dashboard/dist/
+desktop/dist/
+desktop/node_modules/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+backend/venv/
+
+# Scanner runtime artefacts (per-host, not source)
+backend/raven_results.db
+backend/ResultJS/
+backend/collected_results/
+backend/temp_repos/
+backend/reconx-scanner
+backend/raven-scanner
+backend/scanner_package*.tar.gz
+backend/scanner_package_tmp/
+backend/server_ips.txt
+backend/paths.txt
+backend/targets.txt
+backend/dedup_log.txt
+backend/.ssh/
+
+# Env / secrets
+.env
+.env.local
+.env.production
+dashboard/.env
+dashboard/.env.local
+*.pem
+id_rsa
+id_ed25519
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# Logs
+*.log
+backend/output.log
+
+# Nelson mission state (per-machine, not source)
+.nelson/
+
+# Test results
+/tmp/reconx-*.png
+/tmp/reconx-*.json
+
+# Zips / archives
+*.zip
+*.tar.gz
+
+# Old artefacts the project carries — keep out of new repo
+dashboard.zip
+dashboard1.zip
+raven1.zip
+ravenx3.zip
