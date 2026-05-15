@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -73,19 +74,56 @@ def detect_os() -> str:
 
 
 # ── Step implementations ──────────────────────────────────────────────────
+GO_VERSION = '1.24.2'  # minimum needed for pterm + modern AWS SDK
+GO_INSTALL_PREFIX = Path('/usr/local')
+
+
+def ensure_modern_go() -> None:
+    """Install Go GO_VERSION to /usr/local/go if installed Go is too old."""
+    needed = tuple(int(x) for x in GO_VERSION.split('.'))
+    go_bin = '/usr/local/go/bin/go'
+    have: tuple[int, ...] = ()
+    try:
+        out = subprocess.check_output([go_bin if os.path.exists(go_bin) else 'go', 'version']).decode()
+        m = re.search(r'go(\d+)\.(\d+)(?:\.(\d+))?', out)
+        if m:
+            have = tuple(int(x or '0') for x in m.groups())
+    except Exception:
+        pass
+
+    if have and have >= needed:
+        log(f'Go {".".join(map(str, have))} already meets >= {GO_VERSION}')
+    else:
+        log(f'Installing Go {GO_VERSION} to /usr/local/go (have: {have or "none"})…')
+        tarball = f'go{GO_VERSION}.linux-amd64.tar.gz'
+        url = f'https://go.dev/dl/{tarball}'
+        run(['rm', '-rf', '/usr/local/go'])
+        subprocess.run(['curl', '-fsSL', '-o', f'/tmp/{tarball}', url], check=True)
+        subprocess.run(['tar', '-C', str(GO_INSTALL_PREFIX), '-xzf', f'/tmp/{tarball}'], check=True)
+        Path(f'/tmp/{tarball}').unlink(missing_ok=True)
+
+    profile = Path('/etc/profile.d/golang.sh')
+    profile.write_text('export PATH=$PATH:/usr/local/go/bin\n')
+    profile.chmod(0o644)
+    os.environ['PATH'] = f"/usr/local/go/bin:{os.environ.get('PATH', '')}"
+
+
 def install_system_packages(args: argparse.Namespace) -> None:
     if args.skip_system:
         warn('skipping system packages (--skip-system)')
+        ensure_modern_go()
         return
     log('Installing system packages…')
     env = {'DEBIAN_FRONTEND': 'noninteractive'}
     run(['apt-get', 'update', '-qq'], env=env)
     pkgs = [
         'python3', 'python3-venv', 'python3-pip',
-        'golang-go', 'git', 'curl', 'wget', 'tar', 'rsync',
+        'git', 'curl', 'wget', 'tar', 'rsync',
         'nginx', 'build-essential', 'redis-server', 'ca-certificates',
     ]
     run(['apt-get', 'install', '-y', '-qq', *pkgs], env=env)
+
+    ensure_modern_go()
 
     try:
         v = subprocess.check_output(['node', '-v']).decode().strip().lstrip('v')
@@ -165,11 +203,16 @@ def build_scanner(args: argparse.Namespace) -> None:
     sum_file = backend / 'go.sum'
     if sum_file.exists():
         sum_file.unlink()
+    go = '/usr/local/go/bin/go' if Path('/usr/local/go/bin/go').exists() else 'go'
     if not (backend / 'go.mod').exists():
-        run(['go', 'mod', 'init', 'reconx-scanner'], user=SERVICE_USER, cwd=backend, check=False)
-    go_env = {'GOOS': 'linux', 'GOARCH': 'amd64', 'GOTOOLCHAIN': 'local'}
-    run(['go', 'mod', 'tidy'], user=SERVICE_USER, cwd=backend, check=False, env=go_env)
-    run(['go', 'build', '-o', 'reconx-scanner', 'main.go'],
+        run([go, 'mod', 'init', 'reconx-scanner'], user=SERVICE_USER, cwd=backend, check=False)
+    go_env = {
+        'GOOS': 'linux', 'GOARCH': 'amd64', 'GOTOOLCHAIN': 'local',
+        'PATH': '/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+        'HOME': str(INSTALL_DIR),
+    }
+    run([go, 'mod', 'tidy'], user=SERVICE_USER, cwd=backend, check=False, env=go_env)
+    run([go, 'build', '-o', 'reconx-scanner', 'main.go'],
         user=SERVICE_USER, cwd=backend, env=go_env)
 
 
