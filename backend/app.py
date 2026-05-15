@@ -16,6 +16,7 @@ from datetime import datetime
 import os
 import re
 import json
+import subprocess
 
 # Import SSH Manager
 try:
@@ -954,6 +955,40 @@ def api_scanner_paths():
         for ln in lines:
             f.write(ln + '\n')
     return jsonify({'present': True, 'lines': len(lines), 'source': 'paths.txt'})
+
+
+@app.route('/api/update', methods=['GET', 'POST'])
+def api_update():
+    """Trigger a self-update: git pull + re-run installer via the sudoers-allowlisted helper.
+    The dashboard banner posts here; the helper runs detached so the request returns immediately."""
+    import shutil
+    helper = '/usr/local/bin/reconx-update'
+
+    if request.method == 'GET':
+        return jsonify({'available': os.path.exists(helper), 'helper': helper})
+
+    if not os.path.exists(helper):
+        return jsonify({
+            'started': False,
+            'error': 'Update helper not installed. Re-run installer/deploy.py on the controller.',
+        }), 503
+
+    sudo = shutil.which('sudo') or '/usr/bin/sudo'
+    try:
+        subprocess.Popen(
+            [sudo, '-n', helper],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        return jsonify({'started': False, 'error': str(e)}), 500
+
+    return jsonify({
+        'started': True,
+        'message': 'Update started. Services will restart in 30–90s.',
+    })
 
 
 # ==================== WEBSOCKET HANDLERS ====================

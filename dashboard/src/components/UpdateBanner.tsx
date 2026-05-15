@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { BUILD_SHA, REPO_SLUG, fetchLatestUpstreamSha } from '../lib/buildInfo'
+import { updater } from '../lib/reconApi'
 
 const SEEN_KEY = 'reconx.update.seenSha.v1'
 const CHECK_INTERVAL_MS = 5 * 60 * 1000 // 5 min
@@ -8,6 +9,9 @@ type Status =
   | { kind: 'idle' }
   | { kind: 'newer'; sha: string }
   | { kind: 'modal'; sha: string }
+  | { kind: 'running'; sha: string }
+  | { kind: 'started'; sha: string; message: string }
+  | { kind: 'error'; sha: string; error: string }
 
 export function UpdateBanner() {
   const [status, setStatus] = useState<Status>({ kind: 'idle' })
@@ -34,11 +38,25 @@ export function UpdateBanner() {
   if (!REPO_SLUG) return null
   if (status.kind === 'idle') return null
 
-  const sha = status.kind === 'newer' ? status.sha : status.kind === 'modal' ? status.sha : ''
+  const sha = status.kind !== 'idle' ? status.sha : ''
   const dismiss = () => {
     window.localStorage.setItem(SEEN_KEY, sha)
     setSeen(sha)
     setStatus({ kind: 'idle' })
+  }
+
+  async function installNow() {
+    setStatus({ kind: 'running', sha })
+    try {
+      const r = await updater.trigger()
+      if (r.started) {
+        setStatus({ kind: 'started', sha, message: r.message ?? 'Update started.' })
+      } else {
+        setStatus({ kind: 'error', sha, error: r.error ?? 'Update failed to start.' })
+      }
+    } catch (e) {
+      setStatus({ kind: 'error', sha, error: e instanceof Error ? e.message : String(e) })
+    }
   }
 
   return (
@@ -72,30 +90,71 @@ export function UpdateBanner() {
               </div>
             </header>
             <p style={{ margin: '.5rem 0', fontSize: '.85rem', color: 'var(--muted)', lineHeight: 1.5 }}>
-              The dashboard can't update itself — the controller VPS owns the build. To install:
-            </p>
-            <ol style={{ margin: '.25rem 0 .75rem 1rem', fontSize: '.85rem', color: 'var(--text-strong)', lineHeight: 1.6 }}>
-              <li>SSH to the controller</li>
-              <li><code>cd /opt/reconx && git pull</code></li>
-              <li><code>sudo python3 installer/deploy.py</code></li>
-            </ol>
-            <p style={{ margin: '.25rem 0', fontSize: '.78rem', color: 'var(--muted)' }}>
-              The installer is idempotent — it rebuilds the dashboard + scanner binary and restarts services.
+              The controller will <code>git pull</code> and re-run the installer.
+              Services restart in ~30–90s; the dashboard will briefly disconnect.
             </p>
             <div className="settings-btn-row" style={{ marginTop: '.85rem' }}>
-              <button type="button" className="btn-primary" onClick={() => {
-                window.open(`https://github.com/${REPO_SLUG}/compare/${BUILD_SHA}...${sha}`, '_blank')
-              }}>
-                View diff on GitHub
+              <button type="button" className="btn-primary" onClick={installNow}>
+                Install update now
               </button>
               <button type="button" className="btn-secondary" onClick={() => {
-                navigator.clipboard?.writeText(`cd /opt/reconx && git pull && sudo python3 installer/deploy.py`)
+                window.open(`https://github.com/${REPO_SLUG}/compare/${BUILD_SHA}...${sha}`, '_blank')
               }}>
-                Copy install command
+                View diff
               </button>
               <button type="button" className="btn-glass" onClick={dismiss}>
                 Skip this version
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {status.kind === 'running' && (
+        <div className="cw-hub-modal__backdrop" role="dialog" aria-modal="true">
+          <div className="cw-hub-modal update-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: 0 }}>Triggering update…</h3>
+            <p className="muted" style={{ margin: '.5rem 0 0', fontSize: '.85rem' }}>
+              Calling the controller's update helper.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {status.kind === 'started' && (
+        <div className="cw-hub-modal__backdrop" role="dialog" aria-modal="true" onClick={dismiss}>
+          <div className="cw-hub-modal update-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: 0, color: 'var(--ok)' }}>Update started ✓</h3>
+            <p style={{ margin: '.5rem 0', fontSize: '.85rem' }}>
+              {status.message} The dashboard will reload when it's back.
+            </p>
+            <p className="muted" style={{ fontSize: '.78rem', margin: '.25rem 0' }}>
+              Target SHA: <code>{sha}</code>
+            </p>
+            <div className="settings-btn-row" style={{ marginTop: '.75rem' }}>
+              <button type="button" className="btn-primary" onClick={() => window.location.reload()}>
+                Reload now
+              </button>
+              <button type="button" className="btn-glass" onClick={dismiss}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {status.kind === 'error' && (
+        <div className="cw-hub-modal__backdrop" role="dialog" aria-modal="true" onClick={dismiss}>
+          <div className="cw-hub-modal update-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: 0, color: 'var(--danger)' }}>Update failed to start</h3>
+            <p style={{ margin: '.5rem 0', fontSize: '.85rem' }}>{status.error}</p>
+            <p className="muted" style={{ fontSize: '.78rem', margin: '.25rem 0', lineHeight: 1.5 }}>
+              Fallback — SSH to the controller and run:
+              <br />
+              <code>sudo /usr/local/bin/reconx-update</code>
+            </p>
+            <div className="settings-btn-row" style={{ marginTop: '.75rem' }}>
+              <button type="button" className="btn-glass" onClick={dismiss}>Close</button>
             </div>
           </div>
         </div>

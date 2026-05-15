@@ -32,6 +32,7 @@ SERVICE_USER   = os.environ.get('RECONX_USER', 'reconx')
 DASH_PORT      = int(os.environ.get('RECONX_DASH_PORT', '5000'))
 FLEET_PORT     = int(os.environ.get('RECONX_FLEET_PORT', '8787'))
 HTTP_PORT      = int(os.environ.get('RECONX_HTTP_PORT', '80'))
+REPO_SLUG      = os.environ.get('RECONX_REPO', 'aidanbaker812-prog/scanscanscannn')
 SOURCE_DIR     = Path(__file__).resolve().parent.parent  # project root
 GREEN, YELLOW, RED, RESET = '\033[0;32m', '\033[0;33m', '\033[0;31m', '\033[0m'
 
@@ -151,7 +152,8 @@ def build_dashboard(args: argparse.Namespace) -> None:
         return
     dash = INSTALL_DIR / 'dashboard'
     run(['npm', 'ci', '--no-audit', '--no-fund', '--prefer-offline'], user=SERVICE_USER, cwd=dash)
-    run(['npm', 'run', 'build'], user=SERVICE_USER, cwd=dash)
+    run(['npm', 'run', 'build'], user=SERVICE_USER, cwd=dash,
+        env={'RECONX_REPO': REPO_SLUG})
 
 
 def build_scanner(args: argparse.Namespace) -> None:
@@ -297,6 +299,25 @@ def write_nginx_site() -> None:
     run(['nginx', '-t'])
 
 
+def install_update_helper() -> None:
+    log('installing /usr/local/bin/reconx-update + sudoers rule…')
+    script = textwrap.dedent(f'''\
+        #!/bin/bash
+        set -euo pipefail
+        cd {INSTALL_DIR}
+        git fetch --quiet origin main
+        git reset --hard origin/main
+        exec /usr/bin/python3 {INSTALL_DIR}/installer/deploy.py --skip-system
+    ''')
+    target = Path('/usr/local/bin/reconx-update')
+    target.write_text(script)
+    target.chmod(0o755)
+
+    sudoers = f'{SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/reconx-update\n'
+    Path('/etc/sudoers.d/reconx-update').write_text(sudoers)
+    Path('/etc/sudoers.d/reconx-update').chmod(0o440)
+
+
 def start_services(args: argparse.Namespace) -> None:
     log('starting services…')
     if args.dry_run:
@@ -340,6 +361,8 @@ def main() -> int:
     pub_key = setup_ssh_key()
     write_systemd_units()
     write_nginx_site()
+    if not args.dry_run:
+        install_update_helper()
     start_services(args)
 
     public_ip = subprocess.check_output(['hostname', '-I']).decode().split()[0]

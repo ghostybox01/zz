@@ -354,4 +354,9 @@ export const fleetBulkCreds = {
   },
 }
 
+export const updater = {
+  check: () => getJson<{ available: boolean; helper: string }>('/update'),
+  trigger: () => postJson<{ started: boolean; message?: string; error?: string }>('/update'),
+}
+
 export { ReconApiError }
