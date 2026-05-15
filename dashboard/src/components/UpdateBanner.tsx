@@ -38,7 +38,7 @@ export function UpdateBanner() {
   if (!REPO_SLUG) return null
   if (status.kind === 'idle') return null
 
-  const sha = status.kind !== 'idle' ? status.sha : ''
+  const sha = status.sha
   const dismiss = () => {
     window.localStorage.setItem(SEEN_KEY, sha)
     setSeen(sha)
