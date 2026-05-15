@@ -167,10 +167,10 @@ def build_scanner(args: argparse.Namespace) -> None:
         sum_file.unlink()
     if not (backend / 'go.mod').exists():
         run(['go', 'mod', 'init', 'reconx-scanner'], user=SERVICE_USER, cwd=backend, check=False)
-    run(['go', 'mod', 'tidy'], user=SERVICE_USER, cwd=backend, check=False)
+    go_env = {'GOOS': 'linux', 'GOARCH': 'amd64', 'GOTOOLCHAIN': 'local'}
+    run(['go', 'mod', 'tidy'], user=SERVICE_USER, cwd=backend, check=False, env=go_env)
     run(['go', 'build', '-o', 'reconx-scanner', 'main.go'],
-        user=SERVICE_USER, cwd=backend,
-        env={'GOOS': 'linux', 'GOARCH': 'amd64'})
+        user=SERVICE_USER, cwd=backend, env=go_env)
 
 
 def setup_ssh_key() -> str:
