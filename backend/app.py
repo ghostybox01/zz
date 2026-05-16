@@ -395,14 +395,19 @@ def api_vps_servers():
 
 @app.route('/api/vps/status')
 def api_vps_status():
-    """Get status of all VPS servers"""
+    """Get status of all VPS servers.
+
+    Reads the in-memory snapshot maintained by SSHManager's monitor
+    thread; does NOT trigger a fresh probe. That keeps this endpoint
+    O(roster size) and well under any client-side timeout, even when
+    individual workers are unreachable."""
     manager = get_ssh_manager()
     if not manager:
         return jsonify({'error': 'SSH not available'}), 503
-    
-    servers = manager.get_all_status()
+
+    servers = manager.get_cached_status()
     stats = manager.get_global_stats()
-    
+
     return jsonify({
         'servers': servers,
         'stats': stats

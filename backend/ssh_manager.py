@@ -846,16 +846,34 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
         
         return status
     
+    def get_cached_status(self) -> List[dict]:
+        """Return the most recent status snapshot for every server in the
+        roster, without issuing a fresh SSH probe.
+
+        Used by /api/vps/status — the monitor thread (running every
+        monitor_interval seconds) keeps self.servers warm, so this is just
+        dict serialisation. For workers the monitor hasn't probed yet,
+        return a UNKNOWN-status stub so the row still appears in the UI."""
+        ips = self.load_servers()
+        with self.lock:
+            results = []
+            for ip in ips:
+                if ip in self.servers:
+                    results.append(self.servers[ip].to_dict())
+                else:
+                    results.append(ServerStatus(ip=ip).to_dict())
+        return results
+
     def get_all_status(self) -> List[dict]:
         ips = self.load_servers()
         results = []
-        
+
         threads = []
         for ip in ips:
             t = threading.Thread(target=self.fetch_server_status, args=(ip,))
             t.start()
             threads.append(t)
-        
+
         for t in threads:
             t.join(timeout=15)
         
