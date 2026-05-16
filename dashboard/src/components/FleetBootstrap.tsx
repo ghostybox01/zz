@@ -170,7 +170,7 @@ export function FleetBootstrap() {
 
       {error && <p className="settings-hint tg-hint tg-hint--err">{error}</p>}
 
-      {result && result.results.length > 0 && (
+      {result && result.results.length > 0 && !install && (
         <div className="fleet-boot__results">
           <table className="fleet-boot__table">
             <thead>
