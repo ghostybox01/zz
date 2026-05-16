@@ -60,7 +60,7 @@ export default function App() {
   const lastToastIdRef = useRef<string | null>(null)
   const [liveCfg, setLiveCfg] = useState<LiveSourceConfig>(() => loadLiveSource())
   const [fleetCfg, setFleetCfg] = useState<FleetControlConfig>(() => loadFleetControl())
-  const [liveTotals, setLiveTotals] = useState<LiveTotals>({
+  const [, setLiveTotals] = useState<LiveTotals>({
     liveDomains: 0,
     filesProcessed: 0,
     totalFindings: 0,
