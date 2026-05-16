@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { fleetBulkCreds, type BulkCredsResponse } from '../lib/reconApi'
+import { fleetBulkCreds, type BulkCredsResponse, type InstallKeysResponse } from '../lib/reconApi'
 
 const PLACEHOLDER = `# One per line. Lines starting with # are ignored.
 # Simplest — IP only (uses controller key + root):
@@ -16,23 +16,52 @@ deploy@198.51.100.21:2222:password:s3cretPass!`
 export function FleetBootstrap() {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
+  const [installing, setInstalling] = useState(false)
   const [result, setResult] = useState<BulkCredsResponse | null>(null)
+  /** Snapshot of the textarea contents at the moment Parse + test was clicked.
+   * The install-keys call reuses these exact lines so it tries the same
+   * passwords paramiko just verified. */
+  const [testedText, setTestedText] = useState<string>('')
+  const [install, setInstall] = useState<InstallKeysResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   async function runTest(payload: 'text' | File) {
     setBusy(true)
     setError(null)
+    setInstall(null)
     try {
-      const res = payload === 'text'
-        ? await fleetBulkCreds.testText(text)
-        : await fleetBulkCreds.testFile(payload)
-      setResult(res)
+      if (payload === 'text') {
+        setTestedText(text)
+        setResult(await fleetBulkCreds.testText(text))
+      } else {
+        setTestedText(await payload.text())
+        setResult(await fleetBulkCreds.testFile(payload))
+      }
     } catch (e) {
       setError((e as Error).message)
       setResult(null)
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function runInstallKeys() {
+    if (!testedText.trim()) return
+    setInstalling(true)
+    setError(null)
+    try {
+      const res = await fleetBulkCreds.installKeysText(testedText)
+      setInstall(res)
+      if (res.installed > 0) {
+        // Wipe plaintext passwords from the DOM once they've served their purpose.
+        setText('')
+        setTestedText('')
+      }
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setInstalling(false)
     }
   }
 
@@ -91,6 +120,49 @@ export function FleetBootstrap() {
           </span>
         )}
       </div>
+
+      {result && result.ok > 0 && testedText.trim() && (
+        <div className="settings-btn-row" style={{ marginTop: '.5rem' }}>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void runInstallKeys()}
+            disabled={installing || busy}
+            title="paramiko-connects with the tested password and appends the controller's id_ed25519.pub to ~user/.ssh/authorized_keys on each OK row"
+          >
+            {installing ? 'Installing…' : `Import to fleet — install controller key on ${result.ok} OK worker${result.ok === 1 ? '' : 's'}`}
+          </button>
+          {install && (
+            <span className="muted" style={{ alignSelf: 'center', fontSize: '.78rem' }}>
+              {install.installed} installed · {install.failed} failed · {install.skipped} skipped
+            </span>
+          )}
+        </div>
+      )}
+
+      {install && install.results.length > 0 && (
+        <div className="fleet-boot__results">
+          <table className="fleet-boot__table">
+            <thead>
+              <tr><th>Host</th><th>User</th><th>Status</th><th>Message</th></tr>
+            </thead>
+            <tbody>
+              {install.results.map((r, i) => (
+                <tr key={`k-${i}`} className={r.installed ? 'fleet-boot__row--ok' : 'fleet-boot__row--fail'}>
+                  <td className="mono">{r.host}</td>
+                  <td className="mono">{r.user}</td>
+                  <td>
+                    <span className={`pill ${r.installed ? 'pill--ok' : 'pill--muted'}`}>
+                      {r.installed ? 'KEY INSTALLED' : r.message.startsWith('skipped') ? 'SKIPPED' : 'FAIL'}
+                    </span>
+                  </td>
+                  <td className="muted" style={{ fontSize: '.75rem' }}>{r.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {error && <p className="settings-hint tg-hint tg-hint--err">{error}</p>}
 

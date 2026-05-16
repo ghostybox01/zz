@@ -1177,6 +1177,155 @@ def api_fleet_bulk_creds():
     })
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Fleet — install controller pubkey on password-auth workers
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _resolve_controller_pubkey() -> str:
+    """Return the controller's SSH public key contents (single line, stripped).
+
+    Looks at, in order:
+      1. backend/ssh_config.json `ssh_key_path` + ".pub"
+      2. <install_dir>/.ssh/id_ed25519.pub  (install-controller.sh layout)
+      3. ~/.ssh/id_ed25519.pub  (developer fallback)
+
+    Raises FileNotFoundError if none exist.
+    """
+    candidates = []
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ssh_config.json')
+    try:
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r') as f:
+                cfg = json.load(f)
+            kp = cfg.get('ssh_key_path')
+            if kp:
+                candidates.append(kp + '.pub')
+    except Exception:
+        pass
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   '..', '.ssh', 'id_ed25519.pub'))
+    candidates.append(os.path.expanduser('~/.ssh/id_ed25519.pub'))
+
+    for p in candidates:
+        try:
+            if p and os.path.exists(p):
+                with open(p, 'r') as f:
+                    pub = f.read().strip()
+                if pub:
+                    return pub
+        except Exception:
+            continue
+    raise FileNotFoundError(
+        'controller public key not found; checked: ' + ', '.join(candidates))
+
+
+@app.route('/api/fleet/install-keys', methods=['POST'])
+def api_fleet_install_keys():
+    """For each row that authenticates with a password, append the controller's
+    public key to the worker's `~user/.ssh/authorized_keys`. After this, the
+    controller can SSH into the worker with key auth (the mode fleet_api and
+    ssh_manager use by default).
+
+    Body: same shapes as /api/fleet/bulk-creds — form-file 'file', JSON
+    {"text": "..."}, or JSON {"creds": [...]}. Rows without a password are
+    skipped (no-op for already-key-authed hosts).
+    """
+    try:
+        import paramiko
+    except ImportError:
+        return jsonify({'error': 'paramiko not installed'}), 500
+
+    try:
+        pubkey = _resolve_controller_pubkey()
+    except FileNotFoundError as e:
+        return jsonify({'error': str(e)}), 500
+
+    body_text = ''
+    rows = []
+    if 'file' in request.files:
+        body_text = request.files['file'].read().decode('utf-8', errors='ignore')
+    elif request.is_json:
+        data = request.json or {}
+        if isinstance(data.get('text'), str):
+            body_text = data['text']
+        elif isinstance(data.get('creds'), list):
+            for c in data['creds']:
+                if not isinstance(c, dict) or not c.get('host'):
+                    continue
+                rows.append({
+                    'host': str(c.get('host')),
+                    'port': int(c.get('port') or 22),
+                    'user': str(c.get('user') or 'root'),
+                    'auth_kind': str(c.get('auth_kind') or 'password'),
+                    'secret': str(c.get('secret') or ''),
+                    'raw': str(c.get('host')),
+                })
+        else:
+            return jsonify({'error': 'send "text" or "creds"'}), 400
+    else:
+        body_text = request.get_data(as_text=True) or ''
+
+    if body_text:
+        rows = _parse_creds_text(body_text)
+    if not rows:
+        return jsonify({'error': 'no credential rows parsed'}), 400
+
+    # Shell that appends the pubkey idempotently. The single quotes around
+    # $KEY in the heredoc-style here-string would break if the key itself
+    # contained a single quote, so we pass it as stdin and use grep -F.
+    install_cmd = (
+        'umask 077 && '
+        'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && '
+        'touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" && '
+        'KEY=$(cat) && '
+        'grep -qxF "$KEY" "$HOME/.ssh/authorized_keys" || echo "$KEY" >> "$HOME/.ssh/authorized_keys"'
+    )
+
+    results = []
+    installed = 0
+    for r in rows:
+        out = {'host': r['host'], 'port': r['port'], 'user': r['user'],
+               'ok': False, 'installed': False, 'message': ''}
+        if r['auth_kind'] != 'password' or not r['secret']:
+            out['message'] = 'skipped — not a password row'
+            results.append(out)
+            continue
+        try:
+            cli = paramiko.SSHClient()
+            cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            cli.connect(hostname=r['host'], port=r['port'], username=r['user'],
+                        password=r['secret'], timeout=8, allow_agent=False,
+                        look_for_keys=False)
+            try:
+                stdin, stdout, stderr = cli.exec_command(install_cmd, timeout=10)
+                stdin.write(pubkey + '\n')
+                stdin.channel.shutdown_write()
+                exit_status = stdout.channel.recv_exit_status()
+                err = stderr.read().decode('utf-8', errors='replace').strip()
+                if exit_status == 0:
+                    out['ok'] = True
+                    out['installed'] = True
+                    out['message'] = 'controller key installed'
+                    installed += 1
+                else:
+                    out['message'] = f'install failed (exit {exit_status}): {err or "no stderr"}'
+            finally:
+                cli.close()
+        except Exception as e:
+            out['message'] = f'connect failed: {e}'
+        results.append(out)
+
+    return jsonify({
+        'total': len(rows),
+        'installed': installed,
+        'skipped': sum(1 for r in results if not r['installed'] and r['message'].startswith('skipped')),
+        'failed': sum(1 for r in results if not r['ok'] and not r['message'].startswith('skipped')),
+        'results': results,
+    })
+
+
+
 # ==================== SCANNER PATH FILE ====================
 
 SCANNER_PATHS_FILE = 'paths.txt'

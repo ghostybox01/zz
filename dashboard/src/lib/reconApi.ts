@@ -347,6 +347,23 @@ export type BulkCredsResponse = {
   added_to_roster: number
 }
 
+export type InstallKeyResult = {
+  host: string
+  port: number
+  user: string
+  ok: boolean
+  installed: boolean
+  message: string
+}
+
+export type InstallKeysResponse = {
+  total: number
+  installed: number
+  skipped: number
+  failed: number
+  results: InstallKeyResult[]
+}
+
 export const fleetBulkCreds = {
   testText: (text: string) =>
     postJson<BulkCredsResponse>('/fleet/bulk-creds', { text }),
@@ -363,6 +380,8 @@ export const fleetBulkCreds = {
     }
     return (await res.json()) as BulkCredsResponse
   },
+  installKeysText: (text: string) =>
+    postJson<InstallKeysResponse>('/fleet/install-keys', { text }),
 }
 
 export const updater = {
