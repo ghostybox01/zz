@@ -514,6 +514,11 @@
   color: var(--muted);
 }
 
+.pill--err {
+  border-color: color-mix(in srgb, var(--danger), var(--border) 35%);
+  color: var(--danger);
+}
+
 .inline-code {
   font-family: var(--mono);
   font-size: 0.8em;

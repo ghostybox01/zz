@@ -147,18 +147,22 @@ export function FleetBootstrap() {
               <tr><th>Host</th><th>User</th><th>Status</th><th>Message</th></tr>
             </thead>
             <tbody>
-              {install.results.map((r, i) => (
+              {install.results.map((r, i) => {
+                const skipped = r.message.startsWith('skipped')
+                const pillClass = r.installed ? 'pill--ok' : skipped ? 'pill--muted' : 'pill--err'
+                return (
                 <tr key={`k-${i}`} className={r.installed ? 'fleet-boot__row--ok' : 'fleet-boot__row--fail'}>
                   <td className="mono">{r.host}</td>
                   <td className="mono">{r.user}</td>
                   <td>
-                    <span className={`pill ${r.installed ? 'pill--ok' : 'pill--muted'}`}>
-                      {r.installed ? 'KEY INSTALLED' : r.message.startsWith('skipped') ? 'SKIPPED' : 'FAIL'}
+                    <span className={`pill ${pillClass}`}>
+                      {r.installed ? 'KEY INSTALLED' : skipped ? 'SKIPPED' : 'FAIL'}
                     </span>
                   </td>
                   <td className="muted" style={{ fontSize: '.75rem' }}>{r.message}</td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -185,7 +189,7 @@ export function FleetBootstrap() {
                   <td className="mono">{r.user}</td>
                   <td className="mono">{r.port}</td>
                   <td>
-                    <span className={`pill ${r.ok ? 'pill--ok' : 'pill--muted'}`}>
+                    <span className={`pill ${r.ok ? 'pill--ok' : 'pill--err'}`}>
                       {r.ok ? 'OK' : 'FAIL'}
                     </span>
                   </td>
