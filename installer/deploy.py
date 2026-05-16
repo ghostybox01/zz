@@ -309,7 +309,8 @@ def write_nginx_site() -> None:
                 proxy_set_header   X-Real-IP         $remote_addr;
                 proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
                 proxy_set_header   X-Forwarded-Proto $scheme;
-                proxy_read_timeout 90s;
+                proxy_read_timeout 300s;
+                proxy_send_timeout 300s;
             }}
 
             location /socket.io/ {{
