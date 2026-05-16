@@ -104,7 +104,12 @@ class SSHManager:
         self._fleet_creds: Dict[str, dict] = {}
         self._fleet_creds_mtime: float = 0.0
         self._reload_fleet_creds_if_changed()
-        
+        # Sticky status — a worker has to miss two consecutive probes before
+        # its card flips to UNREACHABLE, so a single transient blip doesn't
+        # make every card flap RECONNECT↔HEALTHY.
+        self._consecutive_misses: Dict[str, int] = {}
+        self._sticky_threshold = 2
+
         self.junk_patterns = [
             'mysqli.', 'mysql.', 'pdo_mysql.', 'pdo.', 'session.', 'mail.', 'smtp.',
             'sendmail', 'default_socket', 'default_port', 'allow_persistent',
@@ -802,11 +807,37 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
         result_dir = self.config.get("result_subdir", "ResultJS")
         dedup_file = self.config.get("dedup_file", "dedup_log.txt")
         batch_size = self.config.get("batch_size", 100000)
-        
+
+        # Reachability gate — try a real SSH session before issuing the
+        # nine status queries. If this fails, we know the box is
+        # unreachable and can apply the sticky-status rule (one miss is
+        # kept quiet; two consecutive misses flip the card to UNREACHABLE).
+        try:
+            ssh = self._get_pooled_ssh(ip, self.config.get("ssh_timeout", 5))
+            stdin, stdout, _ = ssh.exec_command("true", timeout=5)
+            stdout.channel.recv_exit_status()
+        except Exception as e:
+            with self.lock:
+                misses = self._consecutive_misses.get(ip, 0) + 1
+                self._consecutive_misses[ip] = misses
+                if misses < self._sticky_threshold and ip in self.servers:
+                    prev = self.servers[ip]
+                    prev.last_update = datetime.now().strftime('%H:%M:%S')
+                    return prev
+                status.status = "UNREACHABLE"
+                status.error = str(e)[:80] or 'ssh probe failed'
+                status.last_update = datetime.now().strftime('%H:%M:%S')
+                self.servers[ip] = status
+            return status
+
+        # Probe succeeded — reset the miss counter for this host.
+        with self.lock:
+            self._consecutive_misses[ip] = 0
+
         try:
             main_pid = self.ssh_exec(ip, "pgrep -f 'python.*main.py' | head -1", 5)
             batch_pid = self.ssh_exec(ip, "pgrep -f 'batch_runner.sh' | head -1", 5)
-            
+
             if main_pid or batch_pid:
                 status.status = "RUNNING"
                 pid = main_pid or batch_pid
@@ -816,7 +847,12 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
                 if complete_check and complete_check.isdigit() and int(complete_check) > 0:
                     status.status = "COMPLETED"
                 else:
-                    status.status = "STOPPED"
+                    # Reachable but no scanner — surface as IDLE so the UI
+                    # shows healthy (frontend mapStatus treats IDLE as
+                    # healthy). The legacy "STOPPED" string used to fall
+                    # through mapStatus's default and render as RECONNECT,
+                    # which made every healthy idle worker look broken.
+                    status.status = "IDLE"
             
             batches_pending = int(self.ssh_exec(ip, f"ls {work_dir}/batch_*.txt 2>/dev/null | wc -l", 5) or 0)
             batches_done = int(self.ssh_exec(ip, f"ls {work_dir}/batch_*.txt.done 2>/dev/null | wc -l", 5) or 0)
@@ -939,9 +975,9 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
         with self.lock:
             total_servers = len(self.servers)
             running = sum(1 for s in self.servers.values() if s.status == "RUNNING")
-            stopped = sum(1 for s in self.servers.values() if s.status == "STOPPED")
+            stopped = sum(1 for s in self.servers.values() if s.status in ("STOPPED", "IDLE"))
             completed = sum(1 for s in self.servers.values() if s.status == "COMPLETED")
-            errors = sum(1 for s in self.servers.values() if s.status in ["ERROR", "TIMEOUT"])
+            errors = sum(1 for s in self.servers.values() if s.status in ["ERROR", "TIMEOUT", "UNREACHABLE"])
             total_scanned = sum(s.scanned for s in self.servers.values())
             total_hits = sum(s.hits for s in self.servers.values())
             total_targets = sum(s.targets for s in self.servers.values())

@@ -12,6 +12,7 @@ from flask_socketio import SocketIO, emit
 import sqlite3
 import threading
 import time
+import socket
 from datetime import datetime
 import os
 import re
@@ -990,6 +991,26 @@ def _remember_worker(host: str, port: int, user: str, auth_kind: str) -> None:
     _save_fleet_creds(creds)
 
 
+def _tcp_reachable(host: str, port: int, timeout: float = 2.0):
+    """Quick TCP-level reachability probe — returns (ok, message).
+
+    Lets the bulk-creds / install-keys endpoints fast-fail a host whose
+    sshd isn't listening, instead of burning paramiko's full
+    banner/auth-timeout budget. The message is human-readable so it can
+    go straight into the per-row status table."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, ''
+    except socket.timeout:
+        return False, f'TCP timeout — no response from port {port} in {timeout:g}s'
+    except socket.gaierror as e:
+        return False, f'DNS resolution failed: {e}'
+    except ConnectionRefusedError:
+        return False, f'connection refused on port {port} (sshd not listening?)'
+    except OSError as e:
+        return False, f'TCP error: {e}'
+
+
 _DELIM_PREFER = ('|', '\t', ';', ' ', ':')
 _PEM_HEAD = '-----BEGIN'
 
@@ -1170,6 +1191,13 @@ def api_fleet_bulk_creds():
     accepted_ips = []
     for r in rows:
         result = {'host': r['host'], 'port': r['port'], 'user': r['user'], 'ok': False, 'message': ''}
+        # Cheap reachability gate first so dead hosts don't eat the full
+        # paramiko banner-timeout budget per row.
+        tcp_ok, tcp_err = _tcp_reachable(r['host'], r['port'], timeout=2.5)
+        if not tcp_ok:
+            result['message'] = tcp_err
+            results.append(result)
+            continue
         try:
             cli = paramiko.SSHClient()
             cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1334,6 +1362,11 @@ def api_fleet_install_keys():
                'ok': False, 'installed': False, 'message': ''}
         if r['auth_kind'] != 'password' or not r['secret']:
             out['message'] = 'skipped — not a password row'
+            results.append(out)
+            continue
+        tcp_ok, tcp_err = _tcp_reachable(r['host'], r['port'], timeout=2.5)
+        if not tcp_ok:
+            out['message'] = tcp_err
             results.append(out)
             continue
         try:
