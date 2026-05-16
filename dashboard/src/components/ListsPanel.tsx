@@ -3,6 +3,7 @@ import type { TargetList, VpsNode } from '../types'
 import { ListCard } from './ListCard'
 import { makeListId, readListFile } from '../lib/listsStorage'
 import { setListBody } from '../lib/listBodyCache'
+import { vps as reconVps } from '../lib/reconApi'
 
 type Props = {
   lists: readonly TargetList[]
@@ -15,13 +16,16 @@ type Props = {
 
 type UploadError = { kind: 'duplicate' | 'empty' | 'too-large' | 'read'; message: string } | null
 
-const MAX_BYTES = 24 * 1024 * 1024 // 24 MiB cap on a single upload — bigger should be split server-side
+// Files above this threshold are streamed to the backend in chunks instead of loaded into the browser.
+const CHUNK_THRESHOLD = 20 * 1024 * 1024   // 20 MiB
+const CHUNK_SIZE      = 5 * 1024 * 1024    // 5 MiB per request
 
 export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeploy }: Props) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const [error, setError] = useState<UploadError>(null)
   const [filter, setFilter] = useState<'all' | 'deployed' | 'idle' | 'completed'>('all')
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
 
   const filtered = useMemo(() => {
     switch (filter) {
@@ -56,10 +60,13 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
       setError({ kind: 'empty', message: 'File is empty.' })
       return
     }
-    if (file.size > MAX_BYTES) {
-      setError({ kind: 'too-large', message: `File is ${(file.size / 1024 / 1024).toFixed(1)} MiB — keep uploads under ${MAX_BYTES / 1024 / 1024} MiB and split server-side for bigger sets.` })
+
+    // Large file path — stream chunks to the backend, assemble there.
+    if (file.size > CHUNK_THRESHOLD) {
+      await ingestLarge(file)
       return
     }
+
     let parsed
     try {
       parsed = await readListFile(file)
@@ -88,6 +95,48 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     }
     onUpload(next)
     setListBody(next.id, parsed.body)
+  }
+
+  async function ingestLarge(file: File) {
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+    const uploadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
+
+    // Read preview from the first ~4 KB without loading the whole file.
+    const previewText = await file.slice(0, 4096).text()
+    const preview = previewText.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 6)
+
+    setUploadProgress(0)
+    try {
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE
+        const content = await file.slice(start, start + CHUNK_SIZE).text()
+        await reconVps.uploadChunk(uploadId, i, totalChunks, content)
+        setUploadProgress(Math.round(((i + 1) / totalChunks) * 95))
+      }
+
+      const result = await reconVps.finalizeUpload(uploadId, totalChunks, file.name)
+      setUploadProgress(100)
+
+      const next: TargetList = {
+        id: makeListId(),
+        name: file.name,
+        uploadedAt: new Date().toISOString(),
+        lineCount: result.targets,
+        contentHash: `server-${uploadId}`,
+        preview,
+        assignedVpsIds: [],
+        status: 'idle',
+        note: 'Uploaded via chunked transfer — list body is on the server as targets.txt',
+      }
+      onUpload(next)
+    } catch (e) {
+      setError({
+        kind: 'too-large',
+        message: `Chunked upload failed: ${(e as Error).message}. For very large lists without a connected backend, use SCP: scp your-list.txt root@<vps-ip>:/opt/reconx/targets.txt`,
+      })
+    } finally {
+      setUploadProgress(null)
+    }
   }
 
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
@@ -154,13 +203,27 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
           <div>
             <strong>Drop a target list here</strong>
             <p className="lists-upload__hint">
-              Plain <code className="inline-code">.txt</code>, one host per line. Dedup is content-hash based — re-uploading the same file is rejected.
+              Plain <code className="inline-code">.txt</code>, one host per line.
+              Files over 20 MiB are streamed to the backend in chunks — supports 1–2 GB lists.
             </p>
           </div>
-          <button type="button" className="btn-primary btn-glass" onClick={() => fileRef.current?.click()}>
+          <button
+            type="button"
+            className="btn-primary btn-glass"
+            disabled={uploadProgress !== null}
+            onClick={() => fileRef.current?.click()}
+          >
             Browse .txt
           </button>
         </div>
+        {uploadProgress !== null && (
+          <div className="lists-upload__progress">
+            <div className="lists-upload__progress-bar" style={{ width: `${uploadProgress}%` }} />
+            <span className="lists-upload__progress-label">
+              {uploadProgress < 100 ? `Uploading… ${uploadProgress}%` : 'Finalizing…'}
+            </span>
+          </div>
+        )}
         {error && (
           <p className={`lists-upload__error lists-upload__error--${error.kind}`}>
             {error.kind === 'duplicate' ? '⚠ ' : '✗ '}{error.message}

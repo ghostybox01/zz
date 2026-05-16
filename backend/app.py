@@ -17,6 +17,7 @@ import os
 import re
 import json
 import subprocess
+import shutil
 
 # Import SSH Manager
 try:
@@ -591,6 +592,64 @@ def api_vps_upload_targets():
         count = sum(1 for line in f if line.strip())
     
     return jsonify({'success': True, 'filename': file.filename, 'targets': count})
+
+@app.route('/api/vps/upload-chunk', methods=['POST'])
+def api_vps_upload_chunk():
+    """Accept one 5 MB chunk of a large target-list upload."""
+    data = request.get_json(force=True, silent=True) or {}
+    upload_id = str(data.get('upload_id', ''))
+    chunk_index = int(data.get('chunk_index', -1))
+    content = data.get('content', '')
+
+    if not re.match(r'^[a-zA-Z0-9_-]{8,64}$', upload_id):
+        return jsonify({'error': 'Invalid upload_id'}), 400
+    if chunk_index < 0:
+        return jsonify({'error': 'Invalid chunk_index'}), 400
+
+    chunk_dir = f'/tmp/reconx_{upload_id}'
+    os.makedirs(chunk_dir, exist_ok=True)
+    chunk_path = os.path.join(chunk_dir, f'{chunk_index:08d}')
+
+    with open(chunk_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    return jsonify({'ok': True, 'chunk': chunk_index})
+
+
+@app.route('/api/vps/finalize-upload', methods=['POST'])
+def api_vps_finalize_upload():
+    """Assemble chunks written by /upload-chunk into targets.txt."""
+    data = request.get_json(force=True, silent=True) or {}
+    upload_id = str(data.get('upload_id', ''))
+    total_chunks = int(data.get('total_chunks', 0))
+    filename = str(data.get('filename', 'targets.txt'))
+
+    if not re.match(r'^[a-zA-Z0-9_-]{8,64}$', upload_id):
+        return jsonify({'error': 'Invalid upload_id'}), 400
+
+    chunk_dir = f'/tmp/reconx_{upload_id}'
+    if not os.path.isdir(chunk_dir):
+        return jsonify({'error': 'Upload session not found — chunks may have expired'}), 404
+
+    target_path = 'targets.txt'
+    count = 0
+    try:
+        with open(target_path, 'w', encoding='utf-8') as out:
+            for i in range(total_chunks):
+                chunk_path = os.path.join(chunk_dir, f'{i:08d}')
+                if not os.path.exists(chunk_path):
+                    return jsonify({'error': f'Missing chunk {i}'}), 400
+                with open(chunk_path, 'r', encoding='utf-8') as cf:
+                    for line in cf:
+                        stripped = line.strip()
+                        if stripped:
+                            out.write(stripped + '\n')
+                            count += 1
+    finally:
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+
+    return jsonify({'success': True, 'filename': filename, 'targets': count})
+
 
 @app.route('/api/vps/test-ssh', methods=['POST'])
 def api_vps_test_ssh():

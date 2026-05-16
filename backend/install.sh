@@ -324,11 +324,14 @@ cat > /etc/nginx/sites-available/$SERVICE_NAME << EOFNGINX
 server {
     listen 80;
     server_name $SERVER_IP;
+    client_max_body_size 10m;
     location / {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
     }
     location /socket.io {
         proxy_pass http://127.0.0.1:$PORT/socket.io;

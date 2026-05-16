@@ -13,7 +13,7 @@ worker_class = "eventlet"  # For WebSocket support
 worker_connections = 1000
 max_requests = 1000
 max_requests_jitter = 50
-timeout = 120
+timeout = 300
 keepalive = 5
 
 # Logging — send to stdout/stderr so systemd-journald captures everything
