@@ -839,6 +839,112 @@ def api_telegram_test():
         return jsonify({'success': False, 'error': str(e)}), 502
 
 
+# ── Cloudflare R2 upload ───────────────────────────────────────────────────
+R2_CONFIG_KEY = 'r2'
+
+def _get_r2_client():
+    """Return (boto3_client, bucket_name) or (None, None) if R2 not configured."""
+    cfg = _load_scanner_config()
+    r2 = cfg.get(R2_CONFIG_KEY, {})
+    account_id  = r2.get('account_id', '').strip()
+    access_key  = r2.get('access_key_id', '').strip()
+    secret_key  = r2.get('secret_access_key', '').strip()
+    bucket      = r2.get('bucket_name', '').strip()
+    if not all([account_id, access_key, secret_key, bucket]):
+        return None, None
+    try:
+        import boto3
+        client = boto3.client(
+            's3',
+            endpoint_url=f'https://{account_id}.r2.cloudflarestorage.com',
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name='auto',
+        )
+        return client, bucket
+    except Exception:
+        return None, None
+
+
+@app.route('/api/upload/r2-config', methods=['GET', 'POST'])
+def api_r2_config():
+    """Read or write R2 credentials in config.json."""
+    cfg = _load_scanner_config()
+    if request.method == 'POST':
+        data = request.get_json(force=True, silent=True) or {}
+        cfg[R2_CONFIG_KEY] = {
+            'account_id':       str(data.get('account_id', '')).strip(),
+            'access_key_id':    str(data.get('access_key_id', '')).strip(),
+            'secret_access_key':str(data.get('secret_access_key', '')).strip(),
+            'bucket_name':      str(data.get('bucket_name', '')).strip(),
+        }
+        with open(SCANNER_CONFIG_PATH, 'w') as f:
+            json.dump(cfg, f, indent=2)
+    r2 = cfg.get(R2_CONFIG_KEY, {})
+    return jsonify({
+        'account_id':    r2.get('account_id', ''),
+        'access_key_id': r2.get('access_key_id', ''),
+        'secret_access_key': '●' * 8 if r2.get('secret_access_key') else '',
+        'bucket_name':   r2.get('bucket_name', ''),
+        'configured':    bool(r2.get('account_id') and r2.get('access_key_id') and r2.get('secret_access_key') and r2.get('bucket_name')),
+    })
+
+
+@app.route('/api/upload/presign', methods=['GET'])
+def api_upload_presign():
+    """Generate a pre-signed PUT URL for direct browser → R2 upload."""
+    client, bucket = _get_r2_client()
+    if not client:
+        return jsonify({'error': 'R2 not configured'}), 503
+    import uuid as _uuid
+    filename   = request.args.get('filename', 'targets.txt')
+    upload_id  = _uuid.uuid4().hex
+    key        = f'uploads/{upload_id}/{filename}'
+    try:
+        url = client.generate_presigned_url(
+            'put_object',
+            Params={'Bucket': bucket, 'Key': key, 'ContentType': 'text/plain'},
+            ExpiresIn=7200,
+        )
+        return jsonify({'url': url, 'key': key, 'upload_id': upload_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload/complete', methods=['POST'])
+def api_upload_complete():
+    """Download the uploaded file from R2, save as targets.txt, return line count + preview."""
+    client, bucket = _get_r2_client()
+    if not client:
+        return jsonify({'error': 'R2 not configured'}), 503
+    data     = request.get_json(force=True, silent=True) or {}
+    key      = str(data.get('key', ''))
+    filename = str(data.get('filename', 'targets.txt'))
+    if not key:
+        return jsonify({'error': 'key required'}), 400
+    try:
+        obj      = client.get_object(Bucket=bucket, Key=key)
+        body     = obj['Body']
+        count    = 0
+        preview  = []
+        with open('targets.txt', 'w', encoding='utf-8') as out:
+            for raw_line in body.iter_lines():
+                line = raw_line.decode('utf-8', errors='replace').strip()
+                if line:
+                    out.write(line + '\n')
+                    count += 1
+                    if len(preview) < 6:
+                        preview.append(line)
+        # Clean up from R2 after processing
+        try:
+            client.delete_object(Bucket=bucket, Key=key)
+        except Exception:
+            pass
+        return jsonify({'success': True, 'targets': count, 'preview': preview, 'filename': filename})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== SSH BULK CREDS ====================
 
 

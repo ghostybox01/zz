@@ -370,4 +370,20 @@ export const updater = {
   trigger: () => postJson<{ started: boolean; message?: string; error?: string }>('/update'),
 }
 
+/* ── R2 upload ───────────────────────────────────────────────────────── */
+export type R2Config = {
+  account_id: string
+  access_key_id: string
+  secret_access_key: string
+  bucket_name: string
+  configured: boolean
+}
+
+export const r2 = {
+  getConfig: () => getJson<R2Config>('/upload/r2-config'),
+  saveConfig: (cfg: Omit<R2Config, 'configured'>) => postJson<R2Config>('/upload/r2-config', cfg),
+  presign: (filename: string) => getJson<{ url: string; key: string; upload_id: string }>(`/upload/presign?filename=${encodeURIComponent(filename)}`),
+  complete: (key: string, filename: string) => postJson<{ success: boolean; targets: number; preview: string[]; filename: string }>('/upload/complete', { key, filename }),
+}
+
 export { ReconApiError }

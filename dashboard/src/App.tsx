@@ -18,6 +18,7 @@ import { TelegramSettings } from './components/TelegramSettings'
 import { FleetBootstrap } from './components/FleetBootstrap'
 import { UpdateBanner } from './components/UpdateBanner'
 import { UpdateSettings } from './components/UpdateSettings'
+import { R2Settings } from './components/R2Settings'
 import { StartupCheck, shouldSkipStartupCheck } from './components/StartupCheck'
 import { ScannerConfigPanel } from './components/ScannerConfigPanel'
 import { ScannerLimitsSettings } from './components/ScannerLimitsSettings'
@@ -947,6 +948,13 @@ export default function App() {
                         · Shard on Cracker after uploading targets here.
                       </p>
                     </section>
+                  </div>
+                </details>
+
+                <details className="settings-acc" open>
+                  <summary>Storage · Cloudflare R2</summary>
+                  <div className="settings-acc__body">
+                    <R2Settings />
                   </div>
                 </details>
 

@@ -4638,6 +4638,40 @@
   color: #fff;
 }
 
+.kv__row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.75rem;
+}
+.kv__label {
+  font-size: 0.8rem;
+  color: var(--muted, #888);
+  font-weight: 500;
+}
+.kv__input {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  color: #fff;
+  font-size: 0.88rem;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.kv__input:focus {
+  outline: none;
+  border-color: var(--accent, #00e5a0);
+}
+.kv__input::placeholder {
+  color: rgba(255,255,255,0.25);
+}
+.kv--form {
+  margin: 1rem 0;
+}
+
 /* Filter row reuses .scan-filter from the scan list */
 
 .lists-filter-row {

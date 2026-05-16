@@ -3,7 +3,7 @@ import type { TargetList, VpsNode } from '../types'
 import { ListCard } from './ListCard'
 import { makeListId, readListFile } from '../lib/listsStorage'
 import { setListBody } from '../lib/listBodyCache'
-import { vps as reconVps } from '../lib/reconApi'
+import { vps as reconVps, r2 } from '../lib/reconApi'
 
 type Props = {
   lists: readonly TargetList[]
@@ -98,14 +98,79 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
   }
 
   async function ingestLarge(file: File) {
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
-    const uploadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
-
     // Read preview from the first ~4 KB without loading the whole file.
     const previewText = await file.slice(0, 4096).text()
     const preview = previewText.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 6)
 
     setUploadProgress(0)
+
+    // Try R2 direct upload first; fall back to chunked XHR if R2 is not configured (503).
+    let presignResult: { url: string; key: string; upload_id: string } | null = null
+    try {
+      presignResult = await r2.presign(file.name)
+    } catch (e) {
+      const status = (e as { status?: number }).status
+      if (status !== 503) {
+        // Unexpected error — surface it rather than silently falling back.
+        setError({ kind: 'too-large', message: `R2 presign failed: ${(e as Error).message}` })
+        setUploadProgress(null)
+        return
+      }
+      // 503 = R2 not configured → fall through to chunked path
+      presignResult = null
+    }
+
+    if (presignResult) {
+      // ── R2 path ────────────────────────────────────────────────────────
+      const { url, key } = presignResult
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open('PUT', url)
+          xhr.setRequestHeader('Content-Type', 'text/plain')
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              setUploadProgress(Math.round((e.loaded / e.total) * 95))
+            }
+          }
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) resolve()
+            else reject(new Error(`R2 PUT failed: HTTP ${xhr.status}`))
+          }
+          xhr.onerror = () => reject(new Error('R2 PUT network error'))
+          xhr.send(file)
+        })
+
+        setUploadProgress(97)
+        const result = await r2.complete(key, file.name)
+        setUploadProgress(100)
+
+        const next: TargetList = {
+          id: makeListId(),
+          name: file.name,
+          uploadedAt: new Date().toISOString(),
+          lineCount: result.targets,
+          contentHash: `r2-${key}`,
+          preview,
+          assignedVpsIds: [],
+          status: 'idle',
+          note: 'Uploaded via Cloudflare R2 — list body saved on server as targets.txt',
+        }
+        onUpload(next)
+      } catch (e) {
+        setError({
+          kind: 'too-large',
+          message: `R2 upload failed: ${(e as Error).message}`,
+        })
+      } finally {
+        setUploadProgress(null)
+      }
+      return
+    }
+
+    // ── Chunked XHR fallback (original path) ───────────────────────────
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+    const uploadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
     try {
       for (let i = 0; i < totalChunks; i++) {
         const chunkStart = i * CHUNK_SIZE
