@@ -120,6 +120,15 @@ sudo -u "$SERVICE_USER" GOOS=linux GOARCH=amd64 go build -o reconx-scanner main.
 chmod +x "$INSTALL_DIR/backend/reconx-scanner"
 log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-scanner" | awk '{print $1}')"
 
+# ── 7b. Build the Go warc harvester binary (controller-local) ─────────────
+# Built at install time so the gunicorn service (which has no $PATH to
+# /usr/bin/go) doesn't need to invoke `go build` at runtime.
+log "Building the Go warc harvester binary for controller use…"
+cd "$INSTALL_DIR"
+sudo -u "$SERVICE_USER" GOOS=linux GOARCH=amd64 go build -o reconx-warc warc.go
+chmod +x "$INSTALL_DIR/reconx-warc"
+log "WARC binary built (Linux/amd64): $(du -h "$INSTALL_DIR/reconx-warc" | awk '{print $1}')"
+
 # ── 8. SSH key for fleet ops ──────────────────────────────────────────────
 SSH_DIR="$INSTALL_DIR/.ssh"
 sudo -u "$SERVICE_USER" mkdir -p "$SSH_DIR"

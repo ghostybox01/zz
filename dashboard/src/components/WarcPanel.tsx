@@ -160,6 +160,25 @@ export function WarcPanel() {
         </div>
       )}
 
+      {status?.running === true
+        && status?.domains_found === 0
+        && status?.started_at
+        && (Date.now() - new Date(status.started_at).getTime() < 60000) && (
+        <div
+          className="muted"
+          style={{
+            marginTop: '1rem',
+            padding: '.55rem .75rem',
+            background: 'rgba(255,255,255,.03)',
+            borderRadius: '.4rem',
+            fontSize: '.78rem',
+            fontStyle: 'italic',
+          }}
+        >
+          Initialising — fetching CC-MAIN snapshots (~30s)…
+        </div>
+      )}
+
       <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '.75rem' }}>
         <Stat label="Domains found" value={status?.domains_found ?? 0} />
         <Stat label="Target" value={status?.max_domains ?? '—'} />

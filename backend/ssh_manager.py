@@ -305,6 +305,78 @@ class SSHManager:
         except (TypeError, ValueError):
             return 22
 
+    def _persist_specs_if_new(self, ip: str, metrics: dict) -> None:
+        """Stash the first successful probe's hardware specs into
+        fleet_creds.json so deploy_full can size batches per worker without
+        re-probing. Idempotent: once `ram_gb` is set for an ip, we bail.
+
+        Uses self.lock to serialise the read-modify-write against the rest
+        of SSHManager's mutating paths. Note: app.py's _save_fleet_creds
+        also writes this file without going through this lock — that's the
+        existing pattern and the mtime-based reload in
+        _reload_fleet_creds_if_changed picks up either writer's changes."""
+        try:
+            self._reload_fleet_creds_if_changed()
+            if (self._fleet_creds.get(ip, {}) or {}).get('ram_gb'):
+                return
+            try:
+                ram_gb = round(int(metrics.get('RAM_KB', 0) or 0) / 1024 / 1024, 2)
+            except (TypeError, ValueError):
+                ram_gb = 0
+            try:
+                disk_gb = round(int(metrics.get('DISK_KB', 0) or 0) / 1024 / 1024, 2)
+            except (TypeError, ValueError):
+                disk_gb = 0
+            try:
+                cpu = int(metrics.get('CPU', 0) or 0)
+            except (TypeError, ValueError):
+                cpu = 0
+            if ram_gb and ram_gb > 0:
+                batch_size = min(500_000, max(25_000, int(ram_gb * 20_000)))
+            else:
+                batch_size = 100_000
+            with self.lock:
+                try:
+                    if os.path.exists(FLEET_CREDS_FILE):
+                        with open(FLEET_CREDS_FILE, 'r') as f:
+                            disk_creds = json.load(f)
+                        if not isinstance(disk_creds, dict):
+                            disk_creds = {}
+                    else:
+                        disk_creds = {}
+                except Exception:
+                    disk_creds = {}
+                existing = disk_creds.get(ip) or {}
+                if existing.get('ram_gb'):
+                    # Another writer beat us to it; keep their values.
+                    return
+                merged = {
+                    'user': existing.get('user') or self.config.get('remote_user', 'root'),
+                    'port': int(existing.get('port') or 22),
+                    'auth_kind': existing.get('auth_kind') or 'key',
+                }
+                # Preserve any other fields a future writer might add.
+                for k, v in existing.items():
+                    if k not in merged:
+                        merged[k] = v
+                merged['cpu'] = cpu
+                merged['ram_gb'] = ram_gb
+                merged['disk_gb'] = disk_gb
+                merged['batch_size'] = batch_size
+                disk_creds[ip] = merged
+                try:
+                    with open(FLEET_CREDS_FILE, 'w') as f:
+                        json.dump(disk_creds, f, indent=2)
+                    self._fleet_creds = disk_creds
+                    try:
+                        self._fleet_creds_mtime = os.path.getmtime(FLEET_CREDS_FILE)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _get_ssh_client(self, ip: str, timeout: int = None) -> paramiko.SSHClient:
         timeout = timeout or self.config.get("ssh_timeout", 10)
         ssh = paramiko.SSHClient()
@@ -361,7 +433,22 @@ class SSHManager:
         try:
             tr = new_ssh.get_transport()
             if tr is not None:
-                tr.set_keepalive(int(self.config.get("ssh_keepalive", 30)))
+                # Adaptive keepalive: if this worker has been missing probes
+                # we shorten the heartbeat to 15s so NAT/middlebox idle
+                # timeouts can't shave another cycle off recovery.
+                keepalive_base = int(self.config.get("ssh_keepalive", 30))
+                tighter = self._consecutive_misses.get(ip, 0) > 0
+                tr.set_keepalive(15 if tighter else keepalive_base)
+        except Exception:
+            pass
+
+        # Warm the channel — a `true` exec primes the SSH transport so the
+        # next ssh_exec on this freshly-opened client doesn't pay an extra
+        # round-trip's worth of channel setup latency. Failures here are
+        # silent; the caller will discover any real problem on its own exec.
+        try:
+            _, _stdout, _ = new_ssh.exec_command('true', timeout=3)
+            _stdout.channel.recv_exit_status()
         except Exception:
             pass
 
@@ -583,9 +670,74 @@ class SSHManager:
             "connection_details": conn_results["details"]
         }
     
-    def deploy_full(self, target_file: str = None, scanner_file: str = None, 
+    def bootstrap_worker(self, ip: str) -> dict:
+        """Minimal single-worker bootstrap: SSH-test, create work_dir, SFTP
+        scanner (main.py) and the reconx-scanner binary, chmod +x. NO
+        targets.txt, NO batch split, NO start. This is what auto-deploy
+        on key-install needs on a fresh install where no target list
+        exists yet — see Effect C in the deployment plan.
+
+        Returns {"success": bool, "message": str, "steps": list[str]}.
+        Uses scp_upload / ssh_exec which already route through
+        _get_ssh_client → _user_for / _port_for, honouring _fleet_creds
+        for per-IP user + port."""
+        steps: List[str] = []
+        scanner_file = self.config.get("scanner_file", "main.py")
+        work_dir = self.config.get("work_dir", "/root/python_job")
+        result_subdir = self.config.get("result_subdir", "ResultJS")
+
+        # 1. Verify SSH actually works before touching anything else.
+        conn = self.test_single_connection(ip)
+        if not conn.get("success"):
+            return {
+                "success": False,
+                "message": f"SSH test failed: {conn.get('error', 'unknown error')}",
+                "steps": steps,
+            }
+        steps.append("SSH connection verified")
+
+        # 2. Ensure remote work_dir + result_subdir exist.
+        try:
+            self.ssh_exec(ip, f"mkdir -p {work_dir}/{result_subdir}", 10)
+            steps.append(f"Created {work_dir}/{result_subdir}")
+        except Exception as e:
+            return {"success": False, "message": f"mkdir failed: {e}", "steps": steps}
+
+        # 3. SFTP main.py. Fall back to common alt names if config'd
+        # scanner_file is missing locally — same fallback pattern
+        # deploy_full uses.
+        local_scanner = scanner_file
+        if not os.path.exists(local_scanner):
+            for candidate in ('main.py', 'scanner.py', 'gemini.py'):
+                if os.path.exists(candidate):
+                    local_scanner = candidate
+                    break
+            else:
+                return {"success": False, "message": "Scanner file not found locally", "steps": steps}
+        if not self.scp_upload(ip, local_scanner, f"{work_dir}/main.py"):
+            return {"success": False, "message": "Failed to upload scanner (main.py)", "steps": steps}
+        steps.append("Uploaded main.py")
+
+        # 4. SFTP reconx-scanner binary, then chmod +x. Missing binary
+        # is a hard failure here — bootstrap means the worker has the
+        # binary on disk.
+        if not os.path.exists('reconx-scanner'):
+            return {"success": False, "message": "reconx-scanner binary not found locally", "steps": steps}
+        if not self.scp_upload(ip, 'reconx-scanner', f"{work_dir}/reconx-scanner"):
+            return {"success": False, "message": "Failed to upload reconx-scanner binary", "steps": steps}
+        steps.append("Uploaded reconx-scanner")
+        try:
+            self.ssh_exec(ip, f"chmod +x {work_dir}/reconx-scanner", 5)
+            steps.append("chmod +x reconx-scanner")
+        except Exception as e:
+            return {"success": False, "message": f"chmod failed: {e}", "steps": steps}
+
+        return {"success": True, "message": "Bootstrap complete", "steps": steps}
+
+    def deploy_full(self, target_file: str = None, scanner_file: str = None,
                     runner_file: str = None, auto_start: bool = False,
-                    progress_callback: Callable = None) -> dict:
+                    progress_callback: Callable = None,
+                    single_ip: str = None) -> dict:
         """
         Full deployment workflow:
         1. Test connections
@@ -669,9 +821,19 @@ class SSHManager:
         
         # Deploy to each server
         for idx, ip in enumerate(working_servers):
+            # Effect C seam: when invoked for a single worker (auto-deploy on
+            # key-install), skip every IP that isn't the target. Iterating
+            # the full list keeps target-splitting logic unchanged.
+            if single_ip and ip != single_ip:
+                continue
+            # Per-worker batch size baked in by the first probe. Falls back
+            # to the global config default if specs haven't been captured
+            # yet (worker added but never probed).
+            per_ip_batch = (self._fleet_creds.get(ip, {}) or {}).get('batch_size')
+            batch_size = int(per_ip_batch) if per_ip_batch else int(self.config.get('batch_size', 100000))
             server_result = DeploymentResult(ip=ip, success=False)
             log(f"\n▶ Deploying to {ip} ({idx+1}/{len(working_servers)})...")
-            
+
             try:
                 # 1. Create work directory
                 log(f"  Creating {work_dir}...")
@@ -685,12 +847,12 @@ class SSHManager:
                 else:
                     raise Exception("Failed to upload scanner")
                 
-                # 2.5. Upload raven-scanner binary (Go binary)
-                if os.path.exists('raven-scanner'):
-                    log("  Uploading raven-scanner binary...")
-                    if self.scp_upload(ip, 'raven-scanner', f"{work_dir}/raven-scanner"):
-                        self.ssh_exec(ip, f"chmod +x {work_dir}/raven-scanner", 5)
-                        server_result.steps.append("Uploaded raven-scanner binary")
+                # 2.5. Upload reconx-scanner binary (Go binary)
+                if os.path.exists('reconx-scanner'):
+                    log("  Uploading reconx-scanner binary...")
+                    if self.scp_upload(ip, 'reconx-scanner', f"{work_dir}/reconx-scanner"):
+                        self.ssh_exec(ip, f"chmod +x {work_dir}/reconx-scanner", 5)
+                        server_result.steps.append("Uploaded reconx-scanner binary")
                     else:
                         log("  ⚠ Failed to upload binary, trying package...")
                 
@@ -699,7 +861,7 @@ class SSHManager:
                     log("  Uploading scanner package...")
                     if self.scp_upload(ip, 'scanner_package.tar.gz', f"{work_dir}/scanner_package.tar.gz"):
                         # Extract package
-                        extract_cmd = f"cd {work_dir} && tar -xzf scanner_package.tar.gz && chmod +x raven-scanner 2>/dev/null || true"
+                        extract_cmd = f"cd {work_dir} && tar -xzf scanner_package.tar.gz && chmod +x reconx-scanner 2>/dev/null || true"
                         self.ssh_exec(ip, extract_cmd, 10)
                         server_result.steps.append("Uploaded and extracted scanner package")
                 
@@ -838,6 +1000,9 @@ if [ "$SCANNED" -eq 0 ]; then
   c=$(wc -l < "{dedup_file}" 2>/dev/null | tr -d ' ')
   if [ -n "$c" ] && [ "$c" -gt 0 ] 2>/dev/null; then SCANNED=$c; fi
 fi
+CPU=$(nproc 2>/dev/null || echo 0)
+RAM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{{print $2}}')
+DISK_KB=$(df -Pk / 2>/dev/null | awk 'NR==2{{print $2}}')
 echo "PROBE_BEGIN"
 echo "MAIN_PID=$MAIN_PID"
 echo "BATCH_PID=$BATCH_PID"
@@ -848,6 +1013,9 @@ echo "DONE=$DONE"
 echo "FAILED=$FAILED"
 echo "TARGETS=$TARGETS"
 echo "SCANNED=$SCANNED"
+echo "CPU=$CPU"
+echo "RAM_KB=$RAM_KB"
+echo "DISK_KB=$DISK_KB"
 echo "HITS_BEGIN"
 cat "{result_dir}"/*.txt 2>/dev/null | head -100
 echo "HITS_END"
@@ -917,6 +1085,11 @@ echo "PROBE_END"
         # Probe came back clean — reset the miss counter for this host.
         with self.lock:
             self._consecutive_misses[ip] = 0
+
+        # First-probe spec capture: writes CPU/RAM/DISK + computed batch_size
+        # to fleet_creds.json so deploy_full sizes batches per worker. No-op
+        # once the row is populated.
+        self._persist_specs_if_new(ip, metrics)
 
         try:
             main_pid = metrics.get('MAIN_PID', '').strip()

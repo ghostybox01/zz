@@ -1033,26 +1033,15 @@ _warc_state: dict = {
 
 
 def _ensure_warc_binary() -> 'tuple[bool, str]':
-    """Return (ok, message). If reconx-warc is missing, try `go build`."""
+    """Return (ok, message). Existence-only check; the binary is built at
+    install time (see install-controller.sh §7b) because the gunicorn
+    service has no $PATH to /usr/bin/go."""
     if os.path.exists(WARC_BINARY) and os.access(WARC_BINARY, os.X_OK):
         return True, ''
-    if not os.path.exists(WARC_SOURCE):
-        return False, f'warc.go source not found at {WARC_SOURCE}'
-    try:
-        result = subprocess.run(
-            ['go', 'build', '-o', WARC_BINARY, WARC_SOURCE],
-            cwd=WARC_REPO_ROOT,
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            return False, f'go build failed: {result.stderr.strip()[:200]}'
-        return True, ''
-    except FileNotFoundError:
-        return False, 'go toolchain not installed on controller'
-    except subprocess.TimeoutExpired:
-        return False, 'go build timed out after 120s'
-    except Exception as e:
-        return False, f'go build error: {e}'
+    return False, (
+        'reconx-warc binary missing — rebuild with: '
+        'sudo -u reconx /usr/bin/go build -o /opt/reconx/reconx-warc /opt/reconx/warc.go'
+    )
 
 
 def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
@@ -1105,7 +1094,7 @@ def api_warc_start():
 
     ok, err = _ensure_warc_binary()
     if not ok:
-        return jsonify({'error': err}), 500
+        return jsonify({'error': err}), 503
 
     data = request.get_json(force=True, silent=True) or {}
     try:
@@ -1302,7 +1291,46 @@ def _remember_worker(host: str, port: int, user: str, auth_kind: str) -> None:
         'port': int(port or existing.get('port') or 22),
         'auth_kind': auth_kind or existing.get('auth_kind') or 'key',
     }
+    # Carry forward spec/batch fields populated by the SSH probe so we
+    # never clobber them on re-key.
+    for k in ('cpu', 'ram_gb', 'disk_gb', 'batch_size', 'scanner_deployed_at'):
+        if k in existing:
+            creds[host][k] = existing[k]
     _save_fleet_creds(creds)
+
+
+def _get_fleet_config() -> dict:
+    """Read the fleet block out of config.json with a sane default. Used by
+    the auto-deploy toggle and any future fleet-wide settings."""
+    cfg = _load_scanner_config()
+    return cfg.get('fleet') or {'auto_deploy': True}
+
+
+def _set_fleet_config(new: dict) -> None:
+    cfg = _load_scanner_config()
+    cfg['fleet'] = {**(cfg.get('fleet') or {}), **new}
+    with open(SCANNER_CONFIG_PATH, 'w') as f:
+        json.dump(cfg, f, indent=2)
+
+
+def _auto_deploy_one(ip: str) -> None:
+    """Fire-and-forget bootstrap of a single worker: pushes the scanner
+    binary + main.py + work_dir prep, no target list, no scan kick-off.
+    Stamps scanner_deployed_at only when the SFTP and chmod succeeded."""
+    try:
+        mgr = get_ssh_manager()
+        if not mgr:
+            return
+        result = mgr.bootstrap_worker(ip)
+        if not result.get('success'):
+            print(f'[auto-deploy] {ip} bootstrap failed: {result.get("message")}')
+            return
+        creds = _load_fleet_creds()
+        if ip in creds:
+            creds[ip]['scanner_deployed_at'] = datetime.now().isoformat()
+            _save_fleet_creds(creds)
+    except Exception as e:
+        print(f'[auto-deploy] {ip} failed: {e}')
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = 2.0):
@@ -1607,6 +1635,17 @@ def _resolve_controller_pubkey() -> str:
         'controller public key not found; checked: ' + ', '.join(candidates))
 
 
+@app.route('/api/fleet/auto-deploy-config', methods=['GET', 'POST'])
+def api_fleet_auto_deploy_config():
+    """Toggle Effect C's auto-deploy-on-key-install behaviour. GET returns
+    the current fleet config block (default {auto_deploy: True}); POST
+    accepts {auto_deploy: bool} and persists it into config.json."""
+    if request.method == 'POST':
+        data = request.get_json(force=True, silent=True) or {}
+        _set_fleet_config({'auto_deploy': bool(data.get('auto_deploy', True))})
+    return jsonify(_get_fleet_config())
+
+
 @app.route('/api/fleet/install-keys', methods=['POST'])
 def api_fleet_install_keys():
     """For each row that authenticates with a password, append the controller's
@@ -1704,6 +1743,14 @@ def api_fleet_install_keys():
                     # authorized_keys, ssh_manager should connect as them
                     # with key auth — not as root.
                     _remember_worker(r['host'], r['port'], r['user'], 'key')
+                    # Effect C: fire-and-forget scanner deploy so the operator
+                    # only has to drop creds + targets — no second click.
+                    if _get_fleet_config().get('auto_deploy', True):
+                        threading.Thread(
+                            target=_auto_deploy_one,
+                            args=(r['host'],),
+                            daemon=True,
+                        ).start()
                 else:
                     out['message'] = f'install failed (exit {exit_status}): {err or "no stderr"}'
             finally:

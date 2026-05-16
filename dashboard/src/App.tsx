@@ -7,7 +7,6 @@ import { CrackerWorkspace } from './components/CrackerWorkspace'
 import { FleetControlSettings } from './components/FleetControlSettings'
 import { FleetPanel } from './components/FleetPanel'
 import { HeroMetricTiles } from './components/HeroMetricTiles'
-import { LiveSourceSettings } from './components/LiveSourceSettings'
 import { ProviderHeatstrip } from './components/ProviderHeatstrip'
 import { ListsPanel } from './components/ListsPanel'
 import { TargetListUpload } from './components/TargetListUpload'
@@ -28,14 +27,12 @@ import { readTargetTxtFile } from './lib/targetList'
 import { VulnerabilityPicker } from './components/VulnerabilityPicker'
 import { VULN_CATALOG, defaultVulnSelection, type VulnSelection } from './data/vulnCatalog'
 import { useFleetEnrollment } from './hooks/useFleetEnrollment'
-import { useLiveScan, type LiveTotals } from './hooks/useLiveScan'
 import { useReconStats } from './hooks/useReconStats'
 import { useReconFleet } from './hooks/useReconFleet'
 import { loadLists, saveLists, hashContent, makeListId } from './lib/listsStorage'
 import { loadFleetControl, deployListViaApi, type FleetControlConfig } from './lib/fleetControl'
 import { clearFleetCredentials, getFleetCredential } from './lib/fleetCredStore'
 import { deleteListBody, getListBody, clearListBodies, setListBody } from './lib/listBodyCache'
-import { loadLiveSource, type LiveSourceConfig } from './lib/liveSource'
 import { stats as reconStatsApi, vps as reconVps } from './lib/reconApi'
 import { pushCpuSample } from './lib/vpsHistory'
 import { allocateChunks } from './lib/splitWorkload'
@@ -58,13 +55,7 @@ export default function App() {
   const [lists, setLists] = useState<TargetList[]>(() => loadLists())
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const lastToastIdRef = useRef<string | null>(null)
-  const [liveCfg, setLiveCfg] = useState<LiveSourceConfig>(() => loadLiveSource())
   const [fleetCfg, setFleetCfg] = useState<FleetControlConfig>(() => loadFleetControl())
-  const [, setLiveTotals] = useState<LiveTotals>({
-    liveDomains: 0,
-    filesProcessed: 0,
-    totalFindings: 0,
-  })
   const [findings, setFindings] = useState<Finding[]>([])
   const [vulnSel, setVulnSel] = useState<VulnSelection>(() => defaultVulnSelection(true))
 
@@ -74,16 +65,6 @@ export default function App() {
   })
 
   const [warcScanning, setWarcScanning] = useState(false)
-
-  const pushFinding = useCallback((draft: Omit<Finding, 'id'>) => {
-    setFindings((prev) => {
-      const next: Finding = {
-        ...draft,
-        id: `fd-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      }
-      return [next, ...prev].slice(0, 260)
-    })
-  }, [])
 
   // ─── Real backend (Raven Flask) — overrides mocks when reachable ───
   const reconStats = useReconStats()
@@ -148,12 +129,6 @@ export default function App() {
       )
     })
   }, [backendLive, pushAlertToast])
-
-  const liveStatus = useLiveScan({
-    config: liveCfg,
-    pushFinding,
-    setLiveTotals,
-  })
 
   useFleetEnrollment({
     findings,
@@ -526,8 +501,8 @@ export default function App() {
             </div>
             <div className="header__ribbon" aria-live="polite">
               <span className="ribbon-clock">{clock.toLocaleTimeString()}</span>
-              <span className={`ribbon-env${liveCfg.enabled ? ' ribbon-env--live' : ''}`}>
-                {liveCfg.enabled ? 'LIVE' : 'SANDBOX'}
+              <span className={`ribbon-env${backendLive ? ' ribbon-env--live' : ''}`}>
+                {backendLive ? 'LIVE' : 'SANDBOX'}
               </span>
               <span className="ribbon-stat">{hitInsights.total} hits</span>
               <span className="ribbon-stat ribbon-stat--gold">{hitInsights.cracks} cracks</span>
@@ -550,16 +525,8 @@ export default function App() {
 
               <section className="meta-bar meta-bar--tight meta-bar--glass">
                 <div className="meta-metrics">
-                  {liveCfg.enabled ? (
-                    <span className={`live-pill live-pill--${liveStatus.state}`}>
-                      {liveStatus.state === 'ok'
-                        ? `Live · ${liveStatus.filesSeen} file(s)`
-                        : liveStatus.state === 'error'
-                          ? 'Live · error'
-                          : liveStatus.state === 'connecting'
-                            ? 'Live · connecting'
-                            : 'Live · idle'}
-                    </span>
+                  {backendLive ? (
+                    <span className="live-pill live-pill--ok">Backend live</span>
                   ) : (
                     <span className="pill pill--muted">Backend offline</span>
                   )}
@@ -575,7 +542,7 @@ export default function App() {
                 <div className="overview-enrich__rail overview-enrich__rail--full">
                   <ActivityFeed
                     findings={findings}
-                    liveLabel={liveCfg.enabled ? (liveCfg.baseUrl || 'Live HTTP') : 'Hits feed'}
+                    liveLabel={backendLive ? 'Raven backend' : 'Hits feed'}
                   />
                   <ProviderHeatstrip findings={findings} />
                 </div>
@@ -687,19 +654,8 @@ export default function App() {
             >
               <div className="settings-stack">
                 <details className="settings-acc" open>
-                  <summary>Ingest &amp; live HTTP</summary>
+                  <summary>Target list upload</summary>
                   <div className="settings-acc__body">
-                    <LiveSourceSettings
-                      config={liveCfg}
-                      onChange={(c) => {
-                        setLiveCfg(c)
-                        if (c.enabled) {
-                          setFindings((prev) => prev.filter((f) => !f.id.startsWith('fd-')))
-                        }
-                      }}
-                      status={liveStatus}
-                    />
-
                     <TargetListUpload
                       lines={targets.count}
                       fileLabel={targets.name}
