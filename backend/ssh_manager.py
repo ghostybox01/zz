@@ -26,6 +26,13 @@ from dataclasses import dataclass, asdict, field
 # Suppress paramiko logging
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
+# Sidecar written by /api/fleet/bulk-creds and /api/fleet/install-keys.
+# Maps `ip → {user, port, auth_kind}` so the SSH manager (which runs as
+# root by default) can still log into workers that authenticated as a
+# non-root user during bootstrap.
+FLEET_CREDS_FILE = 'fleet_creds.json'
+
+
 # ================= CONFIGURATION =================
 DEFAULT_CONFIG = {
     "ssh_key_path": "/root/ssh/1",
@@ -90,6 +97,13 @@ class SSHManager:
         # that previously made every worker show "RECONNECT" in the UI.
         self._ssh_pool: Dict[str, paramiko.SSHClient] = {}
         self._pool_lock = threading.Lock()
+        # Per-IP {user, port} overrides written by the bulk-creds /
+        # install-keys flows. Lets us SSH as `admin` to workers that
+        # authenticated as admin while still defaulting to remote_user for
+        # workers added the legacy way (server_ips.txt + controller key).
+        self._fleet_creds: Dict[str, dict] = {}
+        self._fleet_creds_mtime: float = 0.0
+        self._reload_fleet_creds_if_changed()
         
         self.junk_patterns = [
             'mysqli.', 'mysql.', 'pdo_mysql.', 'pdo.', 'session.', 'mail.', 'smtp.',
@@ -252,18 +266,52 @@ class SSHManager:
         
         return None
     
+    def _reload_fleet_creds_if_changed(self) -> None:
+        """Pick up any new entries the bulk-creds / install-keys endpoints
+        wrote to fleet_creds.json, without re-reading the file on every
+        connect."""
+        try:
+            mtime = os.path.getmtime(FLEET_CREDS_FILE) if os.path.exists(FLEET_CREDS_FILE) else 0.0
+            if mtime == self._fleet_creds_mtime:
+                return
+            if mtime == 0.0:
+                self._fleet_creds = {}
+            else:
+                with open(FLEET_CREDS_FILE, 'r') as f:
+                    loaded = json.load(f)
+                self._fleet_creds = loaded if isinstance(loaded, dict) else {}
+            self._fleet_creds_mtime = mtime
+        except Exception:
+            pass
+
+    def _user_for(self, ip: str) -> str:
+        self._reload_fleet_creds_if_changed()
+        entry = self._fleet_creds.get(ip) or {}
+        return entry.get('user') or self.config.get('remote_user', 'root')
+
+    def _port_for(self, ip: str) -> int:
+        self._reload_fleet_creds_if_changed()
+        entry = self._fleet_creds.get(ip) or {}
+        try:
+            return int(entry.get('port') or 22)
+        except (TypeError, ValueError):
+            return 22
+
     def _get_ssh_client(self, ip: str, timeout: int = None) -> paramiko.SSHClient:
         timeout = timeout or self.config.get("ssh_timeout", 10)
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
+
+        username = self._user_for(ip)
+        port = self._port_for(ip)
         ssh_key_path = self.config.get("ssh_key_path")
         pkey = self._load_private_key(ssh_key_path)
-        
+
         if pkey:
             ssh.connect(
                 ip,
-                username=self.config.get("remote_user", "root"),
+                port=port,
+                username=username,
                 pkey=pkey,
                 timeout=timeout,
                 banner_timeout=10,
@@ -275,7 +323,8 @@ class SSHManager:
             # Fallback to key_filename if _load_private_key fails
             ssh.connect(
                 ip,
-                username=self.config.get("remote_user", "root"),
+                port=port,
+                username=username,
                 key_filename=ssh_key_path,
                 timeout=timeout,
                 banner_timeout=10,

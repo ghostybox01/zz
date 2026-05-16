@@ -952,6 +952,43 @@ def api_upload_complete():
 
 # ==================== SSH BULK CREDS ====================
 
+# Persisted per-worker connection info: maps `ip → {user, port, auth_kind}`.
+# SSHManager reads this so it knows to log into a worker as the user that
+# actually owns the installed authorized_keys (often non-root) instead of
+# always falling back to the controller-wide remote_user default.
+FLEET_CREDS_FILE = 'fleet_creds.json'
+
+
+def _load_fleet_creds() -> dict:
+    if not os.path.exists(FLEET_CREDS_FILE):
+        return {}
+    try:
+        with open(FLEET_CREDS_FILE, 'r') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_fleet_creds(creds: dict) -> None:
+    try:
+        with open(FLEET_CREDS_FILE, 'w') as f:
+            json.dump(creds, f, indent=2)
+    except Exception:
+        pass
+
+
+def _remember_worker(host: str, port: int, user: str, auth_kind: str) -> None:
+    """Idempotent update of the fleet_creds.json sidecar."""
+    creds = _load_fleet_creds()
+    existing = creds.get(host) or {}
+    creds[host] = {
+        'user': user or existing.get('user') or 'root',
+        'port': int(port or existing.get('port') or 22),
+        'auth_kind': auth_kind or existing.get('auth_kind') or 'key',
+    }
+    _save_fleet_creds(creds)
+
 
 _DELIM_PREFER = ('|', '\t', ';', ' ', ':')
 _PEM_HEAD = '-----BEGIN'
@@ -1154,6 +1191,9 @@ def api_fleet_bulk_creds():
             result['ok'] = True
             result['message'] = 'connected'
             accepted_ips.append(r['host'])
+            # Remember the user/port that worked so ssh_manager doesn't
+            # default to `root` when the worker only accepts `admin`.
+            _remember_worker(r['host'], r['port'], r['user'], r['auth_kind'])
         except Exception as e:
             result['message'] = str(e)
         results.append(result)
@@ -1313,6 +1353,10 @@ def api_fleet_install_keys():
                     out['installed'] = True
                     out['message'] = 'controller key installed'
                     installed += 1
+                    # Now that the controller's pubkey is in this user's
+                    # authorized_keys, ssh_manager should connect as them
+                    # with key auth — not as root.
+                    _remember_worker(r['host'], r['port'], r['user'], 'key')
                 else:
                     out['message'] = f'install failed (exit {exit_status}): {err or "no stderr"}'
             finally:
