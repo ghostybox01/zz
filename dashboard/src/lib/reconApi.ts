@@ -215,13 +215,9 @@ export const vps = {
   listFiles:   (dir = '.') => getJson<{ files: Array<{ name: string; path: string; size: number; lines?: number }> }>(`/vps/list-files?dir=${encodeURIComponent(dir)}`),
   selectFile:  (path: string) => postJson<ReconUploadResult>('/vps/select-file', { path }),
 
-  uploadChunk: (uploadId: string, chunkIndex: number, totalChunks: number, content: string) =>
-    postJson<{ ok: boolean; chunk: number }>('/vps/upload-chunk', {
-      upload_id:    uploadId,
-      chunk_index:  chunkIndex,
-      total_chunks: totalChunks,
-      content,
-    }),
+  // The chunked uploader lives in ListsPanel and posts the raw Blob
+  // body directly with XHR so progress events are byte-accurate; there
+  // is no JSON helper for /vps/upload-chunk on purpose.
 
   finalizeUpload: (uploadId: string, totalChunks: number, filename: string) =>
     postJson<ReconUploadResult>('/vps/finalize-upload', { upload_id: uploadId, total_chunks: totalChunks, filename }),

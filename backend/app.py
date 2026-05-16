@@ -601,11 +601,20 @@ def api_vps_upload_targets():
 
 @app.route('/api/vps/upload-chunk', methods=['POST'])
 def api_vps_upload_chunk():
-    """Accept one 5 MB chunk of a large target-list upload."""
-    data = request.get_json(force=True, silent=True) or {}
-    upload_id = str(data.get('upload_id', ''))
-    chunk_index = int(data.get('chunk_index', -1))
-    content = data.get('content', '')
+    """Accept one chunk of a large target-list upload.
+
+    Body is the raw chunk content (text/plain). upload_id and
+    chunk_index come from query string. JSON-wrapping the payload would
+    force Flask to buffer + parse the entire 5–10 MB body synchronously
+    under an eventlet worker, which starves the cooperative scheduler
+    and trips the gunicorn worker-timeout → nginx 502 "Server Hangup"
+    once enough chunks queue up. Streaming straight to disk avoids that.
+    """
+    upload_id = str(request.args.get('upload_id', ''))
+    try:
+        chunk_index = int(request.args.get('chunk_index', '-1'))
+    except ValueError:
+        chunk_index = -1
 
     if not re.match(r'^[a-zA-Z0-9_-]{8,64}$', upload_id):
         return jsonify({'error': 'Invalid upload_id'}), 400
@@ -613,13 +622,28 @@ def api_vps_upload_chunk():
         return jsonify({'error': 'Invalid chunk_index'}), 400
 
     chunk_dir = f'/tmp/reconx_{upload_id}'
-    os.makedirs(chunk_dir, exist_ok=True)
+    try:
+        os.makedirs(chunk_dir, exist_ok=True)
+    except OSError as e:
+        return jsonify({'error': f'cannot create chunk dir: {e}'}), 500
     chunk_path = os.path.join(chunk_dir, f'{chunk_index:08d}')
 
-    with open(chunk_path, 'w', encoding='utf-8') as f:
-        f.write(content)
+    # Stream the request body to disk in 256 KiB blocks. werkzeug's
+    # request.stream yields cooperatively under eventlet so other
+    # requests (and the SSH monitor) keep getting time slices.
+    bytes_written = 0
+    try:
+        with open(chunk_path, 'wb') as f:
+            while True:
+                block = request.stream.read(256 * 1024)
+                if not block:
+                    break
+                f.write(block)
+                bytes_written += len(block)
+    except OSError as e:
+        return jsonify({'error': f'write failed: {e}'}), 500
 
-    return jsonify({'ok': True, 'chunk': chunk_index})
+    return jsonify({'ok': True, 'chunk': chunk_index, 'bytes': bytes_written})
 
 
 @app.route('/api/vps/finalize-upload', methods=['POST'])
@@ -639,18 +663,36 @@ def api_vps_finalize_upload():
 
     target_path = 'targets.txt'
     count = 0
+    # Stream-concatenate the binary chunks into the final file, then
+    # split on newlines so we still produce one-target-per-line output
+    # and count non-empty lines for the response. Reading in 1 MiB blocks
+    # avoids loading any chunk fully into memory.
+    leftover = b''
     try:
-        with open(target_path, 'w', encoding='utf-8') as out:
+        with open(target_path, 'wb') as out:
             for i in range(total_chunks):
                 chunk_path = os.path.join(chunk_dir, f'{i:08d}')
                 if not os.path.exists(chunk_path):
                     return jsonify({'error': f'Missing chunk {i}'}), 400
-                with open(chunk_path, 'r', encoding='utf-8') as cf:
-                    for line in cf:
-                        stripped = line.strip()
-                        if stripped:
-                            out.write(stripped + '\n')
-                            count += 1
+                with open(chunk_path, 'rb') as cf:
+                    while True:
+                        block = cf.read(1024 * 1024)
+                        if not block:
+                            break
+                        block = leftover + block
+                        last_nl = block.rfind(b'\n')
+                        if last_nl == -1:
+                            leftover = block
+                            continue
+                        for raw_line in block[:last_nl].split(b'\n'):
+                            stripped = raw_line.strip()
+                            if stripped:
+                                out.write(stripped + b'\n')
+                                count += 1
+                        leftover = block[last_nl + 1:]
+            if leftover.strip():
+                out.write(leftover.strip() + b'\n')
+                count += 1
     finally:
         shutil.rmtree(chunk_dir, ignore_errors=True)
 
