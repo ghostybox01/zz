@@ -948,35 +948,134 @@ def api_upload_complete():
 # ==================== SSH BULK CREDS ====================
 
 
+_DELIM_PREFER = ('|', '\t', ';', ' ', ':')
+_PEM_HEAD = '-----BEGIN'
+
+
+def _looks_like_port(tok: str) -> bool:
+    return tok.isdigit() and 1 <= int(tok) <= 65535
+
+
+def _looks_like_key_material(secret: str) -> bool:
+    s = secret.strip()
+    if not s:
+        return False
+    if _PEM_HEAD in s:
+        return True
+    if s.startswith('/') or s.startswith('~/'):
+        return True
+    low = s.lower()
+    return low.endswith('.pem') or low.endswith('.key')
+
+
+def _pick_delim(rest: str) -> str:
+    """Pick the most likely field delimiter for this line.
+
+    Prefers pipe/tab/semicolon (which cannot appear in IPv4 or in
+    legacy `host:port` forms) before colon and whitespace. Returns
+    ':' as the last-resort default."""
+    for d in _DELIM_PREFER:
+        if d in rest:
+            return d
+    return ':'
+
+
 def _parse_creds_text(text: str):
     """Parse a bulk-creds text blob. Returns list of dicts:
-       {host, port, user, auth_kind, secret}
-    Accepted line forms (see installer.txt for full spec):
-       host
-       user@host
-       user@host:port:auth_kind:secret
+       {host, port, user, auth_kind, secret, raw}
+
+    Accepts any of the common combo-list shapes — auto-detects the
+    delimiter (pipe, tab, semicolon, whitespace, or colon) and the
+    auth kind (password vs. private key). Examples:
+
+       198.51.100.10                        # IP only, controller key + root
+       root@198.51.100.10                   # explicit user, controller key
+       deploy@host.example.com:2222         # user + non-default port
+       1.2.3.4|root|password                # pipe combo (host|user|pass)
+       1.2.3.4|2222|root|password           # pipe combo with port
+       1.2.3.4:root:password                # colon combo, no auth marker
+       1.2.3.4 root password                # whitespace combo
+       1.2.3.4|root|/home/me/.ssh/id_ed25519  # secret looks like a path → key
+       root@198.51.100.20:22:key:/path/to.pem # legacy: explicit key marker
+       deploy@1.2.3.4:2222:password:s3cret    # legacy: explicit password marker
     """
     rows = []
     for raw in text.splitlines():
         s = raw.strip()
         if not s or s.startswith('#'):
             continue
-        user = 'root'
-        port = 22
-        auth_kind = 'key'
-        secret = ''
-        if '@' in s:
-            user, rest = s.split('@', 1)
+
+        user = None
+        # Pull off optional `user@` prefix — only when '@' comes before any
+        # field delimiter, so e.g. an email-like password later in the line
+        # is left alone.
+        prefix = re.split(r'[|;\t :]', s, maxsplit=1)[0]
+        if '@' in prefix:
+            head, _, tail = s.partition('@')
+            user = head.strip() or None
+            rest = tail
         else:
             rest = s
-        # rest = host[:port[:auth_kind:secret]]
-        parts = rest.split(':')
-        host = parts[0]
-        if len(parts) >= 2 and parts[1].isdigit():
-            port = int(parts[1])
-        if len(parts) >= 4:
-            auth_kind = parts[2].lower()
-            secret = ':'.join(parts[3:])  # secret may contain colons (paths, passwords)
+
+        has_at_prefix = user is not None
+
+        delim = _pick_delim(rest)
+        if delim == ' ':
+            parts = rest.split()
+        else:
+            parts = rest.split(delim)
+        parts = [p for p in parts if p != '']
+        if not parts:
+            continue
+
+        # Field 0 = host (may carry a `:port` suffix, e.g. `1.2.3.4:22|root|pw`).
+        head_field = parts[0]
+        port = 22
+        if ':' in head_field and delim != ':':
+            hp = head_field.split(':')
+            if len(hp) == 2 and _looks_like_port(hp[1]):
+                host = hp[0]
+                port = int(hp[1])
+            else:
+                host = head_field
+        else:
+            host = head_field
+        host = host.strip()
+
+        idx = 1
+        if idx < len(parts) and _looks_like_port(parts[idx]):
+            port = int(parts[idx])
+            idx += 1
+
+        if user is None and idx < len(parts):
+            user = parts[idx].strip()
+            idx += 1
+        if not user:
+            user = 'root'
+
+        auth_kind = None
+        # Legacy explicit marker — only honor it when `user@` was given AND
+        # there's still a secret after the marker. Otherwise a literal
+        # password/key string would be mis-treated as a marker.
+        if (has_at_prefix and idx + 1 < len(parts)
+                and parts[idx].lower() in ('key', 'password')):
+            auth_kind = parts[idx].lower()
+            idx += 1
+
+        if idx < len(parts):
+            join = delim if delim != ' ' else ' '
+            secret = join.join(parts[idx:]).strip()
+        else:
+            secret = ''
+
+        if auth_kind is None:
+            if not secret:
+                auth_kind = 'key'  # fall back to controller default key
+            elif _looks_like_key_material(secret):
+                auth_kind = 'key'
+            else:
+                auth_kind = 'password'
+
         if not host:
             continue
         rows.append({'host': host, 'port': port, 'user': user,
