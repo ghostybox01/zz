@@ -401,4 +401,35 @@ export const r2 = {
   complete: (key: string, filename: string) => postJson<{ success: boolean; targets: number; preview: string[]; filename: string }>('/upload/complete', { key, filename }),
 }
 
+/* ── WARC harvest control plane ──────────────────────────────────────── */
+export type WarcStatus = {
+  running: boolean
+  pid: number | null
+  run_id: string | null
+  started_at: string | null
+  finished_at: string | null
+  max_domains: number | null
+  domains_found: number
+  last_exit_code: number | null
+  r2_key: string | null
+  r2_uploaded_at: string | null
+  r2_error: string | null
+  log_tail: string[]
+}
+
+export type WarcStartOptions = {
+  max_domains?: number
+  extract_workers?: number
+  test_workers?: number
+  verbose?: boolean
+}
+
+export const warc = {
+  status: () => getJson<WarcStatus>('/warc/status'),
+  start:  (opts: WarcStartOptions = {}) =>
+    postJson<{ success: boolean; pid: number; run_id: string; max_domains: number }>('/warc/start', opts),
+  stop:   () => postJson<{ success: boolean; message?: string }>('/warc/stop', {}),
+  exportToR2: () => postJson<{ success: boolean; r2_key: string }>('/warc/export-to-r2', {}),
+}
+
 export { ReconApiError }

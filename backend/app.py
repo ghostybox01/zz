@@ -19,6 +19,8 @@ import re
 import json
 import subprocess
 import shutil
+import collections
+import uuid
 
 # Import SSH Manager
 try:
@@ -916,14 +918,22 @@ def _get_r2_client():
 
 @app.route('/api/upload/r2-config', methods=['GET', 'POST'])
 def api_r2_config():
-    """Read or write R2 credentials in config.json."""
+    """Read or write R2 credentials in config.json.
+
+    On POST: if the secret_access_key field comes in blank, keep the
+    previously-stored secret. The dashboard form intentionally clears
+    that field on re-edit (it's a password input — we don't echo it
+    back), so a naive overwrite would wipe credentials every time the
+    user re-saved to change the bucket or account."""
     cfg = _load_scanner_config()
     if request.method == 'POST':
         data = request.get_json(force=True, silent=True) or {}
+        existing = cfg.get(R2_CONFIG_KEY, {}) if isinstance(cfg.get(R2_CONFIG_KEY), dict) else {}
+        new_secret = str(data.get('secret_access_key', '')).strip()
         cfg[R2_CONFIG_KEY] = {
             'account_id':       str(data.get('account_id', '')).strip(),
             'access_key_id':    str(data.get('access_key_id', '')).strip(),
-            'secret_access_key':str(data.get('secret_access_key', '')).strip(),
+            'secret_access_key': new_secret or str(existing.get('secret_access_key', '') or ''),
             'bucket_name':      str(data.get('bucket_name', '')).strip(),
         }
         with open(SCANNER_CONFIG_PATH, 'w') as f:
@@ -991,6 +1001,268 @@ def api_upload_complete():
         return jsonify({'success': True, 'targets': count, 'preview': preview, 'filename': filename})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ==================== WARC HARVEST (warc.go subprocess) ====================
+#
+# Manages a single long-running warc.go process. The binary writes
+# live_domains.txt to a per-run temp dir on the controller; when the run
+# finishes (or is stopped) the result is uploaded to R2 if R2 is
+# configured, then the local tempdir is removed — so the controller
+# isn't accumulating multi-MB harvest output between runs.
+
+WARC_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WARC_BINARY    = os.path.join(WARC_REPO_ROOT, 'reconx-warc')
+WARC_SOURCE    = os.path.join(WARC_REPO_ROOT, 'warc.go')
+
+_warc_lock = threading.Lock()
+_warc_proc: 'subprocess.Popen | None' = None
+_warc_state: dict = {
+    'started_at': None,
+    'finished_at': None,
+    'pid': None,
+    'run_id': None,
+    'output_path': None,
+    'log_path': None,
+    'max_domains': None,
+    'r2_key': None,
+    'r2_uploaded_at': None,
+    'r2_error': None,
+    'last_exit_code': None,
+}
+
+
+def _ensure_warc_binary() -> 'tuple[bool, str]':
+    """Return (ok, message). If reconx-warc is missing, try `go build`."""
+    if os.path.exists(WARC_BINARY) and os.access(WARC_BINARY, os.X_OK):
+        return True, ''
+    if not os.path.exists(WARC_SOURCE):
+        return False, f'warc.go source not found at {WARC_SOURCE}'
+    try:
+        result = subprocess.run(
+            ['go', 'build', '-o', WARC_BINARY, WARC_SOURCE],
+            cwd=WARC_REPO_ROOT,
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            return False, f'go build failed: {result.stderr.strip()[:200]}'
+        return True, ''
+    except FileNotFoundError:
+        return False, 'go toolchain not installed on controller'
+    except subprocess.TimeoutExpired:
+        return False, 'go build timed out after 120s'
+    except Exception as e:
+        return False, f'go build error: {e}'
+
+
+def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
+    """Wait for the warc process to exit, push the result to R2 (if
+    configured), and clear the local run dir."""
+    try:
+        exit_code = proc.wait()
+    except Exception as e:
+        exit_code = -1
+        print(f'[warc] wait failed: {e}')
+
+    output_path = snapshot.get('output_path')
+    run_id = snapshot.get('run_id')
+    run_dir = os.path.dirname(output_path) if output_path else None
+
+    r2_key = None
+    r2_error = None
+    if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        client, bucket = _get_r2_client()
+        if client and bucket:
+            try:
+                ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
+                r2_key = f'warc/live_domains_{ts}_{run_id}.txt'
+                client.upload_file(output_path, bucket, r2_key, ExtraArgs={'ContentType': 'text/plain'})
+            except Exception as e:
+                r2_error = f'R2 upload failed: {e}'
+                r2_key = None
+
+    with _warc_lock:
+        _warc_state['finished_at'] = datetime.now().isoformat()
+        _warc_state['last_exit_code'] = exit_code
+        _warc_state['r2_key'] = r2_key
+        _warc_state['r2_uploaded_at'] = datetime.now().isoformat() if r2_key else None
+        _warc_state['r2_error'] = r2_error
+
+    # Clean up local files only if we successfully shipped to R2; otherwise
+    # leave them on disk so the operator can SCP them off manually.
+    if r2_key and run_dir and os.path.isdir(run_dir):
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+@app.route('/api/warc/start', methods=['POST'])
+def api_warc_start():
+    """Launch warc.go. Body (all optional):
+       {max_domains: int, extract_workers: int, test_workers: int, verbose: bool}"""
+    global _warc_proc
+    with _warc_lock:
+        if _warc_proc is not None and _warc_proc.poll() is None:
+            return jsonify({'error': 'WARC already running', 'pid': _warc_proc.pid}), 409
+
+    ok, err = _ensure_warc_binary()
+    if not ok:
+        return jsonify({'error': err}), 500
+
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        max_domains = max(1, int(data.get('max_domains') or 10000))
+        extract_workers = max(1, int(data.get('extract_workers') or 200))
+        test_workers = max(1, int(data.get('test_workers') or 100))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'invalid numeric option'}), 400
+    verbose = bool(data.get('verbose'))
+
+    run_id = uuid.uuid4().hex[:8]
+    run_dir = f'/tmp/reconx_warc_{run_id}'
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+    except OSError as e:
+        return jsonify({'error': f'cannot create run dir: {e}'}), 500
+    output_path = os.path.join(run_dir, 'live_domains.txt')
+    log_path = os.path.join(run_dir, 'warc.log')
+
+    cmd = [
+        WARC_BINARY,
+        '-max-domains', str(max_domains),
+        '-output', output_path,
+        '-extract-workers', str(extract_workers),
+        '-test-workers', str(test_workers),
+    ]
+    if verbose:
+        cmd.append('-verbose')
+
+    try:
+        log_handle = open(log_path, 'wb')
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            cwd=run_dir,
+            start_new_session=True,
+        )
+    except Exception as e:
+        return jsonify({'error': f'failed to spawn warc: {e}'}), 500
+
+    snapshot = {
+        'started_at': datetime.now().isoformat(),
+        'pid': proc.pid,
+        'run_id': run_id,
+        'output_path': output_path,
+        'log_path': log_path,
+        'max_domains': max_domains,
+    }
+    with _warc_lock:
+        _warc_proc = proc
+        _warc_state.update(snapshot)
+        # Reset terminal state from any previous run
+        _warc_state['finished_at'] = None
+        _warc_state['r2_key'] = None
+        _warc_state['r2_uploaded_at'] = None
+        _warc_state['r2_error'] = None
+        _warc_state['last_exit_code'] = None
+
+    threading.Thread(target=_warc_watch_and_upload, args=(proc, dict(snapshot)), daemon=True).start()
+
+    return jsonify({'success': True, 'pid': proc.pid, 'run_id': run_id, 'max_domains': max_domains})
+
+
+@app.route('/api/warc/stop', methods=['POST'])
+def api_warc_stop():
+    global _warc_proc
+    with _warc_lock:
+        proc = _warc_proc
+    if proc is None or proc.poll() is not None:
+        return jsonify({'success': True, 'message': 'no warc running'})
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception as e:
+        return jsonify({'error': f'failed to stop: {e}'}), 500
+    return jsonify({'success': True})
+
+
+@app.route('/api/warc/status', methods=['GET'])
+def api_warc_status():
+    global _warc_proc
+    with _warc_lock:
+        proc = _warc_proc
+        state = dict(_warc_state)
+    running = proc is not None and proc.poll() is None
+
+    # Count discovered domains from the on-disk output if the run dir still exists.
+    domains_found = 0
+    output_path = state.get('output_path')
+    if output_path and os.path.exists(output_path):
+        try:
+            with open(output_path, 'rb') as f:
+                # Quick line-count; the file is one domain per line.
+                buf = f.read(1024 * 1024 * 8)  # cap at 8 MiB sample
+                domains_found = buf.count(b'\n')
+        except Exception:
+            pass
+
+    # Tail of the warc log so the UI can show progress lines.
+    log_tail: list = []
+    log_path = state.get('log_path')
+    if log_path and os.path.exists(log_path):
+        try:
+            with open(log_path, 'rb') as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 4096))
+                log_tail = [
+                    ln for ln in f.read().decode('utf-8', errors='replace').splitlines()
+                    if ln.strip()
+                ][-20:]
+        except Exception:
+            pass
+
+    return jsonify({
+        'running': running,
+        'pid': state.get('pid'),
+        'run_id': state.get('run_id'),
+        'started_at': state.get('started_at'),
+        'finished_at': state.get('finished_at'),
+        'max_domains': state.get('max_domains'),
+        'domains_found': domains_found,
+        'last_exit_code': state.get('last_exit_code'),
+        'r2_key': state.get('r2_key'),
+        'r2_uploaded_at': state.get('r2_uploaded_at'),
+        'r2_error': state.get('r2_error'),
+        'log_tail': log_tail,
+    })
+
+
+@app.route('/api/warc/export-to-r2', methods=['POST'])
+def api_warc_export_to_r2():
+    """Force-upload the current live_domains.txt to R2 even if the run
+    hasn't finished yet. Useful for taking a snapshot mid-harvest."""
+    with _warc_lock:
+        output_path = _warc_state.get('output_path')
+        run_id = _warc_state.get('run_id')
+    if not output_path or not os.path.exists(output_path):
+        return jsonify({'error': 'no warc output to export'}), 404
+    client, bucket = _get_r2_client()
+    if not client:
+        return jsonify({'error': 'R2 not configured'}), 503
+    try:
+        ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
+        r2_key = f'warc/live_domains_{ts}_{run_id or "manual"}.txt'
+        client.upload_file(output_path, bucket, r2_key, ExtraArgs={'ContentType': 'text/plain'})
+    except Exception as e:
+        return jsonify({'error': f'R2 upload failed: {e}'}), 500
+    with _warc_lock:
+        _warc_state['r2_key'] = r2_key
+        _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
+        _warc_state['r2_error'] = None
+    return jsonify({'success': True, 'r2_key': r2_key})
 
 
 # ==================== SSH BULK CREDS ====================

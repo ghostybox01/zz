@@ -611,13 +611,7 @@ export default function App() {
               hidden={warcHidden}
               className="tab-panel"
             >
-              <WarcPanel
-                liveEnabled={liveCfg.enabled}
-                scanning={warcScanning}
-                onToggleScan={() => setWarcScanning((s) => !s)}
-                onExportToList={exportWarcFindingsToList}
-                exportCount={warcExportHosts.length}
-              />
+              <WarcPanel />
             </section>
 
             <section
