@@ -317,7 +317,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
         className={`lists-upload${dragOver ? ' lists-upload--over' : ''}${totalBytes >= QUOTA_LIMIT ? ' lists-upload--disabled' : ''}`}
         onDragOver={(e) => { if (totalBytes < QUOTA_LIMIT) { e.preventDefault(); setDragOver(true) } }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => { if (totalBytes < QUOTA_LIMIT) onDrop(e) else e.preventDefault() }}
+        onDrop={(e) => { if (totalBytes < QUOTA_LIMIT) { onDrop(e) } else { e.preventDefault() } }}
       >
         <input
           ref={fileRef}
