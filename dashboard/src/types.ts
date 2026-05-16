@@ -1,23 +1,6 @@
 /** Max automated SSH-style reconnect bursts before pruning a VPS from fleet. */
 export const VPS_MAX_RECONNECT_TRIES = 3
 
-export type RunSnapshot = {
-  id: string
-  label: string
-  startedAt: string
-  snapshots: string[]
-  targetLiveDomains: number
-  liveDomains: number
-  totalExtracted: number
-  totalTested: number
-  filesProcessed: number
-  filesTotal: number
-  elapsedSeconds: number
-  outputFile?: string
-  extractWorkers?: number
-  testWorkers?: number
-}
-
 export type VpsStatus =
   | 'healthy'
   | 'degraded'
@@ -240,59 +223,6 @@ export type ScanShard = {
   hits: number
   parsingPerSec: number
   requestsPerSec: number
-}
-
-export function parseRunSnapshot(raw: unknown): RunSnapshot | null {
-  if (!raw || typeof raw !== 'object') return null
-  const o = raw as Record<string, unknown>
-
-  const str = (k: string, fallback = '') =>
-    typeof o[k] === 'string' ? o[k] : fallback
-  const num = (k: string) =>
-    typeof o[k] === 'number' && Number.isFinite(o[k] as number)
-      ? (o[k] as number)
-      : NaN
-  const strArr = (k: string) =>
-    Array.isArray(o[k]) && (o[k] as unknown[]).every((x) => typeof x === 'string')
-      ? (o[k] as string[])
-      : null
-
-  const snapshots = strArr('snapshots')
-  const targetLiveDomains = num('targetLiveDomains')
-  const liveDomains = num('liveDomains')
-  const totalExtracted = num('totalExtracted')
-  const totalTested = num('totalTested')
-  const filesProcessed = num('filesProcessed')
-  const filesTotal = num('filesTotal')
-  const elapsedSeconds = num('elapsedSeconds')
-
-  if (
-    !snapshots ||
-    [targetLiveDomains, liveDomains, totalExtracted, totalTested, filesProcessed, filesTotal, elapsedSeconds].some(
-      (n) => Number.isNaN(n) || n < 0,
-    )
-  ) {
-    return null
-  }
-
-  return {
-    id: str('id', `run-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`),
-    label: str('label', 'Imported run'),
-    startedAt:
-      str('startedAt').length > 0 ? str('startedAt') : new Date().toISOString(),
-    snapshots,
-    targetLiveDomains,
-    liveDomains,
-    totalExtracted,
-    totalTested,
-    filesProcessed,
-    filesTotal,
-    elapsedSeconds,
-    outputFile: typeof o.outputFile === 'string' ? o.outputFile : undefined,
-    extractWorkers:
-      typeof o.extractWorkers === 'number' ? o.extractWorkers : undefined,
-    testWorkers: typeof o.testWorkers === 'number' ? o.testWorkers : undefined,
-  }
 }
 
 export function jitter(n: number, span: number): number {

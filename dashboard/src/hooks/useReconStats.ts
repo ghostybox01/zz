@@ -2,13 +2,11 @@
  *  - Initial GET /api/stats on mount
  *  - Listens for `stats_update` socket events (pushed every 2s by background_file_monitor in app.py)
  *  - Falls back to 10s polling if the socket disconnects
- *
- *  Output is mapped into the dashboard's existing Finding / RunSnapshot shapes so no other component changes.
  */
 import { useEffect, useRef, useState } from 'react'
 import { stats as statsApi, type ReconStats, type ReconRecentFinding } from '../lib/reconApi'
 import { getReconSocket } from '../lib/reconSocket'
-import type { Finding, FindingSeverity, RunSnapshot } from '../types'
+import type { Finding, FindingSeverity } from '../types'
 
 export type ReconConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'
 
@@ -19,7 +17,6 @@ export type UseReconStatsResult = {
   raw: ReconStats | null
   /** Mapped to the dashboard's existing types. */
   findings: Finding[]
-  run: RunSnapshot | null
   /** Manual refresh, returns the new payload. */
   refresh: () => Promise<ReconStats | null>
 }
@@ -92,30 +89,11 @@ function mapRecent(row: ReconRecentFinding, i: number): Finding {
   }
 }
 
-function mapRun(s: ReconStats): RunSnapshot {
-  return {
-    id: 'live',
-    label: 'Live · Raven backend',
-    startedAt: s.last_update,
-    snapshots: [],
-    targetLiveDomains: s.progress_total,
-    liveDomains: s.progress_current,
-    totalExtracted: s.total_valid,
-    totalTested: s.total_urls,
-    filesProcessed: 0,
-    filesTotal: 0,
-    elapsedSeconds: 0,
-    extractWorkers: undefined,
-    testWorkers: undefined,
-  }
-}
-
 export function useReconStats(): UseReconStatsResult {
   const [state, setState] = useState<ReconConnectionState>('connecting')
   const [lastError, setLastError] = useState<string | null>(null)
   const [raw, setRaw] = useState<ReconStats | null>(null)
   const [findings, setFindings] = useState<Finding[]>([])
-  const [run, setRun] = useState<RunSnapshot | null>(null)
   const pollIdRef = useRef<number | null>(null)
   const mountedRef = useRef(true)
 
@@ -123,7 +101,6 @@ export function useReconStats(): UseReconStatsResult {
     if (!mountedRef.current) return
     setRaw(payload)
     setFindings((payload.recent_findings ?? []).map((row, i) => mapRecent(row, i)))
-    setRun(mapRun(payload))
     setLastError(null)
   }
 
@@ -195,5 +172,5 @@ export function useReconStats(): UseReconStatsResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  return { state, lastError, raw, findings, run, refresh }
+  return { state, lastError, raw, findings, refresh }
 }

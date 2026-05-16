@@ -2,17 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { AppSidebar, type DashboardTab } from './components/AppSidebar'
 import { ActivityFeed } from './components/ActivityFeed'
-import { DataImport } from './components/DataImport'
 import { FindingsBoard } from './components/FindingsBoard'
 import { CrackerWorkspace } from './components/CrackerWorkspace'
 import { FleetControlSettings } from './components/FleetControlSettings'
 import { FleetPanel } from './components/FleetPanel'
 import { HeroMetricTiles } from './components/HeroMetricTiles'
 import { LiveSourceSettings } from './components/LiveSourceSettings'
-import { ProgressRow } from './components/ProgressRow'
 import { ProviderHeatstrip } from './components/ProviderHeatstrip'
 import { ListsPanel } from './components/ListsPanel'
-import { StatCard } from './components/StatCard'
 import { TargetListUpload } from './components/TargetListUpload'
 import { TelegramSettings } from './components/TelegramSettings'
 import { FleetBootstrap } from './components/FleetBootstrap'
@@ -29,14 +26,11 @@ import { categoryForFinding } from './lib/toastCategory'
 import { WarcPanel } from './components/WarcPanel'
 import { readTargetTxtFile } from './lib/targetList'
 import { VulnerabilityPicker } from './components/VulnerabilityPicker'
-import { demoFindingsSeed } from './data/demoFindings'
 import { VULN_CATALOG, defaultVulnSelection, type VulnSelection } from './data/vulnCatalog'
 import { useFleetEnrollment } from './hooks/useFleetEnrollment'
 import { useLiveScan, type LiveTotals } from './hooks/useLiveScan'
 import { useReconStats } from './hooks/useReconStats'
 import { useReconFleet } from './hooks/useReconFleet'
-import { useScanSimulation } from './hooks/useScanSimulation'
-import { useScanTick } from './hooks/useScanTick'
 import { loadLists, saveLists, hashContent, makeListId } from './lib/listsStorage'
 import { loadFleetControl, deployListViaApi, type FleetControlConfig } from './lib/fleetControl'
 import { clearFleetCredentials, getFleetCredential } from './lib/fleetCredStore'
@@ -45,8 +39,7 @@ import { loadLiveSource, type LiveSourceConfig } from './lib/liveSource'
 import { stats as reconStatsApi, vps as reconVps } from './lib/reconApi'
 import { pushCpuSample } from './lib/vpsHistory'
 import { allocateChunks } from './lib/splitWorkload'
-import { fmtDuration, fmtInt, fmtPercent } from './lib/format'
-import type { Finding, RunSnapshot, Scan, ScanShard, TargetList, VpsNode } from './types'
+import type { Finding, Scan, ScanShard, TargetList, VpsNode } from './types'
 
 const TOAST_QUEUE_CAP = 48
 
@@ -54,28 +47,11 @@ function enqueueToast(prev: ToastItem[], next: ToastItem): ToastItem[] {
   return [...prev, next].slice(-TOAST_QUEUE_CAP)
 }
 
-function emptySnapshot(): RunSnapshot {
-  return {
-    id: 'session',
-    label: 'New session',
-    startedAt: new Date().toISOString(),
-    snapshots: [],
-    targetLiveDomains: 0,
-    liveDomains: 0,
-    totalExtracted: 0,
-    totalTested: 0,
-    filesProcessed: 0,
-    filesTotal: 0,
-    elapsedSeconds: 0,
-  }
-}
-
 export default function App() {
   const [tab, setTab] = useState<DashboardTab>('ravenx')
   const [activeScanId, setActiveScanId] = useState<string | null>(null)
   const [startupDone, setStartupDone] = useState<boolean>(() => shouldSkipStartupCheck())
 
-  const [run, setRun] = useState<RunSnapshot>(emptySnapshot)
   const [fleet, setFleet] = useState<VpsNode[]>([])
   const [scans, setScans] = useState<Scan[]>([])
   const [shards, setShards] = useState<ScanShard[]>([])
@@ -97,15 +73,7 @@ export default function App() {
     name: null,
   })
 
-  const [scanning, setScanning] = useState(false)
   const [warcScanning, setWarcScanning] = useState(false)
-
-  const vulnProviders = useMemo(() => {
-    const s = new Set<string>()
-    for (const r of VULN_CATALOG)
-      if (vulnSel[r.id]) s.add(r.provider)
-    return [...s].sort((a, b) => a.localeCompare(b))
-  }, [vulnSel])
 
   const pushFinding = useCallback((draft: Omit<Finding, 'id'>) => {
     setFindings((prev) => {
@@ -135,46 +103,6 @@ export default function App() {
     setFleet(reconFleet.fleet)
   }, [reconFleet.isLive, reconFleet.fleet])
 
-  // When backend is live, hydrate the run snapshot from /api/stats. Otherwise keep demo behavior.
-  useEffect(() => {
-    if (reconStats.state !== 'connected' || !reconStats.run) return
-    setRun(reconStats.run)
-  }, [reconStats.state, reconStats.run])
-
-  useScanSimulation({
-    scanning: scanning && !liveCfg.enabled && !backendLive,
-    setFleetActive: setFleet,
-    vulnProviders,
-    pushFinding,
-  })
-
-  useScanTick({
-    scanning: scanning && !liveCfg.enabled && !backendLive,
-    setScans,
-    setShards,
-  })
-
-  // WARC harvest simulation — advances run snapshot while harvesting.
-  useEffect(() => {
-    if (!warcScanning || liveCfg.enabled || backendLive) return
-    const id = window.setInterval(() => {
-      setRun((prev) => {
-        const liveBump = Math.floor(40 + Math.random() * 180)
-        const fileBump = Math.random() > 0.35 ? 1 : 0
-        const extractBump = Math.floor(800 + Math.random() * 4200)
-        const testBump = Math.floor(600 + Math.random() * 3200)
-        return {
-          ...prev,
-          liveDomains: Math.min(prev.targetLiveDomains, prev.liveDomains + liveBump),
-          filesProcessed: Math.min(prev.filesTotal, prev.filesProcessed + fileBump),
-          totalExtracted: prev.totalExtracted + extractBump,
-          totalTested: prev.totalTested + testBump,
-          elapsedSeconds: prev.elapsedSeconds + 2,
-        }
-      })
-    }, 2000)
-    return () => window.clearInterval(id)
-  }, [warcScanning, liveCfg.enabled, backendLive])
 
   // Surface a toast only for the 4 popup categories: ssh-vps, smtp, ai, brevo.
   // Everything else stays in the Hits table without flashing the corner.
@@ -251,45 +179,6 @@ export default function App() {
       )
     },
   })
-
-  const effectiveRun = useMemo<RunSnapshot>(() => {
-    if (!liveCfg.enabled) return run
-    return {
-      ...run,
-      id: 'live',
-      label: liveCfg.baseUrl || 'Live source',
-      liveDomains: liveTotals.liveDomains,
-      totalExtracted: liveTotals.totalFindings,
-      totalTested: Math.max(run.totalTested, liveTotals.liveDomains),
-    }
-  }, [liveCfg.enabled, liveCfg.baseUrl, run, liveTotals])
-
-  const liveRate = useMemo(() => {
-    if (effectiveRun.totalTested <= 0) return 0
-    return (effectiveRun.liveDomains / effectiveRun.totalTested) * 100
-  }, [effectiveRun.liveDomains, effectiveRun.totalTested])
-
-  const extractionRate = useMemo(() => {
-    if (effectiveRun.elapsedSeconds <= 0) return 0
-    return effectiveRun.totalExtracted / effectiveRun.elapsedSeconds
-  }, [effectiveRun.elapsedSeconds, effectiveRun.totalExtracted])
-
-  const testRate = useMemo(() => {
-    if (effectiveRun.elapsedSeconds <= 0) return 0
-    return effectiveRun.totalTested / effectiveRun.elapsedSeconds
-  }, [effectiveRun.elapsedSeconds, effectiveRun.totalTested])
-
-  const exportSnapshot = useCallback(() => {
-    const blob = new Blob([JSON.stringify(effectiveRun, null, 2)], {
-      type: 'application/json',
-    })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${effectiveRun.id}-run-metrics.json`
-    a.click()
-    URL.revokeObjectURL(url)
-  }, [effectiveRun])
 
   const assignShards = useCallback(() => {
     setFleet((prev) => {
@@ -371,7 +260,6 @@ export default function App() {
   }
 
   const resetEverything = () => {
-    setRun(emptySnapshot())
     setFleet([])
     clearFleetCredentials()
     clearListBodies()
@@ -383,7 +271,6 @@ export default function App() {
     setScans([])
     setShards([])
     setActiveScanId(null)
-    setScanning(false)
     setWarcScanning(false)
   }
 
@@ -658,110 +545,37 @@ export default function App() {
               <HeroMetricTiles
                 totalHits={hitInsights.total}
                 cracks={hitInsights.cracks}
-                liveDomains={effectiveRun.liveDomains}
+                liveDomains={aggregates.liveHosts}
               />
 
-              <section className="meta-bar meta-bar--stack meta-bar--tight meta-bar--glass">
-                <div className="meta-bar__top">
-                  <div>
-                    <span className="meta-bar__muted">Label</span>
-                    <strong>{effectiveRun.label}</strong>
-                    <span className="meta-bar__id">{effectiveRun.id}</span>
-                  </div>
-                  <div className="meta-metrics">
-                    {liveCfg.enabled ? (
-                      <span className={`live-pill live-pill--${liveStatus.state}`}>
-                        {liveStatus.state === 'ok'
-                          ? `Live · ${liveStatus.filesSeen} file(s)`
-                          : liveStatus.state === 'error'
-                            ? 'Live · error'
-                            : liveStatus.state === 'connecting'
-                              ? 'Live · connecting'
-                              : 'Live · idle'}
-                      </span>
-                    ) : (
-                      <span className="pill pill--muted">Demo mode</span>
-                    )}
-                    <span className="pill pill--ok">{aggregates.liveHosts} VPS</span>
-                    <span className="pill pill--muted">
-                      {targets.count ? `${targets.count.toLocaleString()} queued` : 'No upload'}
+              <section className="meta-bar meta-bar--tight meta-bar--glass">
+                <div className="meta-metrics">
+                  {liveCfg.enabled ? (
+                    <span className={`live-pill live-pill--${liveStatus.state}`}>
+                      {liveStatus.state === 'ok'
+                        ? `Live · ${liveStatus.filesSeen} file(s)`
+                        : liveStatus.state === 'error'
+                          ? 'Live · error'
+                          : liveStatus.state === 'connecting'
+                            ? 'Live · connecting'
+                            : 'Live · idle'}
                     </span>
-                    <span className="pill pill--muted">{findings.length} hits</span>
-                  </div>
-                </div>
-                <div className="meta-bar__chips" aria-label="WARC/CC snapshots baked into metrics">
-                  {effectiveRun.snapshots.map((s) => (
-                    <span key={s} className="chip">
-                      {s}
-                    </span>
-                  ))}
+                  ) : (
+                    <span className="pill pill--muted">Backend offline</span>
+                  )}
+                  <span className="pill pill--ok">{aggregates.liveHosts} VPS</span>
+                  <span className="pill pill--muted">
+                    {targets.count ? `${targets.count.toLocaleString()} queued` : 'No upload'}
+                  </span>
+                  <span className="pill pill--muted">{findings.length} hits</span>
                 </div>
               </section>
 
               <div className="overview-enrich">
-                <div className="overview-enrich__main">
-              <main className="overview-grid">
-                <div className="stats stats--lux">
-                  <StatCard
-                    title="Live domains"
-                    value={fmtInt(effectiveRun.liveDomains)}
-                    hint={`${fmtPercent(effectiveRun.liveDomains, effectiveRun.targetLiveDomains)} of ${fmtInt(effectiveRun.targetLiveDomains)}`}
-                    accent="green"
-                  />
-                  <StatCard title="Tested" value={fmtInt(effectiveRun.totalTested)} hint={liveCfg.enabled ? 'from live source' : 'from metrics blob'} />
-                  <StatCard title="Extracted" value={fmtInt(effectiveRun.totalExtracted)} hint={liveCfg.enabled ? 'live findings tally' : 'grabber tally'} />
-                  <StatCard
-                    title="Elapsed"
-                    value={fmtDuration(effectiveRun.elapsedSeconds)}
-                    hint={`${fmtInt(extractionRate)} · ${fmtInt(testRate)} /s`}
-                    accent="amber"
-                  />
-                </div>
-
-                <aside className="panel panel--glass">
-                  <h2 className="panel__title">Run metrics</h2>
-                  <p className="panel-explainer">
-                    Numbers on this strip come from the in-memory{' '}
-                    <code className="inline-code">RunSnapshot</code> object — same payload you{' '}
-                    <strong>import below</strong> or <strong>export</strong> from Settings after a crawl. It mirrors
-                    WARC/live-check totals, worker counts, and CC snapshot IDs, not your hits inbox.
-                  </p>
-                  <ProgressRow label="Live vs target" current={effectiveRun.liveDomains} total={effectiveRun.targetLiveDomains} />
-                  <ProgressRow label="WARC files" current={effectiveRun.filesProcessed} total={effectiveRun.filesTotal} />
-                  <dl className="kv kv--compact">
-                    <div>
-                      <dt>Live rate</dt>
-                      <dd>{liveRate.toFixed(2)}%</dd>
-                    </div>
-                    <div>
-                      <dt>Workers</dt>
-                      <dd>
-                        {effectiveRun.extractWorkers ?? '—'} / {effectiveRun.testWorkers ?? '—'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Output</dt>
-                      <dd className="kv__mono">{effectiveRun.outputFile ?? '—'}</dd>
-                    </div>
-                    <div>
-                      <dt>Started</dt>
-                      <dd className="kv__mono">{new Date(effectiveRun.startedAt).toLocaleString()}</dd>
-                    </div>
-                  </dl>
-                  <p className="panel-note">
-                    Import / export JSON in{' '}
-                    <button type="button" className="link-ish" onClick={() => setTab('settings')}>
-                      Settings
-                    </button>
-                    .
-                  </p>
-                </aside>
-              </main>
-                </div>
-                <div className="overview-enrich__rail">
+                <div className="overview-enrich__rail overview-enrich__rail--full">
                   <ActivityFeed
                     findings={findings}
-                    liveLabel={liveCfg.enabled ? (liveCfg.baseUrl || 'Live HTTP') : 'Demo feed'}
+                    liveLabel={liveCfg.enabled ? (liveCfg.baseUrl || 'Live HTTP') : 'Hits feed'}
                   />
                   <ProviderHeatstrip findings={findings} />
                 </div>
@@ -785,7 +599,6 @@ export default function App() {
                 activeScanId={activeScanId}
                 onSelectScan={setActiveScanId}
                 onTogglePause={toggleScanPause}
-                onReplayDemo={() => setFindings(demoFindingsSeed.map((f) => ({ ...f })))}
                 onDeleteList={deleteList}
                 onToast={(t) => pushAlertToast(t.title, t.message, t.kind === 'error' ? 'error' : 'info')}
               />
@@ -799,7 +612,6 @@ export default function App() {
               className="tab-panel"
             >
               <WarcPanel
-                run={effectiveRun}
                 liveEnabled={liveCfg.enabled}
                 scanning={warcScanning}
                 onToggleScan={() => setWarcScanning((s) => !s)}
@@ -836,7 +648,7 @@ export default function App() {
                 fleet={fleet}
                 lists={lists}
                 totalTargets={targets.count}
-                scanning={scanning}
+                scanning={false}
                 onRedeploySplit={assignShards}
                 onForceOutage={forceOutage}
                 onAction={backendLive ? onVpsAction : undefined}
@@ -853,7 +665,6 @@ export default function App() {
             >
               <FindingsBoard
                 findings={findings}
-                onReplayDemo={() => setFindings(demoFindingsSeed.map((f) => ({ ...f })))}
                 onClearAll={
                   backendLive
                     ? async () => {
@@ -904,48 +715,16 @@ export default function App() {
                 </details>
 
                 <details className="settings-acc" open>
-                  <summary>Playback &amp; run metrics</summary>
+                  <summary>Reset</summary>
                   <div className="settings-acc__body">
                     <section className="card-block card-block--tight">
-                      <div className="card-block__head card-block__head--row">
-                        <div>
-                          <h2>Playback</h2>
-                          <p className="card-block__lede card-block__lede--short">
-                            Pause UI ticks, ship run metrics JSON, reset fabric.
-                          </p>
-                        </div>
-                      </div>
                       <div className="settings-btn-row">
-                        {scanning ? (
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            onClick={() => setScanning(false)}
-                          >
-                            Pause simulation
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="btn-primary"
-                            onClick={() => setScanning(true)}
-                          >
-                            Resume simulation
-                          </button>
-                        )}
-                        <button type="button" className="btn-secondary" onClick={exportSnapshot}>
-                          Export run metrics JSON
-                        </button>
                         <button type="button" className="btn-secondary" onClick={resetEverything}>
-                          Reset
+                          Reset all local state
                         </button>
                       </div>
                       <p className="settings-hint">
-                        Routed {aggregates.done.toLocaleString()}
-                        {aggregates.assigned
-                          ? ` / ${aggregates.assigned.toLocaleString()} partitioned`
-                          : ''}{' '}
-                        · Shard on Cracker after uploading targets here.
+                        Clears fleet credentials, target lists, and findings from local storage.
                       </p>
                     </section>
                   </div>
@@ -1029,26 +808,12 @@ export default function App() {
                   </div>
                 </details>
 
-                <details className="settings-acc">
-                  <summary>Run metrics JSON import</summary>
-                  <div className="settings-acc__body">
-                    <section className="card-block panel">
-                      <h2 className="panel__title">Hydrate run metrics (JSON)</h2>
-                      <p className="panel-explainer">
-                        Drop the file your orchestrator emits after a crawl (same shape as{' '}
-                        <strong>Export run metrics JSON</strong>). Only the KPI / progress widgets update — VPS +
-                        hits tabs keep their local state unless you reload.
-                      </p>
-                      <DataImport onImport={(r) => setRun(r)} />
-                    </section>
-                  </div>
-                </details>
               </div>
             </section>
           </div>
 
           <footer className="footer footer--minimal">
-            Run metrics = crawl summary blob · Hits inbox = separate ledger · Telegram prefs stay local until you add a relay.
+            Hits inbox = live ledger · Fleet credentials stay local · Telegram prefs stay local until you add a relay.
           </footer>
         </div>
       </div>

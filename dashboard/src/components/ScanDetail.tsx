@@ -11,7 +11,6 @@ type Props = {
   findings: readonly Finding[]
   onBack: () => void
   onTogglePause: (scanId: string) => void
-  onReplayDemo: () => void
 }
 
 function IcoBack() {
@@ -26,7 +25,7 @@ function statusTone(s: Scan['status']) {
   return `scan-detail__status scan-detail__status--${s}`
 }
 
-export function ScanDetail({ scan, shards, fleet, findings, onBack, onTogglePause, onReplayDemo }: Props) {
+export function ScanDetail({ scan, shards, fleet, findings, onBack, onTogglePause }: Props) {
   const scopedFindings = useMemo(() => {
     const fromScan = findings.filter((f) => f.scanId === scan.id)
     if (fromScan.length > 0) return fromScan
@@ -58,14 +57,6 @@ export function ScanDetail({ scan, shards, fleet, findings, onBack, onTogglePaus
           <h2 className="scan-detail__title">{scan.label}</h2>
           <p className="scan-detail__sub">
             <span className="scan-detail__id">{scan.id}</span>
-            {scan.snapshots.length > 0 && (
-              <>
-                <span className="muted"> · </span>
-                {scan.snapshots.map((s) => (
-                  <span key={s} className="chip chip--small">{s}</span>
-                ))}
-              </>
-            )}
           </p>
         </div>
         <span className={statusTone(scan.status)}>
@@ -180,7 +171,7 @@ export function ScanDetail({ scan, shards, fleet, findings, onBack, onTogglePaus
         </div>
       </section>
 
-      <FindingsBoard findings={scopedFindings} onReplayDemo={onReplayDemo} />
+      <FindingsBoard findings={scopedFindings} />
     </section>
   )
 }

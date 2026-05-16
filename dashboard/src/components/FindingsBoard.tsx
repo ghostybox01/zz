@@ -7,7 +7,6 @@ type SortKey = 'provider' | 'at' | 'severity'
 
 type Props = {
   findings: readonly Finding[]
-  onReplayDemo: () => void
   onClearAll?: () => void | Promise<void>
 }
 
@@ -36,7 +35,7 @@ function vulnTag(rule: string): string {
   return 'LIB'
 }
 
-export function FindingsBoard({ findings, onReplayDemo, onClearAll }: Props) {
+export function FindingsBoard({ findings, onClearAll }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('provider')
   const [dir, setDir] = useState<'asc' | 'desc'>('asc')
   const [addon, setAddon] = useState<string>('all')
@@ -184,9 +183,6 @@ export function FindingsBoard({ findings, onReplayDemo, onClearAll }: Props) {
           </label>
           <button type="button" className="btn-glass btn-hit-tool" onClick={exportFiltered}>
             Export
-          </button>
-          <button type="button" className="btn-glass btn-hit-tool" onClick={onReplayDemo}>
-            Seed demo
           </button>
           <button
             type="button"

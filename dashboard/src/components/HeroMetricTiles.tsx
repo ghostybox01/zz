@@ -56,7 +56,7 @@ export function HeroMetricTiles({ totalHits, cracks, liveDomains }: Props) {
         <div className="hero-tile__body">
           <span className="hero-tile__label">Live hosts</span>
           <span className="hero-tile__value">{liveDomains.toLocaleString()}</span>
-          <span className="hero-tile__sub">From run metrics / live_domains</span>
+          <span className="hero-tile__sub">Active fleet nodes</span>
         </div>
       </article>
     </div>

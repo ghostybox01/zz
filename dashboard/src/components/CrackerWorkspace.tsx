@@ -28,7 +28,6 @@ type Props = {
   activeScanId: string | null
   onSelectScan: (id: string | null) => void
   onTogglePause: (scanId: string) => void
-  onReplayDemo: () => void
   onDeleteList: (id: string) => void
   onToast: (t: Omit<CrackerToast, 'id'>) => void
 }
@@ -42,7 +41,6 @@ export function CrackerWorkspace({
   activeScanId,
   onSelectScan,
   onTogglePause,
-  onReplayDemo,
   onDeleteList,
   onToast,
 }: Props) {
@@ -117,7 +115,6 @@ export function CrackerWorkspace({
         findings={findings}
         onBack={() => setViewStats(false)}
         onTogglePause={onTogglePause}
-        onReplayDemo={onReplayDemo}
       />
     )
   }
