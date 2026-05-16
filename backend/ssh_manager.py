@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "dedup_file": "dedup_log.txt",
     "batch_size": 100000,
     "ssh_timeout": 5,  # Reduced from 10
+    "monitor_interval": 30,  # seconds between fleet probes — was 5s; bumped to cut reconnect churn
+    "ssh_keepalive": 30,     # paramiko transport keepalive (seconds)
     "scanner_file": "main.py",
     "runner_file": "batch_runner.sh",
     "target_file": "targets.txt"
@@ -82,6 +84,12 @@ class SSHManager:
         self.monitor_thread: Optional[threading.Thread] = None
         self.event_callback: Optional[Callable] = None
         self.deployment_log: List[str] = []
+        # Per-worker SSH connection pool. paramiko Transport is thread-safe for
+        # opening independent channels, so multiple ssh_exec calls can share
+        # one SSHClient. This avoids the ~9 connect/teardown cycles per probe
+        # that previously made every worker show "RECONNECT" in the UI.
+        self._ssh_pool: Dict[str, paramiko.SSHClient] = {}
+        self._pool_lock = threading.Lock()
         
         self.junk_patterns = [
             'mysqli.', 'mysql.', 'pdo_mysql.', 'pdo.', 'session.', 'mail.', 'smtp.',
@@ -277,15 +285,63 @@ class SSHManager:
             )
         return ssh
     
+    def _get_pooled_ssh(self, ip: str, timeout: int) -> paramiko.SSHClient:
+        """Return a cached SSHClient for ip, opening one if absent or stale.
+
+        Sets a TCP keepalive on new connections so middleboxes/NAT don't
+        silently drop the session between probes."""
+        with self._pool_lock:
+            ssh = self._ssh_pool.get(ip)
+            if ssh is not None:
+                tr = ssh.get_transport()
+                if tr is not None and tr.is_active():
+                    return ssh
+                try: ssh.close()
+                except Exception: pass
+                self._ssh_pool.pop(ip, None)
+
+        new_ssh = self._get_ssh_client(ip, timeout)
+        try:
+            tr = new_ssh.get_transport()
+            if tr is not None:
+                tr.set_keepalive(int(self.config.get("ssh_keepalive", 30)))
+        except Exception:
+            pass
+
+        with self._pool_lock:
+            # Lose any race against another thread that also opened a conn.
+            existing = self._ssh_pool.get(ip)
+            if existing is not None:
+                etr = existing.get_transport()
+                if etr is not None and etr.is_active():
+                    try: new_ssh.close()
+                    except Exception: pass
+                    return existing
+            self._ssh_pool[ip] = new_ssh
+        return new_ssh
+
+    def _evict_pooled_ssh(self, ip: str) -> None:
+        with self._pool_lock:
+            ssh = self._ssh_pool.pop(ip, None)
+        if ssh is not None:
+            try: ssh.close()
+            except Exception: pass
+
     def ssh_exec(self, ip: str, cmd: str, timeout: int = None) -> str:
         timeout = timeout or self.config.get("ssh_timeout", 10)
         try:
-            ssh = self._get_ssh_client(ip, timeout)
-            stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
-            result = stdout.read().decode().strip()
-            ssh.close()
-            return result
-        except:
+            ssh = self._get_pooled_ssh(ip, timeout)
+            try:
+                stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+                return stdout.read().decode('utf-8', errors='replace').strip()
+            except (paramiko.SSHException, EOFError, OSError):
+                # Connection died mid-exec — evict and retry once with a fresh one.
+                self._evict_pooled_ssh(ip)
+                ssh = self._get_pooled_ssh(ip, timeout)
+                stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+                return stdout.read().decode('utf-8', errors='replace').strip()
+        except Exception:
+            self._evict_pooled_ssh(ip)
             return ""
     
     def scp_upload(self, ip: str, local_path: str, remote_path: str) -> bool:
@@ -1063,13 +1119,16 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
     
     # ==================== MONITORING ====================
     
-    def start_monitoring(self, callback: Callable = None, interval: int = 5):
+    def start_monitoring(self, callback: Callable = None, interval: int = None):
         if self.monitor_thread and self.monitor_thread.is_alive():
             return False
-        
+
+        if interval is None:
+            interval = int(self.config.get("monitor_interval", 30))
+
         self.stop_monitor.clear()
         self.event_callback = callback
-        
+
         def monitor_loop():
             while not self.stop_monitor.is_set():
                 try:
@@ -1081,15 +1140,22 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
                 except Exception as e:
                     print(f"Monitor error: {e}")
                 self.stop_monitor.wait(interval)
-        
+
         self.monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
         self.monitor_thread.start()
         return True
-    
+
     def stop_monitoring(self):
         self.stop_monitor.set()
         if self.monitor_thread:
             self.monitor_thread.join(timeout=5)
+        # Close every pooled SSH session so the workers don't see stranded
+        # half-open channels after a controller restart.
+        with self._pool_lock:
+            for ssh in self._ssh_pool.values():
+                try: ssh.close()
+                except Exception: pass
+            self._ssh_pool.clear()
 
 
 _manager_instance = None
