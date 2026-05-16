@@ -18,7 +18,7 @@ type UploadError = { kind: 'duplicate' | 'empty' | 'too-large' | 'read'; message
 
 // Files above this threshold are streamed to the backend in chunks instead of loaded into the browser.
 const CHUNK_THRESHOLD = 20 * 1024 * 1024   // 20 MiB
-const CHUNK_SIZE      = 5 * 1024 * 1024    // 5 MiB per request
+const CHUNK_SIZE      = 50 * 1024 * 1024   // 50 MiB per request (~4 requests for 200 MB)
 
 export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeploy }: Props) {
   const fileRef = useRef<HTMLInputElement>(null)

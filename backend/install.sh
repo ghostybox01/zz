@@ -324,7 +324,7 @@ cat > /etc/nginx/sites-available/$SERVICE_NAME << EOFNGINX
 server {
     listen 80;
     server_name $SERVER_IP;
-    client_max_body_size 10m;
+    client_max_body_size 60m;
     location / {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
