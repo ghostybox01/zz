@@ -104,11 +104,14 @@ class SSHManager:
         self._fleet_creds: Dict[str, dict] = {}
         self._fleet_creds_mtime: float = 0.0
         self._reload_fleet_creds_if_changed()
-        # Sticky status — a worker has to miss two consecutive probes before
-        # its card flips to UNREACHABLE, so a single transient blip doesn't
-        # make every card flap RECONNECT↔HEALTHY.
+        # Sticky status — a worker has to miss this many consecutive
+        # probes before its card flips to UNREACHABLE. At a 30s monitor
+        # interval, threshold=3 means ~90s of solid failure before the UI
+        # admits anything's wrong, which masks every kind of transient
+        # blip (NAT idle-flush, sshd MaxStartups bursts, fail2ban,
+        # half-second packet loss).
         self._consecutive_misses: Dict[str, int] = {}
-        self._sticky_threshold = 2
+        self._sticky_threshold = 3
 
         self.junk_patterns = [
             'mysqli.', 'mysql.', 'pdo_mysql.', 'pdo.', 'session.', 'mail.', 'smtp.',
@@ -801,6 +804,84 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
     
     # ==================== SERVER STATUS ====================
     
+    def _build_probe_script(self, work_dir: str, result_dir: str, dedup_file: str) -> str:
+        """One bash script that collects every metric fetch_server_status
+        used to gather across 9–15 separate ssh_exec calls. Running it as
+        a single exec_command means one channel, one round-trip, and one
+        chance to fail — instead of nine — which dramatically cuts the
+        odds of any given probe blipping the worker into RECONNECT."""
+        return f"""set +e
+cd "{work_dir}" 2>/dev/null
+MAIN_PID=$(pgrep -f 'python.*main.py' 2>/dev/null | head -1)
+BATCH_PID=$(pgrep -f 'batch_runner.sh' 2>/dev/null | head -1)
+PID="${{MAIN_PID:-$BATCH_PID}}"
+UPTIME=""
+if [ -n "$PID" ]; then UPTIME=$(ps -o etime= -p "$PID" 2>/dev/null | tr -d ' '); fi
+COMPLETE=$(grep -c 'ALL COMPLETE' output.log 2>/dev/null || echo 0)
+PENDING=$(ls batch_*.txt 2>/dev/null | wc -l)
+DONE=$(ls batch_*.txt.done 2>/dev/null | wc -l)
+FAILED=$(ls batch_*.txt.failed 2>/dev/null | wc -l)
+TARGETS=$(wc -l < server_main_list.txt 2>/dev/null || echo 0)
+SCANNED=0
+KEYS=$(redis-cli KEYS '*hash*' 2>/dev/null | head -10)
+for k in $KEYS; do
+  c=$(redis-cli SCARD "$k" 2>/dev/null)
+  if [ -n "$c" ] && [ "$c" -gt "$SCANNED" ] 2>/dev/null; then SCANNED=$c; fi
+done
+if [ "$SCANNED" -eq 0 ]; then
+  for p in 'gemini:dedup:hashes' 'gemini:hashes' 'dedup:hashes'; do
+    c=$(redis-cli SCARD "$p" 2>/dev/null)
+    if [ -n "$c" ] && [ "$c" -gt 0 ] 2>/dev/null; then SCANNED=$c; break; fi
+  done
+fi
+if [ "$SCANNED" -eq 0 ]; then
+  c=$(wc -l < "{dedup_file}" 2>/dev/null | tr -d ' ')
+  if [ -n "$c" ] && [ "$c" -gt 0 ] 2>/dev/null; then SCANNED=$c; fi
+fi
+echo "PROBE_BEGIN"
+echo "MAIN_PID=$MAIN_PID"
+echo "BATCH_PID=$BATCH_PID"
+echo "UPTIME=$UPTIME"
+echo "COMPLETE=$COMPLETE"
+echo "PENDING=$PENDING"
+echo "DONE=$DONE"
+echo "FAILED=$FAILED"
+echo "TARGETS=$TARGETS"
+echo "SCANNED=$SCANNED"
+echo "HITS_BEGIN"
+cat "{result_dir}"/*.txt 2>/dev/null | head -100
+echo "HITS_END"
+echo "PROBE_END"
+"""
+
+    @staticmethod
+    def _parse_probe_output(raw: str) -> dict:
+        """Pull the key=value lines and the HITS_BEGIN…HITS_END block out
+        of the combined probe script's stdout. Returns {} if the sentinels
+        aren't present (which means the exec didn't actually run)."""
+        if 'PROBE_BEGIN' not in raw or 'PROBE_END' not in raw:
+            return {}
+        metrics: dict = {}
+        hits_lines: list = []
+        in_hits = False
+        for line in raw.split('\n'):
+            if line in ('PROBE_BEGIN', 'PROBE_END'):
+                continue
+            if line == 'HITS_BEGIN':
+                in_hits = True
+                continue
+            if line == 'HITS_END':
+                in_hits = False
+                continue
+            if in_hits:
+                hits_lines.append(line)
+                continue
+            if '=' in line:
+                k, _, v = line.partition('=')
+                metrics[k] = v
+        metrics['HITS'] = '\n'.join(hits_lines)
+        return metrics
+
     def fetch_server_status(self, ip: str) -> ServerStatus:
         status = ServerStatus(ip=ip)
         work_dir = self.config.get("work_dir", "/root/python_job")
@@ -808,15 +889,18 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
         dedup_file = self.config.get("dedup_file", "dedup_log.txt")
         batch_size = self.config.get("batch_size", 100000)
 
-        # Reachability gate — try a real SSH session before issuing the
-        # nine status queries. If this fails, we know the box is
-        # unreachable and can apply the sticky-status rule (one miss is
-        # kept quiet; two consecutive misses flip the card to UNREACHABLE).
-        try:
-            ssh = self._get_pooled_ssh(ip, self.config.get("ssh_timeout", 5))
-            stdin, stdout, _ = ssh.exec_command("true", timeout=5)
-            stdout.channel.recv_exit_status()
-        except Exception as e:
+        # One exec for the whole probe. ssh_exec uses the pooled SSHClient
+        # so a healthy worker pays no per-probe handshake cost — the same
+        # socket stays warm between monitor cycles via the 30s keepalive.
+        probe_script = self._build_probe_script(work_dir, result_dir, dedup_file)
+        raw = self.ssh_exec(ip, probe_script, timeout=15)
+        metrics = self._parse_probe_output(raw)
+
+        if not metrics:
+            # Probe didn't run. Sticky-status: keep the previous snapshot
+            # until we've missed _sticky_threshold cycles in a row. That
+            # masks NAT timeouts, fail2ban hiccups, single dropped packets,
+            # etc., so the card doesn't flap.
             with self.lock:
                 misses = self._consecutive_misses.get(ip, 0) + 1
                 self._consecutive_misses[ip] = misses
@@ -825,101 +909,76 @@ MAIN_LIST=server_main_list.txt' > server_config.sh
                     prev.last_update = datetime.now().strftime('%H:%M:%S')
                     return prev
                 status.status = "UNREACHABLE"
-                status.error = str(e)[:80] or 'ssh probe failed'
+                status.error = 'ssh probe returned no data'
                 status.last_update = datetime.now().strftime('%H:%M:%S')
                 self.servers[ip] = status
             return status
 
-        # Probe succeeded — reset the miss counter for this host.
+        # Probe came back clean — reset the miss counter for this host.
         with self.lock:
             self._consecutive_misses[ip] = 0
 
         try:
-            main_pid = self.ssh_exec(ip, "pgrep -f 'python.*main.py' | head -1", 5)
-            batch_pid = self.ssh_exec(ip, "pgrep -f 'batch_runner.sh' | head -1", 5)
-
+            main_pid = metrics.get('MAIN_PID', '').strip()
+            batch_pid = metrics.get('BATCH_PID', '').strip()
             if main_pid or batch_pid:
                 status.status = "RUNNING"
-                pid = main_pid or batch_pid
-                status.uptime = self.ssh_exec(ip, f"ps -o etime= -p {pid} 2>/dev/null | tr -d ' '", 5) or "-"
+                status.uptime = metrics.get('UPTIME', '').strip() or '-'
             else:
-                complete_check = self.ssh_exec(ip, f"grep -c 'ALL COMPLETE' {work_dir}/output.log 2>/dev/null", 3)
-                if complete_check and complete_check.isdigit() and int(complete_check) > 0:
+                complete_check = metrics.get('COMPLETE', '0').strip()
+                if complete_check.isdigit() and int(complete_check) > 0:
                     status.status = "COMPLETED"
                 else:
-                    # Reachable but no scanner — surface as IDLE so the UI
-                    # shows healthy (frontend mapStatus treats IDLE as
-                    # healthy). The legacy "STOPPED" string used to fall
-                    # through mapStatus's default and render as RECONNECT,
-                    # which made every healthy idle worker look broken.
+                    # Reachable + no active scanner = IDLE (renders healthy
+                    # via the frontend's mapStatus). The legacy "STOPPED"
+                    # value used to fall through to RECONNECT and made every
+                    # healthy idle worker look broken.
                     status.status = "IDLE"
-            
-            batches_pending = int(self.ssh_exec(ip, f"ls {work_dir}/batch_*.txt 2>/dev/null | wc -l", 5) or 0)
-            batches_done = int(self.ssh_exec(ip, f"ls {work_dir}/batch_*.txt.done 2>/dev/null | wc -l", 5) or 0)
-            batches_failed = int(self.ssh_exec(ip, f"ls {work_dir}/batch_*.txt.failed 2>/dev/null | wc -l", 5) or 0)
+
+            def _as_int(v, default=0):
+                v = (v or '').strip()
+                return int(v) if v.lstrip('-').isdigit() else default
+
+            batches_pending = _as_int(metrics.get('PENDING'))
+            batches_done = _as_int(metrics.get('DONE'))
+            batches_failed = _as_int(metrics.get('FAILED'))
             total_batches = batches_pending + batches_done + batches_failed
-            
             batch_str = f"{batches_done}/{total_batches}"
             if batches_failed > 0:
                 batch_str += f" ({batches_failed}!)"
             status.batch_info = batch_str
             status.batches_done = batches_done
             status.batches_total = total_batches
-            
-            status.targets = int(self.ssh_exec(ip, f"wc -l < {work_dir}/server_main_list.txt 2>/dev/null || echo 0", 5) or 0)
-            
+            status.targets = _as_int(metrics.get('TARGETS'))
+
             scanned_from_done = batches_done * batch_size
-            current_scanned = 0
-            
-            redis_keys = self.ssh_exec(ip, "redis-cli KEYS '*hash*' 2>/dev/null", 5)
-            if redis_keys:
-                for key in redis_keys.split('\n'):
-                    key = key.strip()
-                    if key:
-                        count = self.ssh_exec(ip, f"redis-cli SCARD {key} 2>/dev/null", 5)
-                        if count and count.isdigit() and int(count) > current_scanned:
-                            current_scanned = int(count)
-            
-            if current_scanned == 0:
-                for pattern in ['gemini:dedup:hashes', 'gemini:hashes', 'dedup:hashes']:
-                    count = self.ssh_exec(ip, f"redis-cli SCARD {pattern} 2>/dev/null", 5)
-                    if count and count.isdigit() and int(count) > 0:
-                        current_scanned = int(count)
-                        break
-            
-            if current_scanned == 0:
-                dedup_count = self.ssh_exec(ip, f"wc -l < {work_dir}/{dedup_file} 2>/dev/null", 5)
-                if dedup_count and dedup_count.isdigit():
-                    current_scanned = int(dedup_count)
-            
+            current_scanned = _as_int(metrics.get('SCANNED'))
             status.scanned = scanned_from_done + current_scanned
             status.current_batch_progress = current_scanned
-            
+
             prev_scanned = self.previous_scanned.get(ip, 0)
             if prev_scanned > 0 and status.scanned > prev_scanned:
                 status.speed = (status.scanned - prev_scanned) / 5
             self.previous_scanned[ip] = status.scanned
-            
-            hits_content = self.ssh_exec(ip, f"cat {work_dir}/{result_dir}/*.txt 2>/dev/null | head -100", 8)
+
             valid_count = 0
-            if hits_content:
-                for line in hits_content.split('\n'):
-                    if ' | ' in line:
-                        parts = line.split(' | ', 1)
-                        if len(parts) == 2:
-                            cred = parts[1].strip()
-                            cred_lower = cred.lower()
-                            if any(j in cred_lower for j in self.junk_patterns):
-                                continue
-                            if len(cred) < 15:
-                                continue
-                            if cred.startswith(('http', '/', 'www.')):
-                                continue
-                            if cred.replace('_', '').islower() and '_' in cred:
-                                continue
-                            valid_count += 1
+            for line in metrics.get('HITS', '').split('\n'):
+                if ' | ' in line:
+                    parts = line.split(' | ', 1)
+                    if len(parts) == 2:
+                        cred = parts[1].strip()
+                        cred_lower = cred.lower()
+                        if any(j in cred_lower for j in self.junk_patterns):
+                            continue
+                        if len(cred) < 15:
+                            continue
+                        if cred.startswith(('http', '/', 'www.')):
+                            continue
+                        if cred.replace('_', '').islower() and '_' in cred:
+                            continue
+                        valid_count += 1
             status.hits = valid_count
-            
+
         except Exception as e:
             status.status = "ERROR"
             status.error = str(e)[:50]
