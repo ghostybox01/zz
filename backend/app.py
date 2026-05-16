@@ -1545,7 +1545,10 @@ def handle_vps_start_monitoring():
     """Start VPS monitoring"""
     manager = get_ssh_manager()
     if manager:
-        manager.start_monitoring(vps_status_callback, interval=5)
+        # Don't force a 5s probe interval here — let SSHManager pick from
+        # ssh_config.json's monitor_interval (defaults to 30s) so we don't
+        # hammer workers with reconnect/probe storms.
+        manager.start_monitoring(vps_status_callback)
         emit('vps_monitoring_started', {'success': True})
 
 @socketio.on('vps_stop_monitoring')
@@ -1559,6 +1562,22 @@ def handle_vps_stop_monitoring():
 # ==================== STARTUP ====================
 # Run at module-load time so gunicorn workers (which import app:app, never hit __main__) initialize the DB.
 init_db()
+
+# Kick the SSH monitor at boot. Previously this only started when the
+# frontend emitted `vps_start_monitoring` over socket.io, so a worker
+# that boots while no dashboard tab is open (or before the socket
+# connects) would stay in self.servers = {} forever. get_cached_status
+# returns UNKNOWN for every IP in that state, which mapStatus on the
+# frontend falls through to 'reconnecting' — that's the RECONNECT pill.
+# Starting here means the cache is warm well before the first /api/vps/status
+# request lands.
+try:
+    if SSH_AVAILABLE:
+        _mgr = get_ssh_manager()
+        if _mgr:
+            _mgr.start_monitoring(vps_status_callback)
+except Exception as _e:
+    print(f"[startup] could not start SSH monitoring: {_e}")
 
 # ==================== MAIN ====================
 
