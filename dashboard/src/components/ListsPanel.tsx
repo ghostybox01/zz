@@ -18,7 +18,7 @@ type UploadError = { kind: 'duplicate' | 'empty' | 'too-large' | 'read'; message
 
 // Files above this threshold are streamed to the backend in chunks instead of loaded into the browser.
 const CHUNK_THRESHOLD = 20 * 1024 * 1024   // 20 MiB
-const CHUNK_SIZE      = 50 * 1024 * 1024   // 50 MiB per request (~4 requests for 200 MB)
+const CHUNK_SIZE      = 10 * 1024 * 1024   // 10 MiB per chunk — 20 updates for a 200 MB file
 
 export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeploy }: Props) {
   const fileRef = useRef<HTMLInputElement>(null)
@@ -108,12 +108,17 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     setUploadProgress(0)
     try {
       for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE
-        const content = await file.slice(start, start + CHUNK_SIZE).text()
-        await reconVps.uploadChunk(uploadId, i, totalChunks, content)
-        setUploadProgress(Math.round(((i + 1) / totalChunks) * 95))
+        const chunkStart = i * CHUNK_SIZE
+        const content = await file.slice(chunkStart, chunkStart + CHUNK_SIZE).text()
+        // XHR so we get byte-level progress within the chunk
+        await uploadChunkXhr(uploadId, i, totalChunks, content, (bytesDone, bytesTotal) => {
+          const chunkBase = (i / totalChunks) * 95
+          const chunkSpan = (1 / totalChunks) * 95
+          setUploadProgress(Math.round(chunkBase + (bytesDone / bytesTotal) * chunkSpan))
+        })
       }
 
+      setUploadProgress(98)
       const result = await reconVps.finalizeUpload(uploadId, totalChunks, file.name)
       setUploadProgress(100)
 
@@ -132,11 +137,33 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     } catch (e) {
       setError({
         kind: 'too-large',
-        message: `Chunked upload failed: ${(e as Error).message}. For very large lists without a connected backend, use SCP: scp your-list.txt root@<vps-ip>:/opt/reconx/targets.txt`,
+        message: `Chunked upload failed: ${(e as Error).message}. If no backend is connected, copy via SCP instead.`,
       })
     } finally {
       setUploadProgress(null)
     }
+  }
+
+  function uploadChunkXhr(
+    uploadId: string,
+    chunkIndex: number,
+    totalChunks: number,
+    content: string,
+    onProgress: (done: number, total: number) => void,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const body = JSON.stringify({ upload_id: uploadId, chunk_index: chunkIndex, total_chunks: totalChunks, content })
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', '/api/vps/upload-chunk')
+      xhr.setRequestHeader('Content-Type', 'application/json')
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded, e.total) }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve()
+        else reject(new Error(`chunk ${chunkIndex} failed: HTTP ${xhr.status} — ${xhr.responseText.slice(0, 120)}`))
+      }
+      xhr.onerror = () => reject(new Error(`chunk ${chunkIndex} network error`))
+      xhr.send(body)
+    })
   }
 
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
