@@ -29,10 +29,6 @@ import { WarcPanel } from './components/WarcPanel'
 import { readTargetTxtFile } from './lib/targetList'
 import { VulnerabilityPicker } from './components/VulnerabilityPicker'
 import { demoFindingsSeed } from './data/demoFindings'
-import { demoFleetSeed } from './data/demoFleet'
-import { demoSnapshot } from './data/demoSnapshot'
-import { demoListsSeed } from './data/demoLists'
-import { demoScansSeed, demoShardsSeed } from './data/demoScans'
 import { VULN_CATALOG, defaultVulnSelection, type VulnSelection } from './data/vulnCatalog'
 import { useFleetEnrollment } from './hooks/useFleetEnrollment'
 import { useLiveScan, type LiveTotals } from './hooks/useLiveScan'
@@ -49,7 +45,7 @@ import { stats as reconStatsApi, vps as reconVps } from './lib/reconApi'
 import { pushCpuSample } from './lib/vpsHistory'
 import { allocateChunks } from './lib/splitWorkload'
 import { fmtDuration, fmtInt, fmtPercent } from './lib/format'
-import type { Finding, RunSnapshot, Scan, ScanShard, TargetList } from './types'
+import type { Finding, RunSnapshot, Scan, ScanShard, TargetList, VpsNode } from './types'
 
 const TOAST_QUEUE_CAP = 48
 
@@ -57,21 +53,32 @@ function enqueueToast(prev: ToastItem[], next: ToastItem): ToastItem[] {
   return [...prev, next].slice(-TOAST_QUEUE_CAP)
 }
 
-const cloneFleet = () => demoFleetSeed.map((n) => ({ ...n }))
+function emptySnapshot(): RunSnapshot {
+  return {
+    id: 'session',
+    label: 'New session',
+    startedAt: new Date().toISOString(),
+    snapshots: [],
+    targetLiveDomains: 0,
+    liveDomains: 0,
+    totalExtracted: 0,
+    totalTested: 0,
+    filesProcessed: 0,
+    filesTotal: 0,
+    elapsedSeconds: 0,
+  }
+}
 
 export default function App() {
   const [tab, setTab] = useState<DashboardTab>('ravenx')
   const [activeScanId, setActiveScanId] = useState<string | null>(null)
   const [startupDone, setStartupDone] = useState<boolean>(() => shouldSkipStartupCheck())
 
-  const [run, setRun] = useState<RunSnapshot>(demoSnapshot)
-  const [fleet, setFleet] = useState(cloneFleet)
-  const [scans, setScans] = useState<Scan[]>(() => demoScansSeed.map((s) => ({ ...s })))
-  const [shards, setShards] = useState<ScanShard[]>(() => demoShardsSeed.map((s) => ({ ...s })))
-  const [lists, setLists] = useState<TargetList[]>(() => {
-    const stored = loadLists()
-    return stored.length > 0 ? stored : demoListsSeed.map((l) => ({ ...l }))
-  })
+  const [run, setRun] = useState<RunSnapshot>(emptySnapshot)
+  const [fleet, setFleet] = useState<VpsNode[]>([])
+  const [scans, setScans] = useState<Scan[]>([])
+  const [shards, setShards] = useState<ScanShard[]>([])
+  const [lists, setLists] = useState<TargetList[]>(() => loadLists())
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const lastToastIdRef = useRef<string | null>(null)
   const [liveCfg, setLiveCfg] = useState<LiveSourceConfig>(() => loadLiveSource())
@@ -81,9 +88,7 @@ export default function App() {
     filesProcessed: 0,
     totalFindings: 0,
   })
-  const [findings, setFindings] = useState<Finding[]>(() =>
-    liveCfg.enabled ? [] : demoFindingsSeed.map((f) => ({ ...f })),
-  )
+  const [findings, setFindings] = useState<Finding[]>([])
   const [vulnSel, setVulnSel] = useState<VulnSelection>(() => defaultVulnSelection(true))
 
   const [targets, setTargets] = useState<{ count: number; name: string | null }>({
@@ -91,7 +96,7 @@ export default function App() {
     name: null,
   })
 
-  const [scanning, setScanning] = useState(true)
+  const [scanning, setScanning] = useState(false)
   const [warcScanning, setWarcScanning] = useState(false)
 
   const vulnProviders = useMemo(() => {
@@ -365,17 +370,19 @@ export default function App() {
   }
 
   const resetEverything = () => {
-    setRun({ ...demoSnapshot })
-    setFleet(cloneFleet())
+    setRun(emptySnapshot())
+    setFleet([])
     clearFleetCredentials()
     clearListBodies()
+    setLists([])
+    saveLists([])
     setTargets({ count: 0, name: null })
     setVulnSel(defaultVulnSelection(true))
-    setFindings(demoFindingsSeed.map((f) => ({ ...f })))
-    setScans(demoScansSeed.map((s) => ({ ...s })))
-    setShards(demoShardsSeed.map((s) => ({ ...s })))
+    setFindings([])
+    setScans([])
+    setShards([])
     setActiveScanId(null)
-    setScanning(true)
+    setScanning(false)
     setWarcScanning(false)
   }
 
@@ -881,12 +888,7 @@ export default function App() {
                       onChange={(c) => {
                         setLiveCfg(c)
                         if (c.enabled) {
-                          // Clear demo seed when first switching to live mode so the table only shows real hits.
-                          setFindings((prev) =>
-                            prev === demoFindingsSeed
-                              ? []
-                              : prev.filter((f) => !f.id.startsWith('fd-')),
-                          )
+                          setFindings((prev) => prev.filter((f) => !f.id.startsWith('fd-')))
                         }
                       }}
                       status={liveStatus}
@@ -934,7 +936,7 @@ export default function App() {
                           Export run metrics JSON
                         </button>
                         <button type="button" className="btn-secondary" onClick={resetEverything}>
-                          Reset demo
+                          Reset
                         </button>
                       </div>
                       <p className="settings-hint">
