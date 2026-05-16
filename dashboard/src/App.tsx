@@ -29,10 +29,10 @@ import { VULN_CATALOG, defaultVulnSelection, type VulnSelection } from './data/v
 import { useFleetEnrollment } from './hooks/useFleetEnrollment'
 import { useReconStats } from './hooks/useReconStats'
 import { useReconFleet } from './hooks/useReconFleet'
-import { loadLists, saveLists, hashContent, makeListId } from './lib/listsStorage'
+import { loadLists, saveLists } from './lib/listsStorage'
 import { loadFleetControl, deployListViaApi, type FleetControlConfig } from './lib/fleetControl'
 import { clearFleetCredentials, getFleetCredential } from './lib/fleetCredStore'
-import { deleteListBody, getListBody, clearListBodies, setListBody } from './lib/listBodyCache'
+import { deleteListBody, getListBody, clearListBodies } from './lib/listBodyCache'
 import { stats as reconStatsApi, vps as reconVps } from './lib/reconApi'
 import { pushCpuSample } from './lib/vpsHistory'
 import { allocateChunks } from './lib/splitWorkload'
@@ -63,8 +63,6 @@ export default function App() {
     count: 0,
     name: null,
   })
-
-  const [warcScanning, setWarcScanning] = useState(false)
 
   // ─── Real backend (Raven Flask) — overrides mocks when reachable ───
   const reconStats = useReconStats()
@@ -246,7 +244,6 @@ export default function App() {
     setScans([])
     setShards([])
     setActiveScanId(null)
-    setWarcScanning(false)
   }
 
   const aggregates = useMemo(() => {
@@ -259,15 +256,6 @@ export default function App() {
   const hitInsights = useMemo(() => {
     const cracks = findings.filter((f) => f.severity === 'critical' || f.severity === 'high').length
     return { total: findings.length, cracks }
-  }, [findings])
-
-  const warcExportHosts = useMemo(() => {
-    const hosts = new Set<string>()
-    for (const f of findings) {
-      const h = f.hostname?.trim()
-      if (h) hosts.add(h)
-    }
-    return [...hosts]
   }, [findings])
 
   const [clock, setClock] = useState(() => new Date())
@@ -304,37 +292,6 @@ export default function App() {
       return out
     })
   }, [])
-
-  const exportWarcFindingsToList = useCallback(() => {
-    if (warcExportHosts.length === 0) {
-      pushAlertToast('Nothing to export', 'Harvest findings first — no hostnames in the inbox.', 'info')
-      return
-    }
-    const body = warcExportHosts.join('\n')
-    const hash = hashContent(body)
-    const dup = lists.find((l) => l.contentHash === hash)
-    if (dup) {
-      pushAlertToast('Already exported', `Identical list exists as "${dup.name}".`, 'info')
-      setTab('lists')
-      return
-    }
-    const stamp = new Date().toISOString().slice(0, 10)
-    const next: TargetList = {
-      id: makeListId(),
-      name: `warc-hits-${stamp}.txt`,
-      uploadedAt: new Date().toISOString(),
-      lineCount: warcExportHosts.length,
-      contentHash: hash,
-      preview: warcExportHosts.slice(0, 6),
-      assignedVpsIds: [],
-      status: 'idle',
-      note: 'Exported from WARC harvest findings',
-    }
-    setListBody(next.id, body)
-    upsertList(next)
-    pushAlertToast(`Exported ${warcExportHosts.length} hosts`, `Created "${next.name}" on Lists tab.`, 'info')
-    setTab('lists')
-  }, [warcExportHosts, lists, upsertList, pushAlertToast])
 
   /** When the real Raven backend is up, deploy uses /api/vps/upload-targets + /api/vps/deploy
    *  against the operator's rostered VPSes (`server_ips.txt`). The chip selection in ListsPanel

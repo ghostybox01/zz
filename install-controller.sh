@@ -122,9 +122,16 @@ log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-sc
 
 # ── 7b. Build the Go warc harvester binary (controller-local) ─────────────
 # Built at install time so the gunicorn service (which has no $PATH to
-# /usr/bin/go) doesn't need to invoke `go build` at runtime.
+# /usr/bin/go) doesn't need to invoke `go build` at runtime. warc.go has
+# external deps (schollz/progressbar) so a go.mod is required — `go mod
+# init`+`tidy` here mirrors the scanner block above.
 log "Building the Go warc harvester binary for controller use…"
 cd "$INSTALL_DIR"
+sudo -u "$SERVICE_USER" rm -f go.sum
+if [[ ! -f go.mod ]]; then
+  sudo -u "$SERVICE_USER" go mod init reconx-warc >/dev/null 2>&1 || true
+fi
+sudo -u "$SERVICE_USER" go mod tidy >/dev/null 2>&1 || warn "warc go mod tidy reported issues — continuing"
 sudo -u "$SERVICE_USER" GOOS=linux GOARCH=amd64 go build -o reconx-warc warc.go
 chmod +x "$INSTALL_DIR/reconx-warc"
 log "WARC binary built (Linux/amd64): $(du -h "$INSTALL_DIR/reconx-warc" | awk '{print $1}')"
