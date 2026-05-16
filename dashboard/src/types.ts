@@ -186,6 +186,8 @@ export type TargetList = {
   uploadedAt: string
   /** Total non-empty line count. */
   lineCount: number
+  /** Raw file size in bytes (from File.size at upload time). */
+  fileSize?: number
   /** SHA-1-ish content hash for dedup. */
   contentHash: string
   /** First few lines for the card preview. */

@@ -18,6 +18,12 @@ type Props = {
   onRename: (listId: string, name: string) => void
 }
 
+function fmtSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${Math.round(bytes / 1024)} KB`
+}
+
 function fmtAge(iso: string): string {
   const ms = Date.now() - Date.parse(iso)
   if (!Number.isFinite(ms) || ms < 0) return '—'
@@ -82,6 +88,9 @@ export function ListCard({
           )}
           <p className="tlist__meta">
             <span className="mono">{list.lineCount.toLocaleString()} lines</span>
+            {list.fileSize != null && (
+              <><span className="muted"> · </span><span className="mono">{fmtSize(list.fileSize)}</span></>
+            )}
             <span className="muted"> · </span>
             <span className="muted">uploaded {fmtAge(list.uploadedAt)}</span>
             <span className="muted"> · </span>

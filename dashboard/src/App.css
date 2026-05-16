@@ -4672,6 +4672,62 @@
   margin: 1rem 0;
 }
 
+/* Storage quota bar */
+.lists-quota {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  margin-bottom: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--muted, #888);
+}
+.lists-quota--warn {
+  border-color: rgba(255, 160, 0, 0.4);
+  background: rgba(255, 160, 0, 0.06);
+  color: #ffa000;
+}
+.lists-quota--full {
+  border-color: rgba(229, 57, 53, 0.45);
+  background: rgba(229, 57, 53, 0.07);
+  color: #ef5350;
+}
+.lists-quota__bar-wrap {
+  flex-shrink: 0;
+  width: 120px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.1);
+  overflow: hidden;
+}
+.lists-quota__bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent, #00e5a0);
+  transition: width 0.3s ease;
+}
+.lists-quota--warn .lists-quota__bar-fill {
+  background: #ffa000;
+}
+.lists-quota--full .lists-quota__bar-fill {
+  background: #ef5350;
+}
+.lists-quota__label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Disabled upload zone when quota is full */
+.lists-upload--disabled {
+  opacity: 0.5;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
 /* Filter row reuses .scan-filter from the scan list */
 
 .lists-filter-row {

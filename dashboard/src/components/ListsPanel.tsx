@@ -20,6 +20,15 @@ type UploadError = { kind: 'duplicate' | 'empty' | 'too-large' | 'read'; message
 const CHUNK_THRESHOLD = 20 * 1024 * 1024   // 20 MiB
 const CHUNK_SIZE      = 10 * 1024 * 1024   // 10 MiB per chunk — 20 updates for a 200 MB file
 
+const QUOTA_LIMIT = 10 * 1024 ** 3   // 10 GB hard cap
+const QUOTA_WARN  = 9.5 * 1024 ** 3  // 9.5 GB — show warning
+
+function fmtSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${Math.round(bytes / 1024)} KB`
+}
+
 export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeploy }: Props) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -47,6 +56,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
   }, [lists])
 
   const totalLines = useMemo(() => lists.reduce((s, l) => s + l.lineCount, 0), [lists])
+  const totalBytes = useMemo(() => lists.reduce((s, l) => s + (l.fileSize ?? 0), 0), [lists])
   const assignedFleet = useMemo(() => {
     const set = new Set<string>()
     for (const l of lists) for (const v of l.assignedVpsIds) set.add(v)
@@ -58,6 +68,11 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     setError(null)
     if (file.size === 0) {
       setError({ kind: 'empty', message: 'File is empty.' })
+      return
+    }
+    if (totalBytes + file.size > QUOTA_LIMIT) {
+      const free = QUOTA_LIMIT - totalBytes
+      setError({ kind: 'too-large', message: `Not enough space — ${fmtSize(free)} remaining, file is ${fmtSize(file.size)}. Delete some lists first.` })
       return
     }
 
@@ -88,6 +103,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
       name: file.name,
       uploadedAt: new Date().toISOString(),
       lineCount: parsed.lineCount,
+      fileSize: file.size,
       contentHash: parsed.hash,
       preview: parsed.preview,
       assignedVpsIds: [],
@@ -150,6 +166,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
           name: file.name,
           uploadedAt: new Date().toISOString(),
           lineCount: result.targets,
+          fileSize: file.size,
           contentHash: `r2-${key}`,
           preview,
           assignedVpsIds: [],
@@ -192,6 +209,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
         name: file.name,
         uploadedAt: new Date().toISOString(),
         lineCount: result.targets,
+        fileSize: file.size,
         contentHash: `server-${uploadId}`,
         preview,
         assignedVpsIds: [],
@@ -274,11 +292,32 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
         </div>
       </header>
 
+      {/* Storage quota bar — always visible once lists exist */}
+      {lists.length > 0 && (
+        <div className={`lists-quota${totalBytes >= QUOTA_WARN ? totalBytes >= QUOTA_LIMIT ? ' lists-quota--full' : ' lists-quota--warn' : ''}`}>
+          <div className="lists-quota__bar-wrap">
+            <div
+              className="lists-quota__bar-fill"
+              style={{ width: `${Math.min(100, (totalBytes / QUOTA_LIMIT) * 100).toFixed(1)}%` }}
+            />
+          </div>
+          <span className="lists-quota__label">
+            {fmtSize(totalBytes)} / 10 GB used
+            {totalBytes >= QUOTA_WARN && totalBytes < QUOTA_LIMIT && (
+              <strong> — running low, delete lists to free space</strong>
+            )}
+            {totalBytes >= QUOTA_LIMIT && (
+              <strong> — storage full, delete lists before uploading more</strong>
+            )}
+          </span>
+        </div>
+      )}
+
       <div
-        className={`lists-upload${dragOver ? ' lists-upload--over' : ''}`}
-        onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+        className={`lists-upload${dragOver ? ' lists-upload--over' : ''}${totalBytes >= QUOTA_LIMIT ? ' lists-upload--disabled' : ''}`}
+        onDragOver={(e) => { if (totalBytes < QUOTA_LIMIT) { e.preventDefault(); setDragOver(true) } }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
+        onDrop={(e) => { if (totalBytes < QUOTA_LIMIT) onDrop(e) else e.preventDefault() }}
       >
         <input
           ref={fileRef}
@@ -302,7 +341,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
           <button
             type="button"
             className="btn-primary btn-glass"
-            disabled={uploadProgress !== null}
+            disabled={uploadProgress !== null || totalBytes >= QUOTA_LIMIT}
             onClick={() => fileRef.current?.click()}
           >
             Browse .txt
