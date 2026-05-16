@@ -122,19 +122,28 @@ log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-sc
 
 # ── 7b. Build the Go warc harvester binary (controller-local) ─────────────
 # Built at install time so the gunicorn service (which has no $PATH to
-# /usr/bin/go) doesn't need to invoke `go build` at runtime. warc.go has
-# external deps (schollz/progressbar) so a go.mod is required — `go mod
-# init`+`tidy` here mirrors the scanner block above.
+# /usr/bin/go) doesn't need to invoke `go build` at runtime. The build
+# happens in a fresh tempdir, NOT in $INSTALL_DIR — `go mod tidy` would
+# otherwise descend into $INSTALL_DIR/go/pkg/mod (the SERVICE_USER's
+# module cache) and choke on the cached @version dirs. After build the
+# binary is moved into place at $INSTALL_DIR/reconx-warc.
 log "Building the Go warc harvester binary for controller use…"
-cd "$INSTALL_DIR"
-sudo -u "$SERVICE_USER" rm -f go.sum
-if [[ ! -f go.mod ]]; then
-  sudo -u "$SERVICE_USER" go mod init reconx-warc >/dev/null 2>&1 || true
+WARC_BUILD_DIR=$(sudo -u "$SERVICE_USER" mktemp -d)
+sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/warc.go" "$WARC_BUILD_DIR/"
+sudo -u "$SERVICE_USER" bash -c "
+  cd '$WARC_BUILD_DIR' &&
+  /usr/bin/go mod init reconx-warc >/dev/null 2>&1 &&
+  /usr/bin/go get github.com/schollz/progressbar/v3 >/dev/null 2>&1 &&
+  /usr/bin/go mod tidy >/dev/null 2>&1 &&
+  GOOS=linux GOARCH=amd64 /usr/bin/go build -o '$INSTALL_DIR/reconx-warc' warc.go
+" || warn "warc build reported issues — check manually"
+sudo -u "$SERVICE_USER" rm -rf "$WARC_BUILD_DIR"
+chmod +x "$INSTALL_DIR/reconx-warc" 2>/dev/null || true
+if [[ -f "$INSTALL_DIR/reconx-warc" ]]; then
+  log "WARC binary built (Linux/amd64): $(du -h "$INSTALL_DIR/reconx-warc" | awk '{print $1}')"
+else
+  warn "reconx-warc binary not produced — WARC tab will return 503 until manually built"
 fi
-sudo -u "$SERVICE_USER" go mod tidy >/dev/null 2>&1 || warn "warc go mod tidy reported issues — continuing"
-sudo -u "$SERVICE_USER" GOOS=linux GOARCH=amd64 go build -o reconx-warc warc.go
-chmod +x "$INSTALL_DIR/reconx-warc"
-log "WARC binary built (Linux/amd64): $(du -h "$INSTALL_DIR/reconx-warc" | awk '{print $1}')"
 
 # ── 8. SSH key for fleet ops ──────────────────────────────────────────────
 SSH_DIR="$INSTALL_DIR/.ssh"

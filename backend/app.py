@@ -1040,7 +1040,12 @@ def _ensure_warc_binary() -> 'tuple[bool, str]':
         return True, ''
     return False, (
         'reconx-warc binary missing — rebuild with: '
-        'sudo -u reconx /usr/bin/go build -o /opt/reconx/reconx-warc /opt/reconx/warc.go'
+        'sudo -u reconx bash -c "WB=$(mktemp -d); cp /opt/reconx/warc.go $WB/; '
+        'cd $WB && /usr/bin/go mod init reconx-warc && '
+        '/usr/bin/go get github.com/schollz/progressbar/v3 && '
+        '/usr/bin/go mod tidy && '
+        'GOOS=linux GOARCH=amd64 /usr/bin/go build -o /opt/reconx/reconx-warc warc.go; '
+        'rm -rf $WB"'
     )
 
 
