@@ -23,9 +23,7 @@ export function WarcPanel() {
   }
 
   useEffect(() => {
-    void refresh()
-    pollTimer.current = window.setInterval(() => void refresh(), POLL_MS)
-    void (async () => {
+    const refreshHosts = async () => {
       try {
         const r = await warc.hosts()
         // Backend now returns `['controller', ...warc-tagged workers]` already —
@@ -34,11 +32,22 @@ export function WarcPanel() {
         const fromServer = Array.isArray(r?.hosts) && r.hosts.length > 0
           ? r.hosts
           : ['controller']
-        setHosts(fromServer)
+        setHosts((prev) =>
+          prev.length === fromServer.length && prev.every((h, i) => h === fromServer[i])
+            ? prev
+            : fromServer,
+        )
       } catch {
-        setHosts(['controller'])
+        // Keep whatever we already had — a transient failure shouldn't
+        // strand the dropdown back to controller-only.
       }
-    })()
+    }
+    void refresh()
+    void refreshHosts()
+    pollTimer.current = window.setInterval(() => {
+      void refresh()
+      void refreshHosts()
+    }, POLL_MS)
     return () => {
       if (pollTimer.current) window.clearInterval(pollTimer.current)
     }
