@@ -6,7 +6,7 @@ import { CpuRing } from './CpuRing'
 import { CpuSparkline } from './CpuSparkline'
 import { ProgressBar } from './ProgressBar'
 
-export type VpsNodeAction = 'start' | 'stop' | 'restart'
+export type VpsNodeAction = 'start' | 'stop' | 'restart' | 'reconnect' | 'test-ssh'
 
 type Props = {
   node: VpsNode
@@ -199,6 +199,24 @@ export function VpsCard({ node, lists = [], onForceOutage, onAction }: Props) {
                 title="POST /api/vps/server/<ip>/restart"
               >
                 {pending === 'restart' ? '…' : '↻ Restart'}
+              </button>
+              <button
+                type="button"
+                className="btn-glass btn-glass--xs"
+                disabled={pending !== null}
+                onClick={() => void runAction('reconnect')}
+                title="POST /api/vps/server/<ip>/fix — self-heal SSH + scanner"
+              >
+                {pending === 'reconnect' ? '…' : '⟲ Reconnect'}
+              </button>
+              <button
+                type="button"
+                className="btn-glass btn-glass--xs"
+                disabled={pending !== null}
+                onClick={() => void runAction('test-ssh')}
+                title="GET /api/vps/server/<ip>/test — probe SSH only"
+              >
+                {pending === 'test-ssh' ? '…' : '⚡ SSH Test'}
               </button>
               {actionMessage && <span className="fnode__action-msg muted">{actionMessage}</span>}
             </div>

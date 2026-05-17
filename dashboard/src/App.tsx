@@ -329,12 +329,14 @@ export default function App() {
 
   /** Per-node action handler used by VpsCard when backend is live. */
   const onVpsAction = useCallback(
-    async (ip: string, action: 'start' | 'stop' | 'restart'): Promise<{ ok: boolean; message?: string }> => {
+    async (ip: string, action: 'start' | 'stop' | 'restart' | 'reconnect' | 'test-ssh'): Promise<{ ok: boolean; message?: string }> => {
       try {
         const result =
           action === 'start' ? await reconVps.start(ip)
           : action === 'stop' ? await reconVps.stop(ip)
-          : await reconVps.restart(ip)
+          : action === 'restart' ? await reconVps.restart(ip)
+          : action === 'reconnect' ? await reconVps.fix(ip)
+          : await reconVps.test(ip)
         const ok = result.success !== false
         return { ok, message: typeof result.message === 'string' ? result.message : action }
       } catch (e) {
