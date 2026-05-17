@@ -1075,7 +1075,31 @@ def _load_warc_state() -> None:
         print(f'[warc] state load failed: {e}')
 
 
+_warc_state_mtime: float = 0.0
+
+
+def _reload_warc_state_if_changed() -> None:
+    """Re-hydrate _warc_state when the sidecar's mtime has advanced. Gunicorn
+    runs multiple workers with separate memory — without this, worker A can
+    adopt an orphan PID and worker B's status endpoint still sees Idle."""
+    global _warc_state_mtime
+    try:
+        if not os.path.exists(WARC_STATE_FILE):
+            return
+        mtime = os.path.getmtime(WARC_STATE_FILE)
+        if mtime <= _warc_state_mtime:
+            return
+        _load_warc_state()
+        _warc_state_mtime = mtime
+    except Exception as e:
+        print(f'[warc] state reload check failed: {e}')
+
+
 _load_warc_state()
+try:
+    _warc_state_mtime = os.path.getmtime(WARC_STATE_FILE) if os.path.exists(WARC_STATE_FILE) else 0.0
+except Exception:
+    _warc_state_mtime = 0.0
 
 
 def _validate_run_on(run_on: str) -> 'tuple[bool, str]':
@@ -1160,6 +1184,7 @@ def api_warc_start():
                                       the 300-goroutine harvest doesn't
                                       starve the controller serving the UI."""
     global _warc_proc
+    _reload_warc_state_if_changed()
     with _warc_lock:
         if _warc_proc is not None and _warc_proc.poll() is None:
             return jsonify({'error': 'WARC already running', 'pid': _warc_proc.pid}), 409
@@ -1209,22 +1234,32 @@ def api_warc_start():
 
         # Busy-binary guard. Without this, a second Start while an earlier
         # run is alive fails opaquely with ETXTBSY on the SFTP side and the
-        # operator sees a generic 502. pgrep -f catches both the controller-
-        # spawned process and any reconx-warc launched manually on the box.
-        existing = mgr.ssh_exec(ip, 'pgrep -fa reconx-warc | head -1', 5).strip()
+        # operator sees a generic 502. Match by COMM (process name) only —
+        # pgrep -f would also catch the nohup wrapper bash whose cmdline
+        # mentions 'reconx-warc', adopting the wrong PID.
+        existing = mgr.ssh_exec(ip, 'pgrep -ax reconx-warc | head -1', 5).strip()
         if existing:
             tok = existing.split(None, 1)
             existing_pid = int(tok[0]) if tok and tok[0].isdigit() else None
             if existing_pid:
                 # Adopt it into state so the cockpit reflects the truth even
-                # if the previous controller restart wiped _warc_state.
+                # if the previous controller restart wiped _warc_state. Clear
+                # terminal fields too — without that, the auto-finalizer in
+                # api_warc_status sees stale last_exit_code/r2_key from the
+                # prior run and the UI looks like a paradox: running pid, but
+                # also finished.
                 with _warc_lock:
                     _warc_state.update({
                         'run_on': ip,
                         'remote_pid': existing_pid,
                         'output_path': remote_output,
                         'log_path': remote_log,
+                        'started_at': _warc_state.get('started_at') or datetime.now().isoformat(),
                         'finished_at': None,
+                        'last_exit_code': None,
+                        'r2_key': None,
+                        'r2_uploaded_at': None,
+                        'r2_error': None,
                     })
                 _save_warc_state()
                 return jsonify({
@@ -1371,6 +1406,7 @@ def api_warc_start():
 @app.route('/api/warc/stop', methods=['POST'])
 def api_warc_stop():
     global _warc_proc
+    _reload_warc_state_if_changed()
     with _warc_lock:
         proc = _warc_proc
         run_on = _warc_state.get('run_on') or 'controller'
@@ -1421,6 +1457,7 @@ def api_warc_stop():
 @app.route('/api/warc/status', methods=['GET'])
 def api_warc_status():
     global _warc_proc
+    _reload_warc_state_if_changed()
     with _warc_lock:
         proc = _warc_proc
         state = dict(_warc_state)
@@ -1568,6 +1605,7 @@ def api_warc_export_to_r2():
 
     On the worker path the upload runs ON the worker via curl-to-presigned-URL
     so the harvest output never round-trips through the controller."""
+    _reload_warc_state_if_changed()
     with _warc_lock:
         output_path = _warc_state.get('output_path')
         run_id = _warc_state.get('run_id')
