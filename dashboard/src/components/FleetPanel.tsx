@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { TargetList, VpsNode } from '../types'
 import { vpsWorkloadState } from '../lib/vpsWorkload'
 import { VpsCard, type VpsNodeAction } from './VpsCard'
 import { TableToolbar } from './TableToolbar'
 import { vps as reconVps } from '../lib/reconApi'
+
+type WorkerRole = 'scanner' | 'warc'
 
 export type FleetBulkAction = 'start-all' | 'stop-all' | 'restart-all' | 'test-connections'
 
@@ -24,6 +26,12 @@ type Props = {
    * If omitted, removal is a no-op (read-only roster view).
    */
   onRemoveNodes?: (ids: readonly string[]) => void
+  /**
+   * Surface rename / role-change failures from the persistence calls so the
+   * operator sees them instead of a silently-reverted optimistic UI. Threaded
+   * down from App.tsx so we share the existing alert-toast queue.
+   */
+  pushAlertToast?: (title: string, message?: string, kind?: 'error' | 'info') => void
 }
 
 export function FleetPanel({
@@ -36,6 +44,7 @@ export function FleetPanel({
   onAction,
   onBulkAction,
   onRemoveNodes,
+  pushAlertToast,
 }: Props) {
   const active = useMemo(() => fleet.filter((n) => n.status !== 'removed'), [fleet])
   const removed = useMemo(() => fleet.filter((n) => n.status === 'removed'), [fleet])
@@ -58,24 +67,79 @@ export function FleetPanel({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState('')
 
+  // Per-worker label + role overrides, keyed by IP. Hard refresh will rehydrate
+  // from the server's next status payload once the backend includes them; until
+  // then this gives the operator immediate visual feedback after a rename/tag.
+  const [labelOverride, setLabelOverride] = useState<Record<string, string>>({})
+  const [roleOverride, setRoleOverride] = useState<Record<string, WorkerRole>>({})
+  const [renamingIp, setRenamingIp] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+
+  const labelFor = useCallback(
+    (n: VpsNode) => labelOverride[n.host] ?? n.label ?? n.host,
+    [labelOverride],
+  )
+  const roleFor = useCallback(
+    (n: VpsNode): WorkerRole => roleOverride[n.host] ?? 'scanner',
+    [roleOverride],
+  )
+
+  const commitRename = async (ip: string, nextLabel: string) => {
+    const trimmed = nextLabel.trim().slice(0, 80)
+    setRenamingIp(null)
+    if (!trimmed) return
+    // Capture the previous override so we can roll back if the backend rejects.
+    const previous = labelOverride[ip]
+    setLabelOverride((m) => ({ ...m, [ip]: trimmed }))
+    try {
+      await reconVps.setLabel(ip, trimmed)
+    } catch (e) {
+      setLabelOverride((m) => {
+        const next = { ...m }
+        if (previous === undefined) delete next[ip]
+        else next[ip] = previous
+        return next
+      })
+      pushAlertToast?.('Rename failed', (e as Error).message, 'error')
+    }
+  }
+
+  const toggleRole = async (ip: string, current: WorkerRole) => {
+    const nextRole: WorkerRole = current === 'warc' ? 'scanner' : 'warc'
+    const previous = roleOverride[ip]
+    setRoleOverride((m) => ({ ...m, [ip]: nextRole }))
+    try {
+      await reconVps.setRole(ip, nextRole)
+    } catch (e) {
+      setRoleOverride((m) => {
+        const next = { ...m }
+        if (previous === undefined) delete next[ip]
+        else next[ip] = previous
+        return next
+      })
+      pushAlertToast?.('Role change failed', (e as Error).message, 'error')
+    }
+  }
+
   const filterLower = filter.trim().toLowerCase()
+
   const visibleActive = useMemo(() => {
     if (!filterLower) return active
     return active.filter((n) =>
-      n.label.toLowerCase().includes(filterLower) ||
+      labelFor(n).toLowerCase().includes(filterLower) ||
       n.host.toLowerCase().includes(filterLower) ||
       n.region.toLowerCase().includes(filterLower),
     )
-  }, [active, filterLower])
+  }, [active, filterLower, labelFor])
 
   const visibleRemoved = useMemo(() => {
     if (!filterLower) return removed
     return removed.filter((n) =>
-      n.label.toLowerCase().includes(filterLower) ||
+      labelFor(n).toLowerCase().includes(filterLower) ||
       n.host.toLowerCase().includes(filterLower) ||
       n.region.toLowerCase().includes(filterLower),
     )
-  }, [removed, filterLower])
+  }, [removed, filterLower, labelFor])
 
   const allVisibleIds = useMemo(
     () => [...visibleActive, ...visibleRemoved].map((n) => n.id),
@@ -261,25 +325,30 @@ export function FleetPanel({
       <div className="flt__grid">
         {visibleActive.map((n) => (
           <div key={n.id} className="flt__row-wrap">
-            <div className="flt__row-controls">
-              <label className="flt__row-check" title="Select for bulk action">
-                <input
-                  type="checkbox"
-                  checked={selected.has(n.id)}
-                  onChange={() => toggleOne(n.id)}
-                  aria-label={`Select ${n.label}`}
-                />
-              </label>
-              <button
-                type="button"
-                className="icon-btn flt__row-trash"
-                title={`Remove ${n.label} from roster`}
-                onClick={() => handleRowTrash(n)}
-              >
-                🗑
-              </button>
-            </div>
-            <VpsCard node={n} lists={lists} onForceOutage={onAction ? undefined : onForceOutage} onAction={onAction} />
+            <FleetCardControls
+              node={n}
+              selected={selected.has(n.id)}
+              onToggleSelect={() => toggleOne(n.id)}
+              onTrash={() => handleRowTrash(n)}
+              label={labelFor(n)}
+              role={roleFor(n)}
+              renaming={renamingIp === n.host}
+              renameDraft={renameDraft}
+              onStartRename={() => {
+                setRenameDraft(labelFor(n))
+                setRenamingIp(n.host)
+              }}
+              onChangeRenameDraft={setRenameDraft}
+              onCommitRename={() => commitRename(n.host, renameDraft)}
+              onCancelRename={() => setRenamingIp(null)}
+              onToggleRole={() => toggleRole(n.host, roleFor(n))}
+            />
+            <VpsCard
+              node={{ ...n, label: labelFor(n) }}
+              lists={lists}
+              onForceOutage={onAction ? undefined : onForceOutage}
+              onAction={onAction}
+            />
           </div>
         ))}
       </div>
@@ -288,29 +357,112 @@ export function FleetPanel({
         <div className="flt__grid flt__grid--removed">
           {visibleRemoved.map((n) => (
             <div key={n.id} className="flt__row-wrap">
-              <div className="flt__row-controls">
-                <label className="flt__row-check" title="Select for bulk action">
-                  <input
-                    type="checkbox"
-                    checked={selected.has(n.id)}
-                    onChange={() => toggleOne(n.id)}
-                    aria-label={`Select ${n.label}`}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="icon-btn flt__row-trash"
-                  title={`Remove ${n.label} from roster`}
-                  onClick={() => handleRowTrash(n)}
-                >
-                  🗑
-                </button>
-              </div>
-              <VpsCard node={n} />
+              <FleetCardControls
+                node={n}
+                selected={selected.has(n.id)}
+                onToggleSelect={() => toggleOne(n.id)}
+                onTrash={() => handleRowTrash(n)}
+                label={labelFor(n)}
+                role={roleFor(n)}
+                renaming={renamingIp === n.host}
+                renameDraft={renameDraft}
+                onStartRename={() => {
+                  setRenameDraft(labelFor(n))
+                  setRenamingIp(n.host)
+                }}
+                onChangeRenameDraft={setRenameDraft}
+                onCommitRename={() => commitRename(n.host, renameDraft)}
+                onCancelRename={() => setRenamingIp(null)}
+                onToggleRole={() => toggleRole(n.host, roleFor(n))}
+              />
+              <VpsCard node={{ ...n, label: labelFor(n) }} />
             </div>
           ))}
         </div>
       )}
     </section>
+  )
+}
+
+/** Thin control strip rendered ABOVE each fleet card.
+ *  Hosts: bulk-select checkbox, rename pencil (inline input on click),
+ *  role chip (toggles scanner↔warc), and trash. Lives in its own row
+ *  so it can never overlap the card title or status pills underneath. */
+function FleetCardControls(props: {
+  node: VpsNode
+  selected: boolean
+  onToggleSelect: () => void
+  onTrash: () => void
+  label: string
+  role: WorkerRole
+  renaming: boolean
+  renameDraft: string
+  onStartRename: () => void
+  onChangeRenameDraft: (v: string) => void
+  onCommitRename: () => void
+  onCancelRename: () => void
+  onToggleRole: () => void
+}) {
+  const {
+    node, selected, onToggleSelect, onTrash, label, role,
+    renaming, renameDraft, onStartRename, onChangeRenameDraft,
+    onCommitRename, onCancelRename, onToggleRole,
+  } = props
+  return (
+    <div className="flt__row-controls">
+      <label className="flt__row-check" title="Select for bulk action">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelect}
+          aria-label={`Select ${label}`}
+        />
+      </label>
+
+      {renaming ? (
+        <input
+          type="text"
+          className="flt__row-name-edit"
+          value={renameDraft}
+          autoFocus
+          onChange={(e) => onChangeRenameDraft(e.target.value)}
+          onBlur={onCommitRename}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+            else if (e.key === 'Escape') onCancelRename()
+          }}
+          aria-label={`Rename ${node.host}`}
+        />
+      ) : (
+        <button
+          type="button"
+          className="flt__row-rename"
+          title={`Rename ${label}`}
+          onClick={onStartRename}
+        >
+          ✎
+        </button>
+      )}
+
+      <button
+        type="button"
+        className={`flt__role-chip flt__role-chip--${role}`}
+        title={`Role: ${role} — click to toggle`}
+        onClick={onToggleRole}
+      >
+        {role}
+      </button>
+
+      <span className="flt__row-controls-spacer" />
+
+      <button
+        type="button"
+        className="icon-btn flt__row-trash"
+        title={`Remove ${label} from roster`}
+        onClick={onTrash}
+      >
+        🗑
+      </button>
+    </div>
   )
 }

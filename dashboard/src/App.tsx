@@ -15,6 +15,7 @@ import { FleetBootstrap } from './components/FleetBootstrap'
 import { UpdateBanner } from './components/UpdateBanner'
 import { UpdateSettings } from './components/UpdateSettings'
 import { R2Settings } from './components/R2Settings'
+import { SSHKeySettings } from './components/SSHKeySettings'
 import { StartupCheck, shouldSkipStartupCheck } from './components/StartupCheck'
 import { ScannerConfigPanel } from './components/ScannerConfigPanel'
 import { ScannerLimitsSettings } from './components/ScannerLimitsSettings'
@@ -577,6 +578,7 @@ export default function App() {
                   const idSet = new Set(ids)
                   setFleet((prev) => prev.filter((n) => !idSet.has(n.id)))
                 }}
+                pushAlertToast={pushAlertToast}
               />
             </section>
 
@@ -668,6 +670,13 @@ export default function App() {
                   <summary>Updates (GitHub)</summary>
                   <div className="settings-acc__body">
                     <UpdateSettings />
+                  </div>
+                </details>
+
+                <details className="settings-acc">
+                  <summary>Controller SSH keypair</summary>
+                  <div className="settings-acc__body">
+                    <SSHKeySettings />
                   </div>
                 </details>
 

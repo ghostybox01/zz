@@ -186,6 +186,13 @@ export const vps = {
    */
   removeFromRoster: (ip: string) => postJson<ReconActionResult>(`/vps/server/${encodeURIComponent(ip)}/remove`),
 
+  /** Rename a worker — persisted in fleet_creds.json. Routed via /api/fleet/worker/<ip>/label. */
+  setLabel: (ip: string, label: string) =>
+    postJson<{ ok: boolean; label: string }>(`/fleet/worker/${encodeURIComponent(ip)}/label`, { label }),
+  /** Tag a worker role (scanner | warc). Routed via /api/fleet/worker/<ip>/role. */
+  setRole: (ip: string, role: 'scanner' | 'warc') =>
+    postJson<{ ok: boolean; role: 'scanner' | 'warc' }>(`/fleet/worker/${encodeURIComponent(ip)}/role`, { role }),
+
   /* ── Bulk ops ──────────────────────────────────────────────────── */
   startAll:   () => postJson<ReconActionResult>('/vps/start-all'),
   stopAll:    () => postJson<ReconActionResult>('/vps/stop-all'),
@@ -440,6 +447,24 @@ export const warc = {
   stop:   () => postJson<{ success: boolean; message?: string }>('/warc/stop', {}),
   exportToR2: () => postJson<{ success: boolean; r2_key: string }>('/warc/export-to-r2', {}),
   hosts:  () => getJson<{ hosts: string[] }>('/warc/hosts'),
+}
+
+/* ── Controller SSH keypair ───────────────────────────────────────────── */
+export type SSHKey = {
+  exists: boolean
+  pubkey: string
+  fingerprint: string
+  created_at: string | null
+  error?: string
+}
+
+export const sshKey = {
+  get: () => getJson<SSHKey>('/ssh-key'),
+  regenerate: () =>
+    postJson<{ ok: boolean; pubkey: string; fingerprint: string; message: string; error?: string }>(
+      '/ssh-key/regenerate',
+      {},
+    ),
 }
 
 /* ── Logs ──────────────────────────────────────────────────────────── */

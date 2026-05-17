@@ -21,6 +21,8 @@ import subprocess
 import shutil
 import collections
 import uuid
+import hashlib
+import base64
 
 # Import SSH Manager
 try:
@@ -1519,11 +1521,15 @@ def api_warc_export_to_r2():
 
 @app.route('/api/warc/hosts', methods=['GET'])
 def api_warc_hosts():
-    """Roster of hosts the dashboard can target. Always includes the
-    controller; remaining entries come from mgr.load_servers()."""
+    """Roster of hosts the dashboard can target for WARC harvests.
+    Always includes the controller; remaining entries are workers whose
+    operator-assigned role is 'warc' so the WARC dropdown can't
+    accidentally launch a harvest on a scanner box."""
     mgr = get_ssh_manager()
     roster = mgr.load_servers() if mgr is not None else []
-    return jsonify({'hosts': ['controller', *roster]})
+    creds = _load_fleet_creds()
+    warc_ips = [ip for ip in roster if (creds.get(ip) or {}).get('role') == 'warc']
+    return jsonify({'hosts': ['controller', *warc_ips]})
 
 
 # ==================== SSH BULK CREDS ====================
@@ -1561,7 +1567,9 @@ def _save_fleet_creds(creds: dict) -> None:
 
 
 def _remember_worker(host: str, port: int, user: str, auth_kind: str,
-                     password: str | None = None) -> None:
+                     password: str | None = None,
+                     label: str | None = None,
+                     role: str | None = None) -> None:
     """Idempotent update of the fleet_creds.json sidecar.
 
     When ``password`` is provided we persist it under the ``password`` key
@@ -1569,7 +1577,12 @@ def _remember_worker(host: str, port: int, user: str, auth_kind: str,
     pubkey gets wiped (cloud-init, fail2ban, manual rebuild). When
     ``password`` is None we carry forward any previously-stored password
     instead of clobbering it — re-running a key-auth row must not erase
-    the password we already learned for that host."""
+    the password we already learned for that host.
+
+    ``label`` and ``role`` follow the same carry-forward semantics so
+    operator-chosen friendly names and the warc/scanner role tag survive
+    every re-probe. Default role is 'scanner' when nothing has ever been
+    set."""
     creds = _load_fleet_creds()
     existing = creds.get(host) or {}
     creds[host] = {
@@ -1582,6 +1595,19 @@ def _remember_worker(host: str, port: int, user: str, auth_kind: str,
         creds[host]['password'] = password
     elif existing.get('password'):
         creds[host]['password'] = existing['password']
+    # Label: explicit value wins, otherwise carry forward an existing one.
+    if label is not None:
+        creds[host]['label'] = str(label)[:80]
+    elif 'label' in existing:
+        creds[host]['label'] = existing['label']
+    # Role: explicit value wins (validated by caller), otherwise carry
+    # forward; default to 'scanner' only when nothing exists.
+    if role in ('scanner', 'warc'):
+        creds[host]['role'] = role
+    elif existing.get('role') in ('scanner', 'warc'):
+        creds[host]['role'] = existing['role']
+    else:
+        creds[host]['role'] = 'scanner'
     # Carry forward spec/batch fields populated by the SSH probe so we
     # never clobber them on re-key.
     for k in ('cpu', 'ram_gb', 'disk_gb', 'batch_size', 'scanner_deployed_at'):
@@ -1610,6 +1636,14 @@ def _set_fleet_config(new: dict) -> None:
 # the dashboard and surfaces as 502s. Two is the safe ceiling.
 _AUTO_DEPLOY_SEMAPHORE = threading.Semaphore(2)
 
+# Serialize operator-driven writes to fleet_creds.json so a label change and a
+# role change on the same worker (or two label changes from a double-click)
+# don't read-modify-write over each other. Other callers — _remember_worker,
+# _persist_specs_if_new — are idempotent spec-capture paths, so the read-then-
+# write race there is acceptable; only the dashboard-driven label/role routes
+# need this lock.
+_FLEET_CREDS_WRITE_LOCK = threading.Lock()
+
 
 def _auto_deploy_one(ip: str) -> None:
     """Fire-and-forget bootstrap of a single worker: pushes the scanner
@@ -1623,6 +1657,13 @@ def _auto_deploy_one(ip: str) -> None:
     try:
         mgr = get_ssh_manager()
         if not mgr:
+            return
+        # Warc-dedicated workers don't get the scanner binary — they exist
+        # solely to run wget/wpull harvests against operator-supplied URL
+        # lists, and pushing the scanner over SFTP would just waste disk
+        # and risk a stray cron run.
+        creds = _load_fleet_creds()
+        if (creds.get(ip) or {}).get('role') == 'warc':
             return
         result = mgr.bootstrap_worker(ip)
         if not result.get('success'):
@@ -1957,6 +1998,40 @@ def api_fleet_auto_deploy_config():
     return jsonify(_get_fleet_config())
 
 
+@app.route('/api/fleet/worker/<ip>/label', methods=['POST'])
+def api_fleet_worker_label(ip):
+    """Update the friendly label for a worker."""
+    if not re.match(r'^[0-9a-zA-Z.\-:]{3,64}$', ip):
+        return jsonify({'error': 'invalid ip'}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    label = str(data.get('label', '')).strip()[:80]   # cap length
+    with _FLEET_CREDS_WRITE_LOCK:
+        creds = _load_fleet_creds()
+        if ip not in creds:
+            return jsonify({'error': 'ip not in fleet_creds'}), 404
+        creds[ip]['label'] = label
+        _save_fleet_creds(creds)
+    return jsonify({'ok': True, 'label': label})
+
+
+@app.route('/api/fleet/worker/<ip>/role', methods=['POST'])
+def api_fleet_worker_role(ip):
+    """Set the worker's role. 'scanner' or 'warc'."""
+    if not re.match(r'^[0-9a-zA-Z.\-:]{3,64}$', ip):
+        return jsonify({'error': 'invalid ip'}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    role = str(data.get('role', 'scanner')).strip()
+    if role not in ('scanner', 'warc'):
+        return jsonify({'error': "role must be 'scanner' or 'warc'"}), 400
+    with _FLEET_CREDS_WRITE_LOCK:
+        creds = _load_fleet_creds()
+        if ip not in creds:
+            return jsonify({'error': 'ip not in fleet_creds'}), 404
+        creds[ip]['role'] = role
+        _save_fleet_creds(creds)
+    return jsonify({'ok': True, 'role': role})
+
+
 @app.route('/api/fleet/install-keys', methods=['POST'])
 def api_fleet_install_keys():
     """For each row that authenticates with a password, append the controller's
@@ -2158,6 +2233,79 @@ def api_update():
     })
 
 
+# ==================== SSH KEY MANAGEMENT ====================
+
+SSH_KEY_PATH = '/opt/reconx/.ssh/id_ed25519'   # match what install-controller.sh writes
+SSH_PUB_PATH = SSH_KEY_PATH + '.pub'
+
+
+def _ssh_key_fingerprint(pubkey: str) -> str:
+    """SHA256:... format matching `ssh-keygen -lf -` output."""
+    try:
+        parts = pubkey.strip().split()
+        if len(parts) < 2:
+            return ''
+        raw = base64.b64decode(parts[1])
+        digest = hashlib.sha256(raw).digest()
+        return 'SHA256:' + base64.b64encode(digest).rstrip(b'=').decode('ascii')
+    except Exception:
+        return ''
+
+
+@app.route('/api/ssh-key', methods=['GET'])
+def api_ssh_key_get():
+    """Return the controller's public key, fingerprint, and creation timestamp."""
+    if not os.path.exists(SSH_PUB_PATH):
+        return jsonify({'exists': False, 'pubkey': '', 'fingerprint': '', 'created_at': None})
+    try:
+        with open(SSH_PUB_PATH, 'r') as f:
+            pubkey = f.read().strip()
+        try:
+            mtime = os.path.getmtime(SSH_PUB_PATH)
+            created_at = datetime.fromtimestamp(mtime).isoformat()
+        except Exception:
+            created_at = None
+        return jsonify({
+            'exists': True,
+            'pubkey': pubkey,
+            'fingerprint': _ssh_key_fingerprint(pubkey),
+            'created_at': created_at,
+        })
+    except Exception:
+        return jsonify({'exists': False, 'error': 'failed to read pubkey'}), 500
+
+
+@app.route('/api/ssh-key/regenerate', methods=['POST'])
+def api_ssh_key_regenerate():
+    """Replace the controller's keypair. Caller is warned in the UI that
+    every worker must be re-imported afterwards."""
+    try:
+        os.makedirs(os.path.dirname(SSH_KEY_PATH), exist_ok=True)
+        # Remove existing key files so ssh-keygen doesn't prompt.
+        for p in (SSH_KEY_PATH, SSH_PUB_PATH):
+            if os.path.exists(p):
+                os.remove(p)
+        subprocess.check_call([
+            'ssh-keygen', '-t', 'ed25519', '-N', '',
+            '-f', SSH_KEY_PATH,
+            '-C', 'reconx-controller@regenerated',
+        ], timeout=15)
+        os.chmod(SSH_KEY_PATH, 0o600)
+        os.chmod(SSH_PUB_PATH, 0o644)
+        with open(SSH_PUB_PATH, 'r') as f:
+            pubkey = f.read().strip()
+        return jsonify({
+            'ok': True,
+            'pubkey': pubkey,
+            'fingerprint': _ssh_key_fingerprint(pubkey),
+            'message': 'Keypair regenerated. Re-run Import to fleet on every worker so the new key gets installed in authorized_keys.',
+        })
+    except subprocess.CalledProcessError as e:
+        return jsonify({'ok': False, 'error': f'ssh-keygen failed (exit {e.returncode})'}), 500
+    except Exception:
+        return jsonify({'ok': False, 'error': 'regenerate failed'}), 500
+
+
 # ==================== LOGS ====================
 
 @app.route('/api/logs/controller', methods=['GET'])
@@ -2171,9 +2319,11 @@ def api_logs_controller():
         )
         return jsonify({'lines': out.splitlines()})
     except FileNotFoundError:
-        return jsonify({'error': 'journalctl not available (non-systemd host?)', 'lines': []}), 503
-    except Exception as e:
-        return jsonify({'error': str(e), 'lines': []}), 500
+        return jsonify({'error': 'journalctl not available', 'lines': []}), 503
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'journalctl timed out', 'lines': []}), 504
+    except Exception:
+        return jsonify({'error': 'controller log unavailable', 'lines': []}), 500
 
 
 @app.route('/api/logs/worker/<ip>', methods=['GET'])
