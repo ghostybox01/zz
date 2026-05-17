@@ -1029,7 +1029,27 @@ _warc_state: dict = {
     'r2_uploaded_at': None,
     'r2_error': None,
     'last_exit_code': None,
+    # Effect 1: where this run lives.
+    #   'controller' → managed by local _warc_proc.Popen
+    #   <ip>         → managed remotely; remote_pid holds the worker PID
+    'run_on': 'controller',
+    'remote_pid': None,
 }
+
+
+def _validate_run_on(run_on: str) -> 'tuple[bool, str]':
+    """Return (ok, normalized_or_err). run_on must be 'controller' or an
+    IP currently in mgr.load_servers(). Anything else is a 400."""
+    if not isinstance(run_on, str) or not run_on.strip():
+        return False, "run_on must be 'controller' or a worker IP"
+    val = run_on.strip()
+    if val == 'controller':
+        return True, 'controller'
+    mgr = get_ssh_manager()
+    roster = mgr.load_servers() if mgr is not None else []
+    if val in roster:
+        return True, val
+    return False, f"run_on {val!r} is not in fleet roster"
 
 
 def _ensure_warc_binary() -> 'tuple[bool, str]':
@@ -1091,15 +1111,25 @@ def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
 @app.route('/api/warc/start', methods=['POST'])
 def api_warc_start():
     """Launch warc.go. Body (all optional):
-       {max_domains: int, extract_workers: int, test_workers: int, verbose: bool}"""
+       {max_domains, extract_workers, test_workers, verbose, run_on}
+
+    run_on: 'controller' (default) → run as local subprocess on the bridge.
+            <worker_ip>             → SFTP the binary and launch over SSH so
+                                      the 300-goroutine harvest doesn't
+                                      starve the controller serving the UI."""
     global _warc_proc
     with _warc_lock:
         if _warc_proc is not None and _warc_proc.poll() is None:
             return jsonify({'error': 'WARC already running', 'pid': _warc_proc.pid}), 409
-
-    ok, err = _ensure_warc_binary()
-    if not ok:
-        return jsonify({'error': err}), 503
+        # Also block if a remote worker run is still flagged active.
+        if _warc_state.get('run_on') not in (None, 'controller') and \
+                _warc_state.get('finished_at') is None and \
+                _warc_state.get('remote_pid') is not None:
+            return jsonify({
+                'error': 'WARC already running on worker',
+                'run_on': _warc_state.get('run_on'),
+                'remote_pid': _warc_state.get('remote_pid'),
+            }), 409
 
     data = request.get_json(force=True, silent=True) or {}
     try:
@@ -1110,7 +1140,92 @@ def api_warc_start():
         return jsonify({'error': 'invalid numeric option'}), 400
     verbose = bool(data.get('verbose'))
 
+    run_on_raw = data.get('run_on', 'controller')
+    ok_run, run_on = _validate_run_on(run_on_raw)
+    if not ok_run:
+        return jsonify({'error': run_on}), 400
+
+    # The controller-side binary must exist either way: for the controller
+    # path we exec it; for the worker path we SFTP it up.
+    ok, err = _ensure_warc_binary()
+    if not ok:
+        return jsonify({'error': err}), 503
+
     run_id = uuid.uuid4().hex[:8]
+
+    # ── Worker path ────────────────────────────────────────────────────
+    if run_on != 'controller':
+        ip = run_on
+        mgr = get_ssh_manager()
+        if mgr is None:
+            return jsonify({'error': 'SSH manager unavailable'}), 503
+
+        remote_dir    = '/root/python_job'
+        remote_binary = f'{remote_dir}/reconx-warc'
+        remote_output = f'{remote_dir}/live_domains.txt'
+        remote_log    = f'{remote_dir}/warc.log'
+
+        if not mgr.scp_upload(ip, WARC_BINARY, remote_binary):
+            return jsonify({'error': f'SFTP of reconx-warc to {ip} failed'}), 502
+        mgr.ssh_exec(ip, f'chmod +x {remote_binary}', 5)
+
+        verbose_flag = ' -verbose' if verbose else ''
+        # nohup + background + echo $! gets us the worker-side PID. The
+        # `cd` keeps the binary's relative file lookups predictable.
+        remote_cmd = (
+            f"cd {remote_dir} && "
+            f"nohup ./reconx-warc -max-domains {max_domains} "
+            f"-output live_domains.txt "
+            f"-extract-workers {extract_workers} "
+            f"-test-workers {test_workers}{verbose_flag} "
+            f"> warc.log 2>&1 & echo $!"
+        )
+        out = mgr.ssh_exec(ip, remote_cmd, 15)
+        # Pull the first all-digit line — nohup may print a "[1] 12345" job
+        # tag plus the echoed PID.
+        remote_pid = None
+        for ln in (out or '').splitlines():
+            tok = ln.strip().split()
+            for t in reversed(tok):
+                if t.isdigit():
+                    remote_pid = int(t)
+                    break
+            if remote_pid is not None:
+                break
+        if remote_pid is None:
+            return jsonify({'error': f'remote spawn failed; ssh output: {out!r}'}), 502
+
+        snapshot = {
+            'started_at': datetime.now().isoformat(),
+            'pid': None,
+            'run_id': run_id,
+            'output_path': remote_output,
+            'log_path': remote_log,
+            'max_domains': max_domains,
+            'run_on': ip,
+            'remote_pid': remote_pid,
+        }
+        with _warc_lock:
+            _warc_proc = None  # no local process
+            _warc_state.update(snapshot)
+            _warc_state['finished_at'] = None
+            _warc_state['r2_key'] = None
+            _warc_state['r2_uploaded_at'] = None
+            _warc_state['r2_error'] = None
+            _warc_state['last_exit_code'] = None
+
+        # Deliberately NOT spawning _warc_watch_and_upload — the worker
+        # owns its output. api_warc_status detects the running→stopped
+        # transition and triggers R2 export at that point.
+        return jsonify({
+            'success': True,
+            'run_on': ip,
+            'remote_pid': remote_pid,
+            'run_id': run_id,
+            'max_domains': max_domains,
+        })
+
+    # ── Controller path (legacy local Popen) ──────────────────────────
     run_dir = f'/tmp/reconx_warc_{run_id}'
     try:
         os.makedirs(run_dir, exist_ok=True)
@@ -1148,6 +1263,8 @@ def api_warc_start():
         'output_path': output_path,
         'log_path': log_path,
         'max_domains': max_domains,
+        'run_on': 'controller',
+        'remote_pid': None,
     }
     with _warc_lock:
         _warc_proc = proc
@@ -1169,6 +1286,38 @@ def api_warc_stop():
     global _warc_proc
     with _warc_lock:
         proc = _warc_proc
+        run_on = _warc_state.get('run_on') or 'controller'
+        remote_pid = _warc_state.get('remote_pid')
+
+    # ── Worker path: SIGTERM via SSH, escalate to SIGKILL after 5s ────
+    if run_on != 'controller':
+        if not remote_pid:
+            return jsonify({'success': True, 'message': 'no warc running'})
+        mgr = get_ssh_manager()
+        if mgr is None:
+            return jsonify({'error': 'SSH manager unavailable'}), 503
+        ip = run_on
+        try:
+            mgr.ssh_exec(ip, f'kill {remote_pid}', 5)
+            # Poll for up to 5s before escalating.
+            killed = False
+            for _ in range(5):
+                time.sleep(1)
+                alive = mgr.ssh_exec(
+                    ip,
+                    f"kill -0 {remote_pid} 2>/dev/null && echo alive || echo dead",
+                    5,
+                )
+                if alive.strip() == 'dead':
+                    killed = True
+                    break
+            if not killed:
+                mgr.ssh_exec(ip, f'kill -9 {remote_pid}', 5)
+        except Exception as e:
+            return jsonify({'error': f'failed to stop remote: {e}'}), 500
+        return jsonify({'success': True, 'run_on': ip, 'remote_pid': remote_pid})
+
+    # ── Controller path ───────────────────────────────────────────────
     if proc is None or proc.poll() is not None:
         return jsonify({'success': True, 'message': 'no warc running'})
     try:
@@ -1188,40 +1337,89 @@ def api_warc_status():
     with _warc_lock:
         proc = _warc_proc
         state = dict(_warc_state)
-    running = proc is not None and proc.poll() is None
 
-    # Count discovered domains from the on-disk output if the run dir still exists.
-    domains_found = 0
+    run_on = state.get('run_on') or 'controller'
     output_path = state.get('output_path')
-    if output_path and os.path.exists(output_path):
-        try:
-            with open(output_path, 'rb') as f:
-                # Quick line-count; the file is one domain per line.
-                buf = f.read(1024 * 1024 * 8)  # cap at 8 MiB sample
-                domains_found = buf.count(b'\n')
-        except Exception:
-            pass
-
-    # Tail of the warc log so the UI can show progress lines.
-    log_tail: list = []
     log_path = state.get('log_path')
-    if log_path and os.path.exists(log_path):
-        try:
-            with open(log_path, 'rb') as f:
-                f.seek(0, 2)
-                size = f.tell()
-                f.seek(max(0, size - 4096))
-                log_tail = [
-                    ln for ln in f.read().decode('utf-8', errors='replace').splitlines()
-                    if ln.strip()
-                ][-20:]
-        except Exception:
-            pass
+    domains_found = 0
+    log_tail: list = []
+
+    if run_on != 'controller':
+        # ── Worker path: probe remote process + files via SSH ──────────
+        ip = run_on
+        remote_pid = state.get('remote_pid')
+        mgr = get_ssh_manager()
+        running = False
+        if mgr is not None and remote_pid:
+            alive = mgr.ssh_exec(
+                ip,
+                f"kill -0 {remote_pid} 2>/dev/null && echo alive || echo dead",
+                5,
+            )
+            running = (alive.strip() == 'alive')
+            if output_path:
+                wc = mgr.ssh_exec(ip, f"wc -l < {output_path} 2>/dev/null || echo 0", 5)
+                try:
+                    domains_found = int((wc or '0').strip().split()[0])
+                except (ValueError, IndexError):
+                    domains_found = 0
+            if log_path:
+                tail_out = mgr.ssh_exec(ip, f"tail -20 {log_path} 2>/dev/null", 8)
+                log_tail = [ln for ln in (tail_out or '').splitlines() if ln.strip()]
+
+        # Detect the running→stopped transition exactly once: stamp
+        # finished_at + last_exit_code, then fire R2 export inline (the
+        # worker pushes straight to R2 — controller never touches the file).
+        if (not running) and state.get('finished_at') is None and remote_pid:
+            r2_key_done = None
+            r2_err_done = None
+            try:
+                r2_key_done, r2_err_done = _warc_remote_export_to_r2(
+                    ip, output_path, state.get('run_id')
+                )
+            except Exception as e:
+                r2_err_done = f'remote R2 export failed: {e}'
+            with _warc_lock:
+                # Only stamp if no other request finalized first.
+                if _warc_state.get('finished_at') is None:
+                    _warc_state['finished_at'] = datetime.now().isoformat()
+                    _warc_state['last_exit_code'] = 0  # remote exit code unavailable; treat clean exit as success
+                    if r2_key_done:
+                        _warc_state['r2_key'] = r2_key_done
+                        _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
+                        _warc_state['r2_error'] = None
+                    else:
+                        _warc_state['r2_error'] = r2_err_done
+                state = dict(_warc_state)
+    else:
+        # ── Controller path: original local file/Popen probes ─────────
+        running = proc is not None and proc.poll() is None
+        if output_path and os.path.exists(output_path):
+            try:
+                with open(output_path, 'rb') as f:
+                    buf = f.read(1024 * 1024 * 8)  # cap at 8 MiB sample
+                    domains_found = buf.count(b'\n')
+            except Exception:
+                pass
+        if log_path and os.path.exists(log_path):
+            try:
+                with open(log_path, 'rb') as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - 4096))
+                    log_tail = [
+                        ln for ln in f.read().decode('utf-8', errors='replace').splitlines()
+                        if ln.strip()
+                    ][-20:]
+            except Exception:
+                pass
 
     return jsonify({
         'running': running,
         'pid': state.get('pid'),
         'run_id': state.get('run_id'),
+        'run_on': run_on,
+        'remote_pid': state.get('remote_pid'),
         'started_at': state.get('started_at'),
         'finished_at': state.get('finished_at'),
         'max_domains': state.get('max_domains'),
@@ -1234,13 +1432,73 @@ def api_warc_status():
     })
 
 
+def _warc_remote_export_to_r2(ip: str, remote_output_path: str,
+                              run_id: 'str | None') -> 'tuple[str | None, str | None]':
+    """Push the worker's live_domains.txt directly to R2 via a presigned
+    PUT URL — the file never round-trips through the controller. Returns
+    (r2_key, error_string). Either may be None."""
+    if not remote_output_path:
+        return None, 'no remote output path in state'
+    client, bucket = _get_r2_client()
+    if not client or not bucket:
+        return None, 'R2 not configured'
+    ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
+    r2_key = f'warc/live_domains_{ts}_{run_id or "manual"}.txt'
+    try:
+        url = client.generate_presigned_url(
+            'put_object',
+            Params={'Bucket': bucket, 'Key': r2_key, 'ContentType': 'text/plain'},
+            ExpiresIn=3600,
+        )
+    except Exception as e:
+        return None, f'presign failed: {e}'
+
+    mgr = get_ssh_manager()
+    if mgr is None:
+        return None, 'SSH manager unavailable'
+
+    # Single-quote-escape: replace ' with '\'' so we can safely wrap the URL
+    # in single quotes for the remote shell.
+    safe_url = url.replace("'", "'\\''")
+    # `--fail` (-f) flips curl's exit code on HTTP 4xx/5xx; `--silent --show-error`
+    # keeps the log readable. The trailing `&& echo OK` makes the success path
+    # unambiguous over an SSH stdout that strips return codes.
+    cmd = (
+        f"curl -fsS -X PUT --upload-file {remote_output_path} "
+        f"-H 'Content-Type: text/plain' '{safe_url}' && echo OK"
+    )
+    out = mgr.ssh_exec(ip, cmd, 120)
+    if (out or '').strip().endswith('OK'):
+        return r2_key, None
+    return None, f'remote curl upload failed: {out!r}'
+
+
 @app.route('/api/warc/export-to-r2', methods=['POST'])
 def api_warc_export_to_r2():
     """Force-upload the current live_domains.txt to R2 even if the run
-    hasn't finished yet. Useful for taking a snapshot mid-harvest."""
+    hasn't finished yet. Useful for taking a snapshot mid-harvest.
+
+    On the worker path the upload runs ON the worker via curl-to-presigned-URL
+    so the harvest output never round-trips through the controller."""
     with _warc_lock:
         output_path = _warc_state.get('output_path')
         run_id = _warc_state.get('run_id')
+        run_on = _warc_state.get('run_on') or 'controller'
+
+    # ── Worker path: worker pushes directly to R2 ─────────────────────
+    if run_on != 'controller':
+        if not output_path:
+            return jsonify({'error': 'no warc output to export'}), 404
+        r2_key, err = _warc_remote_export_to_r2(run_on, output_path, run_id)
+        if not r2_key:
+            return jsonify({'error': err or 'R2 upload failed'}), 502
+        with _warc_lock:
+            _warc_state['r2_key'] = r2_key
+            _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
+            _warc_state['r2_error'] = None
+        return jsonify({'success': True, 'r2_key': r2_key, 'run_on': run_on})
+
+    # ── Controller path: legacy boto3 upload from local disk ──────────
     if not output_path or not os.path.exists(output_path):
         return jsonify({'error': 'no warc output to export'}), 404
     client, bucket = _get_r2_client()
@@ -1257,6 +1515,15 @@ def api_warc_export_to_r2():
         _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
         _warc_state['r2_error'] = None
     return jsonify({'success': True, 'r2_key': r2_key})
+
+
+@app.route('/api/warc/hosts', methods=['GET'])
+def api_warc_hosts():
+    """Roster of hosts the dashboard can target. Always includes the
+    controller; remaining entries come from mgr.load_servers()."""
+    mgr = get_ssh_manager()
+    roster = mgr.load_servers() if mgr is not None else []
+    return jsonify({'hosts': ['controller', *roster]})
 
 
 # ==================== SSH BULK CREDS ====================

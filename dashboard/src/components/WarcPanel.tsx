@@ -8,8 +8,10 @@ export function WarcPanel() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [maxDomains, setMaxDomains] = useState(10000)
-  const [extractWorkers, setExtractWorkers] = useState(200)
-  const [testWorkers, setTestWorkers] = useState(100)
+  const [extractWorkers, setExtractWorkers] = useState(50)
+  const [testWorkers, setTestWorkers] = useState(25)
+  const [runOn, setRunOn] = useState<string>('controller')
+  const [hosts, setHosts] = useState<string[]>(['controller'])
   const pollTimer = useRef<number | null>(null)
 
   async function refresh() {
@@ -23,6 +25,15 @@ export function WarcPanel() {
   useEffect(() => {
     void refresh()
     pollTimer.current = window.setInterval(() => void refresh(), POLL_MS)
+    void (async () => {
+      try {
+        const r = await warc.hosts()
+        const workers = Array.isArray(r?.hosts) ? r.hosts : []
+        setHosts(['controller', ...workers])
+      } catch {
+        setHosts(['controller'])
+      }
+    })()
     return () => {
       if (pollTimer.current) window.clearInterval(pollTimer.current)
     }
@@ -32,6 +43,7 @@ export function WarcPanel() {
     setBusy(true); setError(null)
     try {
       await warc.start({
+        run_on: runOn,
         max_domains: maxDomains,
         extract_workers: extractWorkers,
         test_workers: testWorkers,
@@ -91,6 +103,11 @@ export function WarcPanel() {
             <span className={`pill ${running ? 'pill--ok' : 'pill--muted'}`}>
               {running ? 'Running' : 'Idle'}
             </span>
+            {running && (
+              <span className="pill pill--muted" style={{ fontSize: '0.72rem' }}>
+                Running on: {status?.run_on ?? 'controller'}
+              </span>
+            )}
             {r2Key && (
               <span className="pill pill--ok" title={r2Key} style={{ fontSize: '0.72rem' }}>
                 ↑ R2
@@ -123,6 +140,17 @@ export function WarcPanel() {
       {!running && (
         <div className="kv kv--form" style={{ marginTop: '1rem' }}>
           <div className="kv__row">
+            <label className="kv__label" htmlFor="warc-runon">Run on</label>
+            <select
+              id="warc-runon"
+              className="kv__input"
+              value={runOn}
+              onChange={(e) => setRunOn(e.target.value)}
+            >
+              {hosts.map((h) => <option key={h} value={h}>{h === 'controller' ? 'controller (this VPS)' : h}</option>)}
+            </select>
+          </div>
+          <div className="kv__row">
             <label className="kv__label" htmlFor="warc-max">Max live domains</label>
             <input
               id="warc-max"
@@ -142,7 +170,7 @@ export function WarcPanel() {
               max={500}
               className="kv__input"
               value={extractWorkers}
-              onChange={(e) => setExtractWorkers(Math.max(1, Number(e.target.value) || 200))}
+              onChange={(e) => setExtractWorkers(Math.max(1, Number(e.target.value) || 50))}
             />
           </div>
           <div className="kv__row">
@@ -154,7 +182,7 @@ export function WarcPanel() {
               max={500}
               className="kv__input"
               value={testWorkers}
-              onChange={(e) => setTestWorkers(Math.max(1, Number(e.target.value) || 100))}
+              onChange={(e) => setTestWorkers(Math.max(1, Number(e.target.value) || 25))}
             />
           </div>
         </div>

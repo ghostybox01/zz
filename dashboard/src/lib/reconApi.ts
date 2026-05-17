@@ -421,6 +421,8 @@ export type WarcStatus = {
   r2_uploaded_at: string | null
   r2_error: string | null
   log_tail: string[]
+  run_on: string | null
+  remote_pid: number | null
 }
 
 export type WarcStartOptions = {
@@ -428,6 +430,7 @@ export type WarcStartOptions = {
   extract_workers?: number
   test_workers?: number
   verbose?: boolean
+  run_on?: string
 }
 
 export const warc = {
@@ -436,6 +439,7 @@ export const warc = {
     postJson<{ success: boolean; pid: number; run_id: string; max_domains: number }>('/warc/start', opts),
   stop:   () => postJson<{ success: boolean; message?: string }>('/warc/stop', {}),
   exportToR2: () => postJson<{ success: boolean; r2_key: string }>('/warc/export-to-r2', {}),
+  hosts:  () => getJson<{ hosts: string[] }>('/warc/hosts'),
 }
 
 /* ── Logs ──────────────────────────────────────────────────────────── */
