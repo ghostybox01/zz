@@ -1038,6 +1038,45 @@ _warc_state: dict = {
     'remote_pid': None,
 }
 
+# Persisted snapshot of _warc_state so a gunicorn restart doesn't make the
+# cockpit claim Idle while a remote harvest is still running on a worker.
+# api_warc_status's existing kill -0 probe naturally re-syncs liveness once
+# the dict is loaded.
+WARC_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'warc_state.json')
+
+
+def _save_warc_state() -> None:
+    """Persist _warc_state to disk (atomic). Caller need not hold the lock —
+    json.dump on the dict reads it safely under CPython's GIL for plain types."""
+    try:
+        tmp = WARC_STATE_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(_warc_state, f)
+        os.replace(tmp, WARC_STATE_FILE)
+        try: os.chmod(WARC_STATE_FILE, 0o600)
+        except Exception: pass
+    except Exception as e:
+        print(f'[warc] state persist failed: {e}')
+
+
+def _load_warc_state() -> None:
+    """Hydrate _warc_state from the sidecar at import time. Only known keys
+    are copied so a malformed file can't smuggle stray fields into the dict."""
+    try:
+        if not os.path.exists(WARC_STATE_FILE):
+            return
+        with open(WARC_STATE_FILE, 'r') as f:
+            loaded = json.load(f) or {}
+        if isinstance(loaded, dict):
+            for k in list(_warc_state.keys()):
+                if k in loaded:
+                    _warc_state[k] = loaded[k]
+    except Exception as e:
+        print(f'[warc] state load failed: {e}')
+
+
+_load_warc_state()
+
 
 def _validate_run_on(run_on: str) -> 'tuple[bool, str]':
     """Return (ok, normalized_or_err). run_on must be 'controller' or an
@@ -1103,6 +1142,7 @@ def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
         _warc_state['r2_key'] = r2_key
         _warc_state['r2_uploaded_at'] = datetime.now().isoformat() if r2_key else None
         _warc_state['r2_error'] = r2_error
+    _save_warc_state()
 
     # Clean up local files only if we successfully shipped to R2; otherwise
     # leave them on disk so the operator can SCP them off manually.
@@ -1167,11 +1207,41 @@ def api_warc_start():
         remote_output = f'{remote_dir}/live_domains.txt'
         remote_log    = f'{remote_dir}/warc.log'
 
+        # Busy-binary guard. Without this, a second Start while an earlier
+        # run is alive fails opaquely with ETXTBSY on the SFTP side and the
+        # operator sees a generic 502. pgrep -f catches both the controller-
+        # spawned process and any reconx-warc launched manually on the box.
+        existing = mgr.ssh_exec(ip, 'pgrep -fa reconx-warc | head -1', 5).strip()
+        if existing:
+            tok = existing.split(None, 1)
+            existing_pid = int(tok[0]) if tok and tok[0].isdigit() else None
+            if existing_pid:
+                # Adopt it into state so the cockpit reflects the truth even
+                # if the previous controller restart wiped _warc_state.
+                with _warc_lock:
+                    _warc_state.update({
+                        'run_on': ip,
+                        'remote_pid': existing_pid,
+                        'output_path': remote_output,
+                        'log_path': remote_log,
+                        'finished_at': None,
+                    })
+                _save_warc_state()
+                return jsonify({
+                    'error': f'WARC already running on {ip} (pid {existing_pid}) — '
+                             f'Stop it first, or wait for the current run to finish.',
+                    'run_on': ip, 'remote_pid': existing_pid,
+                }), 409
+
         # SFTP's put() does not auto-create the parent directory — ensure
         # /root/python_job exists on the worker first, otherwise scp_upload
         # silently fails (its bare `except:` swallows the underlying
-        # IOError) and the operator sees a useless 502.
-        mgr.ssh_exec(ip, f'mkdir -p {remote_dir}', 5)
+        # IOError) and the operator sees a useless 502. Also unlink any old
+        # binary: if a previous run already exited but the file inode is
+        # still referenced (cached), SFTP overwriting a busy executable
+        # would otherwise raise ETXTBSY. rm-then-put gives the new binary
+        # a fresh inode and leaves any running process untouched.
+        mgr.ssh_exec(ip, f'mkdir -p {remote_dir} && rm -f {remote_binary}', 5)
 
         if not mgr.scp_upload(ip, WARC_BINARY, remote_binary):
             return jsonify({
@@ -1228,6 +1298,7 @@ def api_warc_start():
             _warc_state['r2_uploaded_at'] = None
             _warc_state['r2_error'] = None
             _warc_state['last_exit_code'] = None
+        _save_warc_state()
 
         # Deliberately NOT spawning _warc_watch_and_upload — the worker
         # owns its output. api_warc_status detects the running→stopped
@@ -1290,6 +1361,7 @@ def api_warc_start():
         _warc_state['r2_uploaded_at'] = None
         _warc_state['r2_error'] = None
         _warc_state['last_exit_code'] = None
+    _save_warc_state()
 
     threading.Thread(target=_warc_watch_and_upload, args=(proc, dict(snapshot)), daemon=True).start()
 
@@ -1406,6 +1478,7 @@ def api_warc_status():
                     else:
                         _warc_state['r2_error'] = r2_err_done
                 state = dict(_warc_state)
+            _save_warc_state()
     else:
         # ── Controller path: original local file/Popen probes ─────────
         running = proc is not None and proc.poll() is None
@@ -1511,6 +1584,7 @@ def api_warc_export_to_r2():
             _warc_state['r2_key'] = r2_key
             _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
             _warc_state['r2_error'] = None
+        _save_warc_state()
         return jsonify({'success': True, 'r2_key': r2_key, 'run_on': run_on})
 
     # ── Controller path: legacy boto3 upload from local disk ──────────
