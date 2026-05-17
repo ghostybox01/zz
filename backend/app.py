@@ -1167,8 +1167,21 @@ def api_warc_start():
         remote_output = f'{remote_dir}/live_domains.txt'
         remote_log    = f'{remote_dir}/warc.log'
 
+        # SFTP's put() does not auto-create the parent directory — ensure
+        # /root/python_job exists on the worker first, otherwise scp_upload
+        # silently fails (its bare `except:` swallows the underlying
+        # IOError) and the operator sees a useless 502.
+        mgr.ssh_exec(ip, f'mkdir -p {remote_dir}', 5)
+
         if not mgr.scp_upload(ip, WARC_BINARY, remote_binary):
-            return jsonify({'error': f'SFTP of reconx-warc to {ip} failed'}), 502
+            return jsonify({
+                'error': (
+                    f'SFTP of reconx-warc to {ip} failed. Common causes: '
+                    f'(1) /opt/reconx/reconx-warc missing on controller — rebuild it; '
+                    f'(2) worker SSH user lacks write access to {remote_dir}; '
+                    f'(3) worker disk full.'
+                )
+            }), 502
         mgr.ssh_exec(ip, f'chmod +x {remote_binary}', 5)
 
         verbose_flag = ' -verbose' if verbose else ''
