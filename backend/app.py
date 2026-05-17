@@ -1283,12 +1283,26 @@ def _save_fleet_creds(creds: dict) -> None:
     try:
         with open(FLEET_CREDS_FILE, 'w') as f:
             json.dump(creds, f, indent=2)
+        # Sidecar now holds plaintext passwords; lock it down so other
+        # users on the controller can't read them.
+        try:
+            os.chmod(FLEET_CREDS_FILE, 0o600)
+        except OSError:
+            pass
     except Exception:
         pass
 
 
-def _remember_worker(host: str, port: int, user: str, auth_kind: str) -> None:
-    """Idempotent update of the fleet_creds.json sidecar."""
+def _remember_worker(host: str, port: int, user: str, auth_kind: str,
+                     password: str | None = None) -> None:
+    """Idempotent update of the fleet_creds.json sidecar.
+
+    When ``password`` is provided we persist it under the ``password`` key
+    so ssh_manager can fall back to password auth if the controller's
+    pubkey gets wiped (cloud-init, fail2ban, manual rebuild). When
+    ``password`` is None we carry forward any previously-stored password
+    instead of clobbering it — re-running a key-auth row must not erase
+    the password we already learned for that host."""
     creds = _load_fleet_creds()
     existing = creds.get(host) or {}
     creds[host] = {
@@ -1296,6 +1310,11 @@ def _remember_worker(host: str, port: int, user: str, auth_kind: str) -> None:
         'port': int(port or existing.get('port') or 22),
         'auth_kind': auth_kind or existing.get('auth_kind') or 'key',
     }
+    # Password handling: explicit value wins, otherwise carry forward.
+    if password:
+        creds[host]['password'] = password
+    elif existing.get('password'):
+        creds[host]['password'] = existing['password']
     # Carry forward spec/batch fields populated by the SSH probe so we
     # never clobber them on re-key.
     for k in ('cpu', 'ram_gb', 'disk_gb', 'batch_size', 'scanner_deployed_at'):
@@ -1318,10 +1337,22 @@ def _set_fleet_config(new: dict) -> None:
         json.dump(cfg, f, indent=2)
 
 
+# Cap simultaneous auto-deploy bootstraps. Each bootstrap pegs a gunicorn
+# worker on SFTP + remote installs for tens of seconds; with only 2
+# gunicorn workers in production, more than 2 concurrent installs starves
+# the dashboard and surfaces as 502s. Two is the safe ceiling.
+_AUTO_DEPLOY_SEMAPHORE = threading.Semaphore(2)
+
+
 def _auto_deploy_one(ip: str) -> None:
     """Fire-and-forget bootstrap of a single worker: pushes the scanner
     binary + main.py + work_dir prep, no target list, no scan kick-off.
-    Stamps scanner_deployed_at only when the SFTP and chmod succeeded."""
+    Stamps scanner_deployed_at only when the SFTP and chmod succeeded.
+
+    Guarded by ``_AUTO_DEPLOY_SEMAPHORE`` so a roster import that adds 20
+    hosts at once doesn't fire 20 simultaneous bootstraps and 502 the
+    dashboard."""
+    _AUTO_DEPLOY_SEMAPHORE.acquire()
     try:
         mgr = get_ssh_manager()
         if not mgr:
@@ -1336,6 +1367,8 @@ def _auto_deploy_one(ip: str) -> None:
             _save_fleet_creds(creds)
     except Exception as e:
         print(f'[auto-deploy] {ip} failed: {e}')
+    finally:
+        _AUTO_DEPLOY_SEMAPHORE.release()
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = 2.0):
@@ -1568,7 +1601,13 @@ def api_fleet_bulk_creds():
             accepted_ips.append(r['host'])
             # Remember the user/port that worked so ssh_manager doesn't
             # default to `root` when the worker only accepts `admin`.
-            _remember_worker(r['host'], r['port'], r['user'], r['auth_kind'])
+            # For password rows, persist the secret so ssh_manager can
+            # fall back to password auth if authorized_keys gets wiped.
+            if r['auth_kind'] == 'password' and r['secret']:
+                _remember_worker(r['host'], r['port'], r['user'], r['auth_kind'],
+                                 password=r['secret'])
+            else:
+                _remember_worker(r['host'], r['port'], r['user'], r['auth_kind'])
         except Exception as e:
             result['message'] = str(e)
         results.append(result)
@@ -1850,6 +1889,48 @@ def api_update():
         'started': True,
         'message': 'Update started. Services will restart in 30–90s.',
     })
+
+
+# ==================== LOGS ====================
+
+@app.route('/api/logs/controller', methods=['GET'])
+def api_logs_controller():
+    """Return the last N lines of the dashboard service's journal."""
+    n = max(10, min(500, int(request.args.get('n', 200))))
+    try:
+        out = subprocess.check_output(
+            ['journalctl', '-u', 'reconx-dashboard', '-n', str(n), '--no-pager', '-o', 'short-iso'],
+            text=True, timeout=8,
+        )
+        return jsonify({'lines': out.splitlines()})
+    except FileNotFoundError:
+        return jsonify({'error': 'journalctl not available (non-systemd host?)', 'lines': []}), 503
+    except Exception as e:
+        return jsonify({'error': str(e), 'lines': []}), 500
+
+
+@app.route('/api/logs/worker/<ip>', methods=['GET'])
+def api_logs_worker(ip):
+    """Tail /root/python_job/output.log on a worker via SSH."""
+    # Validate ip so the URL path can't sneak into shell argv
+    if not re.match(r'^[0-9a-zA-Z.\-:]{3,64}$', ip):
+        return jsonify({'error': 'invalid ip'}), 400
+    n = max(10, min(500, int(request.args.get('n', 200))))
+    mgr = get_ssh_manager()
+    if not mgr:
+        return jsonify({'error': 'SSH not available'}), 503
+    work_dir = mgr.config.get('work_dir', '/root/python_job')
+    out = mgr.ssh_exec(ip, f"tail -n {n} {work_dir}/output.log 2>/dev/null || echo '(no output.log yet)'", 10)
+    return jsonify({'ip': ip, 'lines': (out or '').splitlines()})
+
+
+@app.route('/api/logs/workers', methods=['GET'])
+def api_logs_workers_list():
+    """List of IPs the operator can request worker logs for."""
+    mgr = get_ssh_manager()
+    if not mgr:
+        return jsonify({'ips': []})
+    return jsonify({'ips': mgr.load_servers()})
 
 
 # ==================== WEBSOCKET HANDLERS ====================

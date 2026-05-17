@@ -387,32 +387,111 @@ class SSHManager:
         ssh_key_path = self.config.get("ssh_key_path")
         pkey = self._load_private_key(ssh_key_path)
 
-        if pkey:
+        # Resolve persisted creds for this ip — we may need the password
+        # as primary auth (auth_kind == 'password') or as a fallback when
+        # key auth fails because authorized_keys got wiped.
+        self._reload_fleet_creds_if_changed()
+        creds = self._fleet_creds.get(ip, {}) or {}
+        password = creds.get('password')
+        auth_kind = creds.get('auth_kind', 'key')
+
+        # Password-primary path: this worker was added with auth_kind=password
+        # and we have the secret on file. Try password first, then queue a
+        # daemon thread to (re)install the controller's pubkey so the next
+        # probe upgrades itself to key auth.
+        if auth_kind == 'password' and password:
             ssh.connect(
                 ip,
                 port=port,
                 username=username,
-                pkey=pkey,
+                password=password,
                 timeout=timeout,
                 banner_timeout=10,
                 auth_timeout=10,
+                allow_agent=False,
                 look_for_keys=False,
-                allow_agent=False
             )
-        else:
-            # Fallback to key_filename if _load_private_key fails
+            threading.Thread(target=self._repair_keys_on_worker,
+                             args=(ip, ssh), daemon=True).start()
+            return ssh
+
+        # Key-auth path (default). If it fails with AuthenticationException
+        # and we have a stored password, fall back to password auth and
+        # repair the keys on the worker so we don't burn the password every
+        # probe.
+        try:
+            if pkey:
+                ssh.connect(
+                    ip,
+                    port=port,
+                    username=username,
+                    pkey=pkey,
+                    timeout=timeout,
+                    banner_timeout=10,
+                    auth_timeout=10,
+                    look_for_keys=False,
+                    allow_agent=False
+                )
+            else:
+                # Fallback to key_filename if _load_private_key fails
+                ssh.connect(
+                    ip,
+                    port=port,
+                    username=username,
+                    key_filename=ssh_key_path,
+                    timeout=timeout,
+                    banner_timeout=10,
+                    auth_timeout=10,
+                    look_for_keys=False,
+                    allow_agent=False
+                )
+        except paramiko.AuthenticationException:
+            if not password:
+                raise
+            # authorized_keys probably got nuked (cloud-init, fail2ban,
+            # rebuild). Reconnect with the stored password, then heal.
+            try: ssh.close()
+            except Exception: pass
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(
                 ip,
                 port=port,
                 username=username,
-                key_filename=ssh_key_path,
+                password=password,
                 timeout=timeout,
                 banner_timeout=10,
                 auth_timeout=10,
+                allow_agent=False,
                 look_for_keys=False,
-                allow_agent=False
             )
+            threading.Thread(target=self._repair_keys_on_worker,
+                             args=(ip, ssh), daemon=True).start()
         return ssh
+
+    def _repair_keys_on_worker(self, ip: str, ssh) -> None:
+        """Re-install the controller's pubkey on a worker we just connected
+        to via password. Idempotent — grep -qxF guards against duplicates."""
+        try:
+            pub_path = os.path.expanduser(self.config.get('ssh_key_path', '') + '.pub') if self.config.get('ssh_key_path') else '/opt/reconx/.ssh/id_ed25519.pub'
+            if not os.path.exists(pub_path):
+                return
+            with open(pub_path, 'r') as f:
+                pubkey = f.read().strip()
+            if not pubkey:
+                return
+            install_cmd = (
+                'umask 077 && mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && '
+                'touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" && '
+                'KEY=$(cat) && '
+                'grep -qxF "$KEY" "$HOME/.ssh/authorized_keys" || echo "$KEY" >> "$HOME/.ssh/authorized_keys"'
+            )
+            stdin, stdout, _ = ssh.exec_command(install_cmd, timeout=10)
+            stdin.write(pubkey + '\n')
+            stdin.channel.shutdown_write()
+            stdout.channel.recv_exit_status()
+        except Exception:
+            pass
     
     def _get_pooled_ssh(self, ip: str, timeout: int) -> paramiko.SSHClient:
         """Return a cached SSHClient for ip, opening one if absent or stale.

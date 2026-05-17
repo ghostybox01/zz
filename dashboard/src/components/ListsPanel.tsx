@@ -1,9 +1,10 @@
-import { useMemo, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import type { TargetList, VpsNode } from '../types'
 import { ListCard } from './ListCard'
 import { makeListId, readListFile } from '../lib/listsStorage'
 import { setListBody } from '../lib/listBodyCache'
 import { vps as reconVps, r2 } from '../lib/reconApi'
+import { TableToolbar } from './TableToolbar'
 
 type Props = {
   lists: readonly TargetList[]
@@ -36,15 +37,27 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
   const [error, setError] = useState<UploadError>(null)
   const [filter, setFilter] = useState<'all' | 'deployed' | 'idle' | 'completed'>('all')
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
+  // Effect D — bulk select + per-row trash + text filter.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [textFilter, setTextFilter] = useState('')
 
   const filtered = useMemo(() => {
-    switch (filter) {
-      case 'deployed': return lists.filter((l) => l.status === 'deployed' || l.status === 'queued')
-      case 'idle':     return lists.filter((l) => l.status === 'idle' || l.status === 'failed')
-      case 'completed':return lists.filter((l) => l.status === 'completed')
-      default:         return lists
-    }
-  }, [lists, filter])
+    const byStatus = (() => {
+      switch (filter) {
+        case 'deployed': return lists.filter((l) => l.status === 'deployed' || l.status === 'queued')
+        case 'idle':     return lists.filter((l) => l.status === 'idle' || l.status === 'failed')
+        case 'completed':return lists.filter((l) => l.status === 'completed')
+        default:         return lists
+      }
+    })()
+    const needle = textFilter.trim().toLowerCase()
+    if (!needle) return byStatus
+    return byStatus.filter((l) =>
+      l.name.toLowerCase().includes(needle) ||
+      l.status.toLowerCase().includes(needle) ||
+      l.id.toLowerCase().includes(needle),
+    )
+  }, [lists, filter, textFilter])
 
   const counts = useMemo(() => {
     const tally = { all: lists.length, idle: 0, deployed: 0, completed: 0 }
@@ -277,6 +290,50 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     onUpdate({ ...list, name })
   }
 
+  // Drop stale selections when the underlying lists shrink (e.g. after a
+  // bulk delete or a pruning sync).
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev
+      const valid = new Set(lists.map((l) => l.id))
+      let changed = false
+      const next = new Set<string>()
+      for (const id of prev) {
+        if (valid.has(id)) next.add(id)
+        else changed = true
+      }
+      return changed ? next : prev
+    })
+  }, [lists])
+
+  const toggleOne = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  const handleSelectAll = () => setSelected(new Set(filtered.map((l) => l.id)))
+  const handleClearSelection = () => setSelected(new Set())
+  const handleDeleteSelected = () => {
+    const ids = [...selected]
+    if (ids.length === 0) return
+    for (const id of ids) onDelete(id)
+    setSelected(new Set())
+  }
+  const handleRowTrash = (list: TargetList) => {
+    if (window.confirm(`Delete list "${list.name}"? Uploaded body will be discarded.`)) {
+      onDelete(list.id)
+      setSelected((prev) => {
+        if (!prev.has(list.id)) return prev
+        const next = new Set(prev)
+        next.delete(list.id)
+        return next
+      })
+    }
+  }
+
   return (
     <section className="lists-panel">
       <header className="lists-panel__head">
@@ -382,6 +439,17 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
         ))}
       </div>
 
+      <TableToolbar
+        totalRows={filtered.length}
+        selectedCount={selected.size}
+        filter={textFilter}
+        onFilterChange={setTextFilter}
+        onSelectAll={handleSelectAll}
+        onClearSelection={handleClearSelection}
+        onDeleteSelected={handleDeleteSelected}
+        filterPlaceholder="Filter lists by name, status, id…"
+      />
+
       {filtered.length === 0 ? (
         <p className="muted-callout">
           {lists.length === 0
@@ -391,18 +459,37 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
       ) : (
         <div className="lists-grid">
           {filtered.map((list) => (
-            <ListCard
-              key={list.id}
-              list={list}
-              fleet={fleet}
-              onToggleVps={toggleVps}
-              onDeploy={(id) => onDeploy(id)}
-              onPause={(id) => setStatus(id, 'idle')}
-              onComplete={(id) => setStatus(id, 'completed')}
-              onReset={(id) => setStatus(id, 'idle')}
-              onDelete={onDelete}
-              onRename={rename}
-            />
+            <div key={list.id} className="lists-grid__row-wrap">
+              <div className="lists-grid__row-controls">
+                <label className="lists-grid__row-check" title="Select for bulk action">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(list.id)}
+                    onChange={() => toggleOne(list.id)}
+                    aria-label={`Select ${list.name}`}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="icon-btn lists-grid__row-trash"
+                  title={`Delete ${list.name}`}
+                  onClick={() => handleRowTrash(list)}
+                >
+                  🗑
+                </button>
+              </div>
+              <ListCard
+                list={list}
+                fleet={fleet}
+                onToggleVps={toggleVps}
+                onDeploy={(id) => onDeploy(id)}
+                onPause={(id) => setStatus(id, 'idle')}
+                onComplete={(id) => setStatus(id, 'completed')}
+                onReset={(id) => setStatus(id, 'idle')}
+                onDelete={onDelete}
+                onRename={rename}
+              />
+            </div>
           ))}
         </div>
       )}

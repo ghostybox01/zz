@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import type { TargetList, VpsNode } from '../types'
 import { vpsWorkloadState } from '../lib/vpsWorkload'
 import { VpsCard, type VpsNodeAction } from './VpsCard'
+import { TableToolbar } from './TableToolbar'
+import { vps as reconVps } from '../lib/reconApi'
 
 export type FleetBulkAction = 'start-all' | 'stop-all' | 'restart-all' | 'test-connections'
 
@@ -16,6 +18,12 @@ type Props = {
   onAction?: (ip: string, action: VpsNodeAction) => Promise<{ ok: boolean; message?: string }>
   /** When set, exposes bulk-action buttons in the header (live backend only). */
   onBulkAction?: (action: FleetBulkAction) => Promise<{ ok: boolean; message?: string }>
+  /**
+   * Local state mutator — used by per-row trash and bulk delete to remove
+   * nodes from the visible fleet when the backend lacks a /remove endpoint.
+   * If omitted, removal is a no-op (read-only roster view).
+   */
+  onRemoveNodes?: (ids: readonly string[]) => void
 }
 
 export function FleetPanel({
@@ -27,6 +35,7 @@ export function FleetPanel({
   onForceOutage,
   onAction,
   onBulkAction,
+  onRemoveNodes,
 }: Props) {
   const active = useMemo(() => fleet.filter((n) => n.status !== 'removed'), [fleet])
   const removed = useMemo(() => fleet.filter((n) => n.status === 'removed'), [fleet])
@@ -44,6 +53,84 @@ export function FleetPanel({
 
   const [bulkBusy, setBulkBusy] = useState<FleetBulkAction | null>(null)
   const [bulkMessage, setBulkMessage] = useState<string | null>(null)
+
+  // Effect D — table affordances: filter + bulk select + per-row trash.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [filter, setFilter] = useState('')
+
+  const filterLower = filter.trim().toLowerCase()
+  const visibleActive = useMemo(() => {
+    if (!filterLower) return active
+    return active.filter((n) =>
+      n.label.toLowerCase().includes(filterLower) ||
+      n.host.toLowerCase().includes(filterLower) ||
+      n.region.toLowerCase().includes(filterLower),
+    )
+  }, [active, filterLower])
+
+  const visibleRemoved = useMemo(() => {
+    if (!filterLower) return removed
+    return removed.filter((n) =>
+      n.label.toLowerCase().includes(filterLower) ||
+      n.host.toLowerCase().includes(filterLower) ||
+      n.region.toLowerCase().includes(filterLower),
+    )
+  }, [removed, filterLower])
+
+  const allVisibleIds = useMemo(
+    () => [...visibleActive, ...visibleRemoved].map((n) => n.id),
+    [visibleActive, visibleRemoved],
+  )
+
+  const toggleOne = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  const handleSelectAll = () => setSelected(new Set(allVisibleIds))
+  const handleClearSelection = () => setSelected(new Set())
+  const handleSelectDead = () =>
+    setSelected(
+      new Set(
+        [...visibleActive, ...visibleRemoved]
+          .filter((n) => n.status === 'offline' || n.status === 'removed')
+          .map((n) => n.id),
+      ),
+    )
+
+  const removeNodes = (ids: readonly string[]) => {
+    if (ids.length === 0) return
+    // Best-effort: try the new backend endpoint per node, but always remove
+    // locally so the operator sees the row disappear. If the endpoint is
+    // missing the POST will reject — we swallow the error and rely on the
+    // client-side prune.
+    // TODO(backend): wire /api/vps/server/<ip>/remove on the Flask side so
+    // the roster file (server_ips.txt) is updated authoritatively.
+    const idSet = new Set(ids)
+    const ipsToTry = fleet.filter((n) => idSet.has(n.id)).map((n) => n.host)
+    for (const ip of ipsToTry) {
+      void reconVps.removeFromRoster(ip).catch(() => {
+        /* endpoint may not exist — client prune is the source of truth */
+      })
+    }
+    onRemoveNodes?.(ids)
+    setSelected((prev) => {
+      const next = new Set(prev)
+      for (const id of ids) next.delete(id)
+      return next
+    })
+  }
+
+  const handleDeleteSelected = () => removeNodes([...selected])
+
+  const handleRowTrash = (node: VpsNode) => {
+    if (window.confirm(`Remove ${node.label} (${node.host}) from the roster?`)) {
+      removeNodes([node.id])
+    }
+  }
 
   const runBulk = async (action: FleetBulkAction) => {
     if (!onBulkAction || bulkBusy) return
@@ -113,6 +200,18 @@ export function FleetPanel({
 
       {bulkMessage && <p className="flt__bulk-msg muted">{bulkMessage}</p>}
 
+      <TableToolbar
+        totalRows={visibleActive.length + visibleRemoved.length}
+        selectedCount={selected.size}
+        filter={filter}
+        onFilterChange={setFilter}
+        onSelectAll={handleSelectAll}
+        onClearSelection={handleClearSelection}
+        onSelectDead={handleSelectDead}
+        onDeleteSelected={handleDeleteSelected}
+        filterPlaceholder="Filter fleet by label, host, region…"
+      />
+
       <div className="flt__kpis">
         <div className="flt__kpi">
           <div className="flt__kpi-label">COMBINED THROUGHPUT</div>
@@ -160,15 +259,55 @@ export function FleetPanel({
       )}
 
       <div className="flt__grid">
-        {active.map((n) => (
-          <VpsCard key={n.id} node={n} lists={lists} onForceOutage={onAction ? undefined : onForceOutage} onAction={onAction} />
+        {visibleActive.map((n) => (
+          <div key={n.id} className="flt__row-wrap">
+            <div className="flt__row-controls">
+              <label className="flt__row-check" title="Select for bulk action">
+                <input
+                  type="checkbox"
+                  checked={selected.has(n.id)}
+                  onChange={() => toggleOne(n.id)}
+                  aria-label={`Select ${n.label}`}
+                />
+              </label>
+              <button
+                type="button"
+                className="icon-btn flt__row-trash"
+                title={`Remove ${n.label} from roster`}
+                onClick={() => handleRowTrash(n)}
+              >
+                🗑
+              </button>
+            </div>
+            <VpsCard node={n} lists={lists} onForceOutage={onAction ? undefined : onForceOutage} onAction={onAction} />
+          </div>
         ))}
       </div>
 
-      {removed.length > 0 && (
+      {visibleRemoved.length > 0 && (
         <div className="flt__grid flt__grid--removed">
-          {removed.map((n) => (
-            <VpsCard key={n.id} node={n} />
+          {visibleRemoved.map((n) => (
+            <div key={n.id} className="flt__row-wrap">
+              <div className="flt__row-controls">
+                <label className="flt__row-check" title="Select for bulk action">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(n.id)}
+                    onChange={() => toggleOne(n.id)}
+                    aria-label={`Select ${n.label}`}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="icon-btn flt__row-trash"
+                  title={`Remove ${n.label} from roster`}
+                  onClick={() => handleRowTrash(n)}
+                >
+                  🗑
+                </button>
+              </div>
+              <VpsCard node={n} />
+            </div>
           ))}
         </div>
       )}

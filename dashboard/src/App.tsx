@@ -23,6 +23,7 @@ import { ScheduleSettings } from './components/ScheduleSettings'
 import { ToastStack, type ToastItem } from './components/ToastStack'
 import { categoryForFinding } from './lib/toastCategory'
 import { WarcPanel } from './components/WarcPanel'
+import { LogsPanel } from './components/LogsPanel'
 import { readTargetTxtFile } from './lib/targetList'
 import { VulnerabilityPicker } from './components/VulnerabilityPicker'
 import { VULN_CATALOG, defaultVulnSelection, type VulnSelection } from './data/vulnCatalog'
@@ -270,6 +271,7 @@ export default function App() {
   const listsHidden = tab !== 'lists'
   const fleetHidden = tab !== 'fleet'
   const findingsHidden = tab !== 'findings'
+  const logsHidden = tab !== 'logs'
   const settingsHidden = tab !== 'settings'
 
   const upsertList = useCallback(
@@ -571,6 +573,10 @@ export default function App() {
                 onForceOutage={forceOutage}
                 onAction={backendLive ? onVpsAction : undefined}
                 onBulkAction={backendLive ? onFleetBulkAction : undefined}
+                onRemoveNodes={(ids) => {
+                  const idSet = new Set(ids)
+                  setFleet((prev) => prev.filter((n) => !idSet.has(n.id)))
+                }}
               />
             </section>
 
@@ -583,6 +589,10 @@ export default function App() {
             >
               <FindingsBoard
                 findings={findings}
+                onRemoveFindings={(ids) => {
+                  const idSet = new Set(ids)
+                  setFindings((prev) => prev.filter((f) => !idSet.has(f.id)))
+                }}
                 onClearAll={
                   backendLive
                     ? async () => {
@@ -600,6 +610,16 @@ export default function App() {
                       }
                 }
               />
+            </section>
+
+            <section
+              id="panel-logs"
+              role="tabpanel"
+              aria-labelledby="tab-logs"
+              hidden={logsHidden}
+              className="tab-panel"
+            >
+              <LogsPanel />
             </section>
 
             <section

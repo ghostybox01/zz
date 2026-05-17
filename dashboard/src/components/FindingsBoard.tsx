@@ -1,13 +1,21 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Finding } from '../types'
 import { findingCredentialText } from '../lib/findingCredential'
 import { FindingDetail } from './FindingDetail'
+import { TableToolbar } from './TableToolbar'
 
 type SortKey = 'provider' | 'at' | 'severity'
 
 type Props = {
   findings: readonly Finding[]
   onClearAll?: () => void | Promise<void>
+  /**
+   * Optional bulk-remove callback. When omitted, the panel only renders
+   * filtered rows but cannot mutate parent state — trash + bulk delete
+   * will be inert. App.tsx wires this to `setFindings` for client-side
+   * pruning (the backend ledger is owned by /api/clear, not /remove).
+   */
+  onRemoveFindings?: (ids: readonly string[]) => void
 }
 
 function shortId(id: string): string {
@@ -35,13 +43,18 @@ function vulnTag(rule: string): string {
   return 'LIB'
 }
 
-export function FindingsBoard({ findings, onClearAll }: Props) {
+export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('provider')
   const [dir, setDir] = useState<'asc' | 'desc'>('asc')
   const [addon, setAddon] = useState<string>('all')
   const [query, setQuery] = useState('')
   const [pageSize, setPageSize] = useState(50)
   const [activeId, setActiveId] = useState<string | null>(null)
+  // Effect D — bulk select + per-row trash. `filter` is the table-toolbar
+  // search; `query` above is the legacy hits-toolbar search and remains
+  // wired so existing UI continues to work; both narrow the same row set.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [filter, setFilter] = useState('')
 
   const addonChoices = useMemo(() => {
     const s = new Set<string>()
@@ -69,18 +82,21 @@ export function FindingsBoard({ findings, onClearAll }: Props) {
     })
 
     const q = query.trim().toLowerCase()
+    const tf = filter.trim().toLowerCase()
     return copy.filter((f) => {
       if (addon !== 'all' && f.provider !== addon) return false
-      if (!q) return true
-      return (
-        f.hostname.toLowerCase().includes(q) ||
-        f.detail.toLowerCase().includes(q) ||
-        findingCredentialText(f).toLowerCase().includes(q) ||
-        f.ruleLabel.toLowerCase().includes(q) ||
-        f.id.toLowerCase().includes(q)
-      )
+      const matchesText = (needle: string) =>
+        f.hostname.toLowerCase().includes(needle) ||
+        f.detail.toLowerCase().includes(needle) ||
+        findingCredentialText(f).toLowerCase().includes(needle) ||
+        f.ruleLabel.toLowerCase().includes(needle) ||
+        f.provider.toLowerCase().includes(needle) ||
+        f.id.toLowerCase().includes(needle)
+      if (q && !matchesText(q)) return false
+      if (tf && !matchesText(tf)) return false
+      return true
     })
-  }, [findings, sortKey, dir, addon, query])
+  }, [findings, sortKey, dir, addon, query, filter])
 
   const activeFilters = (addon !== 'all' ? 1 : 0) + (query.trim() ? 1 : 0)
   const rows = sortedFiltered.slice(0, Math.max(1, pageSize))
@@ -117,6 +133,49 @@ export function FindingsBoard({ findings, onClearAll }: Props) {
 
   const activeFinding = activeId ? sortedFiltered.find((f) => f.id === activeId) ?? findings.find((f) => f.id === activeId) ?? null : null
 
+  // Prune stale selections when the underlying findings list shrinks.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev
+      const valid = new Set(findings.map((f) => f.id))
+      let changed = false
+      const next = new Set<string>()
+      for (const id of prev) {
+        if (valid.has(id)) next.add(id)
+        else changed = true
+      }
+      return changed ? next : prev
+    })
+  }, [findings])
+
+  const toggleOne = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  const handleSelectAll = () => setSelected(new Set(rows.map((r) => r.id)))
+  const handleClearSelection = () => setSelected(new Set())
+  const handleDeleteSelected = () => {
+    const ids = [...selected]
+    if (ids.length === 0) return
+    onRemoveFindings?.(ids)
+    setSelected(new Set())
+  }
+  const handleRowTrash = (f: Finding) => {
+    if (window.confirm(`Delete finding ${shortId(f.id)} (${f.provider} · ${f.hostname})?`)) {
+      onRemoveFindings?.([f.id])
+      setSelected((prev) => {
+        if (!prev.has(f.id)) return prev
+        const next = new Set(prev)
+        next.delete(f.id)
+        return next
+      })
+    }
+  }
+
   if (activeFinding) {
     return (
       <section className="card-block card-block--hits card-block--detail">
@@ -138,6 +197,17 @@ export function FindingsBoard({ findings, onClearAll }: Props) {
           </p>
         </div>
       </div>
+
+      <TableToolbar
+        totalRows={sortedFiltered.length}
+        selectedCount={selected.size}
+        filter={filter}
+        onFilterChange={setFilter}
+        onSelectAll={handleSelectAll}
+        onClearSelection={handleClearSelection}
+        onDeleteSelected={handleDeleteSelected}
+        filterPlaceholder="Filter by host, rule, credential, id…"
+      />
 
       <div className="hits-toolbar">
         <div className="hits-toolbar__filters">
@@ -225,6 +295,7 @@ export function FindingsBoard({ findings, onClearAll }: Props) {
             <table className="finding-table finding-table--rich">
               <thead>
                 <tr>
+                  <th className="th-narrow th-check" aria-label="Select row" />
                   <th className="th-narrow">ID</th>
                   <th aria-sort={sortKey === 'provider' ? ariaDir(dir) : undefined}>
                     <button type="button" className="tbl-sort" onClick={() => toggle('provider')}>
@@ -267,6 +338,14 @@ export function FindingsBoard({ findings, onClearAll }: Props) {
                         }
                       }}
                     >
+                      <td className="th-check" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(f.id)}
+                          onChange={() => toggleOne(f.id)}
+                          aria-label={`Select ${shortId(f.id)}`}
+                        />
+                      </td>
                       <td className="mono-cell finding-id">{shortId(f.id)}</td>
                       <td>
                         <span className="provider-badge provider-badge--lg">{f.provider}</span>
@@ -298,6 +377,15 @@ export function FindingsBoard({ findings, onClearAll }: Props) {
                         <span className="finding-chevron" aria-hidden>›</span>
                         <button type="button" className="icon-btn" title="Copy row" onClick={() => void copyRow(f)}>
                           ⧉
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-btn"
+                          title="Delete row"
+                          onClick={() => handleRowTrash(f)}
+                          disabled={!onRemoveFindings}
+                        >
+                          🗑
                         </button>
                       </td>
                     </tr>

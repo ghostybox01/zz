@@ -179,6 +179,12 @@ export const vps = {
   fix:     (ip: string) => postJson<ReconActionResult>(`/vps/server/${encodeURIComponent(ip)}/fix`),
   deployToServer: (ip: string, pkg?: string) => postJson<ReconDeployResult>(`/vps/server/${encodeURIComponent(ip)}/deploy`, { package: pkg }),
   collect: (ip: string) => postJson<ReconActionResult>(`/vps/server/${encodeURIComponent(ip)}/collect`),
+  /**
+   * Remove an IP from the rostered fleet (server_ips.txt). Backend may or
+   * may not implement /api/vps/server/<ip>/remove — callers should fall
+   * back to client-side state removal on 404 / network failure.
+   */
+  removeFromRoster: (ip: string) => postJson<ReconActionResult>(`/vps/server/${encodeURIComponent(ip)}/remove`),
 
   /* ── Bulk ops ──────────────────────────────────────────────────── */
   startAll:   () => postJson<ReconActionResult>('/vps/start-all'),
@@ -430,6 +436,13 @@ export const warc = {
     postJson<{ success: boolean; pid: number; run_id: string; max_domains: number }>('/warc/start', opts),
   stop:   () => postJson<{ success: boolean; message?: string }>('/warc/stop', {}),
   exportToR2: () => postJson<{ success: boolean; r2_key: string }>('/warc/export-to-r2', {}),
+}
+
+/* ── Logs ──────────────────────────────────────────────────────────── */
+export const logs = {
+  controller: (n = 200) => getJson<{ lines: string[]; error?: string }>(`/logs/controller?n=${n}`),
+  worker: (ip: string, n = 200) => getJson<{ ip: string; lines: string[] }>(`/logs/worker/${encodeURIComponent(ip)}?n=${n}`),
+  workersList: () => getJson<{ ips: string[] }>('/logs/workers'),
 }
 
 export { ReconApiError }
