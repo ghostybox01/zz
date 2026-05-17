@@ -28,8 +28,13 @@ export function WarcPanel() {
     void (async () => {
       try {
         const r = await warc.hosts()
-        const workers = Array.isArray(r?.hosts) ? r.hosts : []
-        setHosts(['controller', ...workers])
+        // Backend now returns `['controller', ...warc-tagged workers]` already —
+        // the earlier version of this component prepended a second 'controller',
+        // which is why the dropdown showed 'controller (this VPS)' twice.
+        const fromServer = Array.isArray(r?.hosts) && r.hosts.length > 0
+          ? r.hosts
+          : ['controller']
+        setHosts(fromServer)
       } catch {
         setHosts(['controller'])
       }
