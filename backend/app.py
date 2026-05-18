@@ -1958,23 +1958,64 @@ def _warc_remote_export_to_r2(ip: str, remote_output_path: str,
     return None, f'remote curl upload failed: {out!r}'
 
 
+def _sha256_local(path: str) -> 'str | None':
+    """SHA-256 of a controller-side file, streamed so a huge harvest output
+    doesn't load into RAM. Returns None on any read failure."""
+    try:
+        import hashlib as _h
+        h = _h.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _sha256_remote(mgr, ip: str, remote_path: str) -> 'str | None':
+    """SHA-256 of a worker-side file via one ssh_exec. Returns None if the
+    file is missing or sha256sum isn't on $PATH."""
+    if mgr is None or not remote_path:
+        return None
+    raw = mgr.ssh_exec(ip, f"sha256sum {remote_path} 2>/dev/null | awk '{{print $1}}'", 10) or ''
+    s = raw.strip()
+    return s if len(s) == 64 and all(c in '0123456789abcdef' for c in s) else None
+
+
 @app.route('/api/warc/export-to-r2', methods=['POST'])
 def api_warc_export_to_r2():
     """Force-upload the current live_domains.txt to R2 even if the run
     hasn't finished yet. Useful for taking a snapshot mid-harvest.
 
-    On the worker path the upload runs ON the worker via curl-to-presigned-URL
-    so the harvest output never round-trips through the controller."""
+    Content-addressed dedup: we hash the file before uploading and stash
+    `r2_last_export_sha` + `r2_last_export_key` in warc_state. A second
+    click while the file is byte-identical short-circuits with HTTP 200
+    + `{noop: true, r2_key}` instead of creating a duplicate object. This
+    is why your bucket was accumulating identical 177 KB exports."""
     _reload_warc_state_if_changed()
     with _warc_lock:
         output_path = _warc_state.get('output_path')
         run_id = _warc_state.get('run_id')
         run_on = _warc_state.get('run_on') or 'controller'
+        last_sha = _warc_state.get('r2_last_export_sha')
+        last_key = _warc_state.get('r2_last_export_key')
 
     # ── Worker path: worker pushes directly to R2 ─────────────────────
     if run_on != 'controller':
         if not output_path:
             return jsonify({'error': 'no warc output to export'}), 404
+        mgr = get_ssh_manager()
+        cur_sha = _sha256_remote(mgr, run_on, output_path)
+        if cur_sha and last_sha and cur_sha == last_sha and last_key:
+            with _warc_lock:
+                _warc_state['r2_key'] = last_key
+                _warc_state['r2_error'] = None
+            _save_warc_state()
+            return jsonify({
+                'success': True, 'noop': True, 'r2_key': last_key,
+                'message': 'content unchanged — reusing existing R2 object',
+                'sha256': cur_sha,
+            })
         r2_key, err = _warc_remote_export_to_r2(run_on, output_path, run_id)
         if not r2_key:
             return jsonify({'error': err or 'R2 upload failed'}), 502
@@ -1982,12 +2023,26 @@ def api_warc_export_to_r2():
             _warc_state['r2_key'] = r2_key
             _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
             _warc_state['r2_error'] = None
+            if cur_sha:
+                _warc_state['r2_last_export_sha'] = cur_sha
+                _warc_state['r2_last_export_key'] = r2_key
         _save_warc_state()
-        return jsonify({'success': True, 'r2_key': r2_key, 'run_on': run_on})
+        return jsonify({'success': True, 'r2_key': r2_key, 'run_on': run_on, 'sha256': cur_sha})
 
     # ── Controller path: legacy boto3 upload from local disk ──────────
     if not output_path or not os.path.exists(output_path):
         return jsonify({'error': 'no warc output to export'}), 404
+    cur_sha = _sha256_local(output_path)
+    if cur_sha and last_sha and cur_sha == last_sha and last_key:
+        with _warc_lock:
+            _warc_state['r2_key'] = last_key
+            _warc_state['r2_error'] = None
+        _save_warc_state()
+        return jsonify({
+            'success': True, 'noop': True, 'r2_key': last_key,
+            'message': 'content unchanged — reusing existing R2 object',
+            'sha256': cur_sha,
+        })
     client, bucket, state, err = _get_r2_client()
     if not client:
         return jsonify({'error': err or f'R2 unavailable ({state})'}), 503
@@ -2001,7 +2056,76 @@ def api_warc_export_to_r2():
         _warc_state['r2_key'] = r2_key
         _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
         _warc_state['r2_error'] = None
-    return jsonify({'success': True, 'r2_key': r2_key})
+        if cur_sha:
+            _warc_state['r2_last_export_sha'] = cur_sha
+            _warc_state['r2_last_export_key'] = r2_key
+    _save_warc_state()
+    return jsonify({'success': True, 'r2_key': r2_key, 'sha256': cur_sha})
+
+
+@app.route('/api/r2/objects', methods=['GET'])
+def api_r2_objects():
+    """List objects in the configured R2 bucket. Optional ?prefix=warc/.
+
+    Returns `{ok, objects: [{key, size, modified, storage_class}]}`. The
+    dashboard renders this as a deletable list so the operator can prune
+    duplicates without leaving the cockpit."""
+    client, bucket, state, err = _get_r2_client()
+    if not client:
+        return jsonify({'ok': False, 'error': err or f'R2 unavailable ({state})'}), 503
+    prefix = request.args.get('prefix', '')
+    try:
+        max_keys = max(1, min(1000, int(request.args.get('limit') or 100)))
+    except (TypeError, ValueError):
+        max_keys = 100
+    objects = []
+    try:
+        kwargs = {'Bucket': bucket, 'MaxKeys': max_keys}
+        if prefix:
+            kwargs['Prefix'] = prefix
+        resp = client.list_objects_v2(**kwargs)
+        for o in resp.get('Contents', []) or []:
+            objects.append({
+                'key': o.get('Key'),
+                'size': o.get('Size', 0),
+                'modified': (o.get('LastModified').isoformat()
+                             if o.get('LastModified') else None),
+                'storage_class': o.get('StorageClass'),
+            })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    objects.sort(key=lambda x: x.get('modified') or '', reverse=True)
+    return jsonify({'ok': True, 'bucket': bucket, 'prefix': prefix, 'objects': objects})
+
+
+@app.route('/api/r2/object', methods=['DELETE'])
+def api_r2_object_delete():
+    """Delete a single object by exact key (passed as ?key=warc/...).
+
+    Refuses to delete an empty key as a guard against client bugs that
+    would otherwise list_objects + delete the bucket root."""
+    key = request.args.get('key') or ''
+    if not key.strip():
+        return jsonify({'ok': False, 'error': 'key required'}), 400
+    client, bucket, state, err = _get_r2_client()
+    if not client:
+        return jsonify({'ok': False, 'error': err or f'R2 unavailable ({state})'}), 503
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    # If the operator just nuked the row we have remembered as the
+    # dedup target, clear the dedup pointer so the next export uploads
+    # fresh instead of returning a 404'd r2_key as a "noop".
+    with _warc_lock:
+        if _warc_state.get('r2_last_export_key') == key:
+            _warc_state.pop('r2_last_export_sha', None)
+            _warc_state.pop('r2_last_export_key', None)
+        if _warc_state.get('r2_key') == key:
+            _warc_state['r2_key'] = None
+            _warc_state['r2_uploaded_at'] = None
+    _save_warc_state()
+    return jsonify({'ok': True, 'deleted': key})
 
 
 @app.route('/api/warc/hosts', methods=['GET'])

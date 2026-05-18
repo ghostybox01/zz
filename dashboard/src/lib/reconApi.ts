@@ -424,11 +424,33 @@ export type R2Config = {
   last_error?: string | null
 }
 
+export type R2Object = {
+  key: string
+  size: number
+  modified: string | null
+  storage_class?: string | null
+}
+
 export const r2 = {
   getConfig: () => getJson<R2Config>('/upload/r2-config'),
   saveConfig: (cfg: Omit<R2Config, 'configured'>) => postJson<R2Config>('/upload/r2-config', cfg),
   presign: (filename: string) => getJson<{ url: string; key: string; upload_id: string }>(`/upload/presign?filename=${encodeURIComponent(filename)}`),
   complete: (key: string, filename: string) => postJson<{ success: boolean; targets: number; preview: string[]; filename: string }>('/upload/complete', { key, filename }),
+  /** List objects in the configured bucket. Optional prefix filter. */
+  listObjects: (prefix?: string, limit = 100) =>
+    getJson<{ ok: boolean; bucket?: string; prefix?: string; objects: R2Object[]; error?: string }>(
+      `/r2/objects?prefix=${encodeURIComponent(prefix ?? '')}&limit=${limit}`,
+    ),
+  /** Delete one object by exact key. Used by the WARC cockpit's exports list. */
+  deleteObject: async (key: string): Promise<{ ok: boolean; deleted?: string; error?: string }> => {
+    const res = await fetch(`${BASE}/r2/object?key=${encodeURIComponent(key)}`, { method: 'DELETE' })
+    if (!res.ok) {
+      let body: { error?: string } = {}
+      try { body = (await res.json()) as { error?: string } } catch { /* ignore */ }
+      return { ok: false, error: body.error ?? `HTTP ${res.status}` }
+    }
+    return (await res.json()) as { ok: boolean; deleted?: string }
+  },
 }
 
 /* ── WARC harvest control plane ──────────────────────────────────────── */

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { warc, r2, type WarcStatus, type R2Config } from '../lib/reconApi'
+import { warc, r2, type WarcStatus, type R2Config, type R2Object } from '../lib/reconApi'
 
 const POLL_MS = 3000
 
@@ -38,6 +38,11 @@ export function WarcPanel({ notify }: Props = {}) {
   // a click on "Export to R2" will actually land.
   const [r2State, setR2State] = useState<R2Config['state']>('unknown')
   const [r2LastError, setR2LastError] = useState<string | null>(null)
+  // R2 exports list — populated on demand (mount + after each export +
+  // after each delete). Lets the operator see what landed and prune
+  // duplicates without leaving the cockpit.
+  const [r2Objects, setR2Objects] = useState<R2Object[]>([])
+  const [r2Listing, setR2Listing] = useState(false)
   const pollTimer = useRef<number | null>(null)
 
   async function refresh() {
@@ -55,6 +60,32 @@ export function WarcPanel({ notify }: Props = {}) {
       setR2LastError(c.last_error ?? null)
     } catch {
       // best-effort — leave the pill at its prior state
+    }
+  }
+
+  async function refreshR2Objects() {
+    setR2Listing(true)
+    try {
+      const r = await r2.listObjects('warc/', 200)
+      if (r.ok) setR2Objects(r.objects ?? [])
+    } catch {
+      // ignore — listing is non-critical
+    } finally {
+      setR2Listing(false)
+    }
+  }
+
+  async function onDeleteR2(key: string) {
+    if (!window.confirm(`Delete ${key} from R2? This cannot be undone.`)) return
+    notify?.('Deleting R2 object', key, 'info')
+    const res = await r2.deleteObject(key)
+    if (res.ok) {
+      notify?.('R2 delete complete', key, 'info')
+      setR2Objects((prev) => prev.filter((o) => o.key !== key))
+      // If the dedup pointer was this object, status will re-sync on next poll.
+      await refresh()
+    } else {
+      notify?.('R2 delete failed', res.error ?? 'unknown error', 'error')
     }
   }
 
@@ -81,6 +112,7 @@ export function WarcPanel({ notify }: Props = {}) {
     void refresh()
     void refreshHosts()
     void refreshR2Health()
+    void refreshR2Objects()
     pollTimer.current = window.setInterval(() => {
       void refresh()
       void refreshHosts()
@@ -153,9 +185,14 @@ export function WarcPanel({ notify }: Props = {}) {
     const count = status?.domains_found ?? 0
     notify?.('Uploading to R2', `Shipping ${count.toLocaleString()} domains to Cloudflare R2…`, 'info')
     try {
-      const r = await warc.exportToR2()
-      notify?.('R2 upload complete', `Saved as ${r.r2_key}`, 'info')
+      const r = await warc.exportToR2() as { r2_key?: string; noop?: boolean; message?: string }
+      if (r.noop) {
+        notify?.('No upload needed', `${r.message ?? 'content unchanged'} — kept ${r.r2_key}`, 'info')
+      } else {
+        notify?.('R2 upload complete', `Saved as ${r.r2_key}`, 'info')
+      }
       await refresh()
+      void refreshR2Objects()
     } catch (e) {
       const msg = (e as Error).message
       setError(msg)
@@ -414,6 +451,59 @@ export function WarcPanel({ notify }: Props = {}) {
           {error || r2Error}
         </p>
       )}
+
+      <div style={{ marginTop: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '.6rem' }}>
+          <div className="muted" style={{ fontSize: '.78rem' }}>
+            R2 exports {r2Objects.length > 0 ? `(${r2Objects.length})` : ''}
+          </div>
+          <button
+            type="button"
+            className="btn-glass btn-glass--xs"
+            onClick={() => void refreshR2Objects()}
+            disabled={r2Listing}
+            title="Re-list objects in the warc/ prefix"
+          >
+            {r2Listing ? '…' : '↻'}
+          </button>
+        </div>
+        {r2Objects.length === 0 ? (
+          <p className="muted" style={{ fontSize: '.72rem', marginTop: '.3rem' }}>
+            {r2State === 'connected' ? 'No exports yet.' : 'Connect R2 in Settings to see exports.'}
+          </p>
+        ) : (
+          <table className="fleet-boot__table" style={{ marginTop: '.4rem', fontSize: '.74rem' }}>
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th style={{ textAlign: 'right' }}>Size</th>
+                <th>Modified</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {r2Objects.map((o) => (
+                <tr key={o.key}>
+                  <td className="mono" style={{ wordBreak: 'break-all' }}>{o.key}</td>
+                  <td className="mono" style={{ textAlign: 'right' }}>{(o.size / 1024).toFixed(1)} KB</td>
+                  <td className="muted">{o.modified ? new Date(o.modified).toLocaleString() : '—'}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="btn-danger-outline"
+                      style={{ fontSize: '.7rem', padding: '.15rem .5rem' }}
+                      onClick={() => void onDeleteR2(o.key)}
+                      title={`Delete ${o.key} from R2`}
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
 
       {status?.log_tail && status.log_tail.length > 0 && (
         <details style={{ marginTop: '1rem' }}>
