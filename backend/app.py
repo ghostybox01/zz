@@ -1174,6 +1174,24 @@ def _load_warc_state() -> None:
 _warc_state_mtime: float = 0.0
 
 
+def _truncate_log_tail(lines, max_lines: int = 20, max_chars: int = 400) -> list:
+    """Belt-and-braces guard so /api/warc/status payloads stay small even
+    when the cache fallback or a stale cache entry slips a giant entry
+    through. warc.go writes progress with \\r so a single "line" returned
+    by `tail -20` can balloon to ~16 KB once concatenated; without this
+    the polled response was 195 KB, eating ~65 KB/s of dashboard bandwidth.
+    Mirrors the cache writer's truncation in ssh_manager._refresh_warc_status_cache."""
+    if not lines:
+        return []
+    out = []
+    for ln in lines[-max_lines:]:
+        s = str(ln)
+        if len(s) > max_chars:
+            s = s[: max_chars // 2] + ' …[truncated]… ' + s[-(max_chars // 2 - 20):]
+        out.append(s)
+    return out
+
+
 def _reload_warc_state_if_changed() -> None:
     """Re-hydrate _warc_state when the sidecar's mtime has advanced. Gunicorn
     runs multiple workers with separate memory — without this, worker A can
@@ -1814,7 +1832,7 @@ def api_warc_status():
         'r2_key': state.get('r2_key'),
         'r2_uploaded_at': state.get('r2_uploaded_at'),
         'r2_error': state.get('r2_error'),
-        'log_tail': log_tail,
+        'log_tail': _truncate_log_tail(log_tail),
     })
 
 
