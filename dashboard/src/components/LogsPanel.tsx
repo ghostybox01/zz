@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { logs } from '../lib/reconApi'
+import { labelForHost } from '../lib/labelForHost'
+import type { VpsNode } from '../types'
 
 const POLL_MS = 5000
 const DEFAULT_TAIL = 200
 
 type Source = 'controller' | string // 'controller' or a worker IP
 
-export function LogsPanel() {
+type Props = {
+  /** Live fleet roster — resolves worker IPs in the Source dropdown to their
+   * operator-facing labels. Optional so the panel still renders in isolation;
+   * when absent, IPs are shown raw. */
+  fleet?: readonly VpsNode[]
+}
+
+export function LogsPanel({ fleet = [] }: Props = {}) {
   const [workers, setWorkers] = useState<string[]>([])
   const [source, setSource] = useState<Source>('controller')
   const [lines, setLines] = useState<string[]>([])
@@ -77,7 +86,10 @@ export function LogsPanel() {
     el.scrollTop = el.scrollHeight
   }, [lines])
 
-  const sourceLabel = source === 'controller' ? 'Controller (reconx-dashboard)' : `Worker ${source}`
+  const sourceLabel =
+    source === 'controller'
+      ? 'Controller (reconx-dashboard)'
+      : `Worker ${labelForHost(source, fleet)}`
 
   return (
     <section className="card-block">
@@ -133,7 +145,7 @@ export function LogsPanel() {
             <option value="controller">Controller (reconx-dashboard)</option>
             {workers.map((ip) => (
               <option key={ip} value={ip}>
-                Worker {ip}
+                Worker {labelForHost(ip, fleet)}
               </option>
             ))}
           </select>

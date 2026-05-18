@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { warc, r2, type WarcStatus, type R2Config, type R2Object } from '../lib/reconApi'
+import { labelForHost } from '../lib/labelForHost'
+import type { VpsNode } from '../types'
 
 const POLL_MS = 3000
 
@@ -10,9 +12,14 @@ export type WarcPanelToast = (title: string, message: string, kind: 'info' | 'er
 
 type Props = {
   notify?: WarcPanelToast
+  /** Live fleet roster — used to resolve worker IPs in the "Run on" dropdown
+   * to their operator-facing labels (`label (ip)`). Optional so the panel
+   * still renders in isolation (tests, standalone embed); when absent, hosts
+   * are shown raw. */
+  fleet?: readonly VpsNode[]
 }
 
-export function WarcPanel({ notify }: Props = {}) {
+export function WarcPanel({ notify, fleet = [] }: Props = {}) {
   const [status, setStatus] = useState<WarcStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -234,7 +241,12 @@ export function WarcPanel({ notify }: Props = {}) {
             </span>
             {running && (
               <span className="pill pill--muted" style={{ fontSize: '0.72rem' }}>
-                Running on: {status?.run_on ?? 'controller'}
+                Running on: {
+                  (() => {
+                    const ro = status?.run_on ?? 'controller'
+                    return ro === 'controller' ? 'controller' : labelForHost(ro, fleet)
+                  })()
+                }
               </span>
             )}
             {r2Key && (
@@ -297,7 +309,11 @@ export function WarcPanel({ notify }: Props = {}) {
               value={runOn}
               onChange={(e) => setRunOn(e.target.value)}
             >
-              {hosts.map((h) => <option key={h} value={h}>{h === 'controller' ? 'controller (this VPS)' : h}</option>)}
+              {hosts.map((h) => (
+                <option key={h} value={h}>
+                  {h === 'controller' ? 'controller (this VPS)' : labelForHost(h, fleet)}
+                </option>
+              ))}
             </select>
           </div>
           <div className="kv__row">

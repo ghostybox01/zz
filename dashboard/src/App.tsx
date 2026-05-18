@@ -607,7 +607,7 @@ export default function App() {
               hidden={warcHidden}
               className="tab-panel"
             >
-              <WarcPanel notify={pushAlertToast} />
+              <WarcPanel notify={pushAlertToast} fleet={fleet} />
             </section>
 
             <section
@@ -690,7 +690,7 @@ export default function App() {
               hidden={logsHidden}
               className="tab-panel"
             >
-              <LogsPanel />
+              <LogsPanel fleet={fleet} />
             </section>
 
             <section
@@ -794,7 +794,7 @@ export default function App() {
                 </details>
 
                 <details className="settings-acc">
-                  <summary>Notifications · webhooks &amp; Slack</summary>
+                  <summary>Notifications · filters</summary>
                   <div className="settings-acc__body">
                     <NotificationsSettings />
                   </div>

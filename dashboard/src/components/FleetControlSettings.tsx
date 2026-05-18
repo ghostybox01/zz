@@ -24,16 +24,15 @@ export function FleetControlSettings({ config, onChange }: Props) {
   return (
     <section className="card-block card-block--tight">
       <div className="card-block__head">
-        <h2>Fleet control plane</h2>
+        <h2>Auto-enroll &amp; backend connection</h2>
         <p className="card-block__lede card-block__lede--short">
-          Optional backend for real SSH enroll + deploy. When disabled, discovered SSH/VPS hits still join the
-          fleet in <strong>simulated</strong> mode. Run <code className="inline-code">python fleet_api.py</code> on
-          your orchestrator host.
+          When ON, discovered SSH/VPS hits POST to the controller's real backend instead of running in
+          client-side simulation. Auto-enroll fires the moment a scan finding includes credentials.
         </p>
       </div>
 
       <label className="tg-field tg-field--row">
-        <span>Enable control plane</span>
+        <span>Use real backend</span>
         <input
           type="checkbox"
           checked={draft.enabled}
@@ -50,38 +49,43 @@ export function FleetControlSettings({ config, onChange }: Props) {
         />
       </label>
 
-      <label className="tg-field">
-        <span>Control plane URL</span>
-        <input
-          className="tg-input"
-          type="url"
-          autoComplete="off"
-          spellCheck={false}
-          value={draft.baseUrl}
-          onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
-          onBlur={() => apply({ baseUrl: draft.baseUrl })}
-          placeholder="http://127.0.0.1:8787"
-        />
-      </label>
+      <details className="settings-acc">
+        <summary>Advanced</summary>
+        <div className="settings-acc__body">
+          <label className="tg-field">
+            <span>Control plane URL</span>
+            <input
+              className="tg-input"
+              type="url"
+              autoComplete="off"
+              spellCheck={false}
+              value={draft.baseUrl}
+              onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
+              onBlur={() => apply({ baseUrl: draft.baseUrl })}
+              placeholder="http://127.0.0.1:8787"
+            />
+          </label>
 
-      <label className="tg-field">
-        <span>Bearer token (optional)</span>
-        <input
-          className="tg-input"
-          type="password"
-          autoComplete="off"
-          value={draft.bearerToken}
-          onChange={(e) => setDraft({ ...draft, bearerToken: e.target.value })}
-          onBlur={() => apply({ bearerToken: draft.bearerToken })}
-        />
-      </label>
+          <label className="tg-field">
+            <span>Bearer token (optional)</span>
+            <input
+              className="tg-input"
+              type="password"
+              autoComplete="off"
+              value={draft.bearerToken}
+              onChange={(e) => setDraft({ ...draft, bearerToken: e.target.value })}
+              onBlur={() => apply({ bearerToken: draft.bearerToken })}
+            />
+          </label>
 
-      <p className="settings-hint">
-        Scanner should emit <code className="inline-code">ssh_valid.txt</code> or{' '}
-        <code className="inline-code">vps_ssh_found.txt</code> lines as{' '}
-        <code className="inline-code">source_url:host:user:secret</code>. Private keys in{' '}
-        <code className="inline-code">private_keys_found.txt</code> enroll when paired with a host.
-      </p>
+          <p className="settings-hint">
+            Scanner should emit <code className="inline-code">ssh_valid.txt</code> or{' '}
+            <code className="inline-code">vps_ssh_found.txt</code> lines as{' '}
+            <code className="inline-code">source_url:host:user:secret</code>. Private keys in{' '}
+            <code className="inline-code">private_keys_found.txt</code> enroll when paired with a host.
+          </p>
+        </div>
+      </details>
     </section>
   )
 }
