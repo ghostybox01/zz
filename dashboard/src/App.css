@@ -5117,14 +5117,24 @@
 .cw-addons__head h3 { margin:0 0 .15rem; font-size:1rem; }
 .cw-addons__head p { margin:0; font-size:.72rem; }
 .cw-addons__count { font-size:.62rem; font-weight:700; letter-spacing:.1em; color:var(--gold); white-space:nowrap; }
-.cw-addons__row { display:grid; grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr)); gap:.6rem; }
-@media (min-width: 1280px) { .cw-addons__row { grid-template-columns:repeat(11, minmax(0, 1fr)); } }
-.cw-addon { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-width:0; padding:.95rem 3.25rem 1rem .55rem; border-radius:13px; border:1px solid var(--hairline); background:rgba(0,0,0,.18); cursor:pointer; transition:border-color 140ms ease, transform 140ms ease, background 140ms ease, box-shadow 140ms ease; }
+/* Two-row balanced layout. Component sets `--cw-addon-cols` to
+   ceil(N/2) so 15 tiles → 8 cols (8+7 split), 14 → 7 cols (7+7), etc.
+   Auto-fit fallback for narrow viewports where ceil(N/2) shrinks tiles
+   below ~7rem and the grid wraps to more rows organically. */
+.cw-addons__row { display:grid; grid-template-columns:repeat(auto-fit,minmax(7rem,1fr)); gap:.6rem; }
+@media (min-width: 1024px) {
+  .cw-addons__row { grid-template-columns: repeat(var(--cw-addon-cols, 8), minmax(0, 1fr)); }
+}
+/* Symmetric horizontal padding so the centered flex column visually
+   sits in the middle of the tile. The ON/OFF badge is absolute on
+   top — label gets a small right-side reserve via padding-inline so
+   it doesn't crash the badge on long names. */
+.cw-addon { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-width:0; padding:.95rem .6rem 1rem; border-radius:13px; border:1px solid var(--hairline); background:rgba(0,0,0,.18); cursor:pointer; transition:border-color 140ms ease, transform 140ms ease, background 140ms ease, box-shadow 140ms ease; }
 .cw-addon:hover { border-color:rgba(255,255,255,.18); background:rgba(255,255,255,.03); transform:translateY(-1px); }
 .cw-addon:active { transform:translateY(0); }
-.cw-addon__logo { display:flex; align-items:center; justify-content:center; width:44px; height:44px; margin-bottom:.55rem; }
-.cw-addon__label { font-size:.82rem; font-weight:600; color:var(--text-strong); text-align:center; line-height:1.1; }
-.cw-addon__state { position:absolute; top:.55rem; right:.6rem; font-size:.58rem; font-weight:800; letter-spacing:.1em; padding:.15rem .42rem; border-radius:999px; }
+.cw-addon__logo { display:flex; align-items:center; justify-content:center; width:44px; height:44px; margin-bottom:.55rem; margin-inline:auto; }
+.cw-addon__label { font-size:.82rem; font-weight:600; color:var(--text-strong); text-align:center; line-height:1.1; padding-inline:.15rem; }
+.cw-addon__state { position:absolute; top:.5rem; right:.5rem; font-size:.58rem; font-weight:800; letter-spacing:.1em; padding:.15rem .42rem; border-radius:999px; }
 .cw-addon__state--on { color:#022c22; background:var(--ok); border:1px solid var(--ok); }
 .cw-addon__state--off { color:var(--muted); background:rgba(255,255,255,.04); border:1px solid var(--hairline); }
 .cw-addon--on {

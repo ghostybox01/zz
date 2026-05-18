@@ -857,6 +857,7 @@ SCANNER_CONFIG_SCHEMA = {
     'api_validation': [
         'openai', 'anthropic', 'ai_all', 'stripe', 'gcp_api_key', 'sendgrid', 'mailgun',
         'twilio', 'nexmo', 'telnyx', 'messagebird', 'github',
+        'postmark', 'sparkpost', 'mailtrap', 'mailjet', 'heroku', 'datadog', 'plivo',
     ],
     'features': ['brevo', 'xsmtp', 'mandrill', 'mailersend', 'new_mailgun'],
     'exploit_methods': ['react2shell', 'bypass_waf', 'bypass_middleware', 'lfi', 'xxe', 'ssrf'],

@@ -116,6 +116,11 @@ export function AddonsStrip({ config, onPatch }: Props) {
   const visible = getEnabledAddons(enabledMap)
   const states = visible.map((a) => ({ entry: a, on: readFlag(a, config) }))
   const selected = states.filter((s) => s.on).length
+  // Auto-balance into two rows: ceil(N/2) columns gives a near-equal
+  // split for any N (15 → 8/7, 14 → 7/7, 16 → 8/8). CSS variable is
+  // consumed by `.cw-addons__row` at viewport ≥1024px; narrower screens
+  // fall through to the auto-fit minmax layout in App.css.
+  const cols = Math.max(1, Math.ceil(visible.length / 2))
 
   return (
     <section className="cw-addons">
@@ -126,7 +131,10 @@ export function AddonsStrip({ config, onPatch }: Props) {
         </div>
         <span className="cw-addons__count">{selected} / {visible.length} ACTIVE</span>
       </header>
-      <div className="cw-addons__row">
+      <div
+        className="cw-addons__row"
+        style={{ ['--cw-addon-cols' as string]: cols }}
+      >
         {states.map(({ entry, on }) => {
           const { domain, Glyph } = brandFor(entry)
           const parsed = parseScannerKey(entry.scannerKey)

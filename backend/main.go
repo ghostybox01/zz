@@ -93,6 +93,13 @@ type Config struct {
 		Telnyx      bool `json:"telnyx"`
 		MessageBird bool `json:"messagebird"`
 		GitHub      bool `json:"github"`
+		Postmark    bool `json:"postmark"`
+		SparkPost   bool `json:"sparkpost"`
+		Mailtrap    bool `json:"mailtrap"`
+		Mailjet     bool `json:"mailjet"`
+		Heroku      bool `json:"heroku"`
+		Datadog     bool `json:"datadog"`
+		Plivo       bool `json:"plivo"`
 	} `json:"api_validation"`
 	// Fitur lama yang hanya mencari pola, bukan validasi, akan tetap diabaikan atau ditangani di logic lain
 	Features struct { // Dibiarkan untuk pola yang tidak divalidasi, jika masih ada
@@ -557,7 +564,9 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		SendGridAPIKeyPatternInfo:    regexp.MustCompile(`\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}\b`),
 		MailgunAPIKeyPatternInfo:     regexp.MustCompile(`\bkey-[0-9a-zA-Z]{32}\b`),
 		GitHubAccessTokenPatternInfo: regexp.MustCompile(`\b(gh[oprus]_[A-Za-z0-9]{36}|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})\b`),
-		StripePattern:                regexp.MustCompile(`(sk|pk|rk)_(live|test)_[0-9a-zA-Z]{16,99}`),
+		// Stripe key formats: secret (sk_*), publishable (pk_*), restricted (rk_*) — live and test variants.
+		// Restricted-key variants rk_live_ and rk_test_ explicitly enumerated to keep coverage visible.
+		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|pk_live_|pk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
 		OpenAIAPIPattern:             regexp.MustCompile(`sk-[a-zA-Z0-9]{48}`),
 		AnthropicPattern:             regexp.MustCompile(`sk-ant-[a-zA-Z0-9]{32}-[a-zA-Z0-9]{64}`),
 		MessageBirdPattern:           regexp.MustCompile(`(AccessKey|TestKey)_[a-zA-Z0-9]{32}`),
@@ -2494,6 +2503,70 @@ func (a *AWSScanner) CheckGCPKey(key, sourceURL string) bool {
 	return false
 }
 
+// do429Retry executes req with rate-limit (HTTP 429) and transient 5xx retry handling.
+//
+// Behavior:
+//   - On 429: parses Retry-After (integer seconds, default 2s) and sleeps that long, then retries.
+//   - On >= 500: logs and retries once with a 1s sleep.
+//   - Otherwise returns the response immediately.
+//   - Total attempts capped at maxAttempts (defaults to 3 when <= 0).
+//
+// Requests are cloned via req.Clone(req.Context()) for each retry so a consumed body
+// does not break replay (Go gotcha: http.Request body is a one-shot ReadCloser).
+func do429Retry(client *http.Client, req *http.Request, maxAttempts int) (*http.Response, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+
+	var lastResp *http.Response
+	var lastErr error
+	fiveXXRetried := false
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Clone for each attempt — once a request body is consumed, the original cannot be replayed.
+		attemptReq := req.Clone(req.Context())
+
+		resp, err := client.Do(attemptReq)
+		lastResp, lastErr = resp, err
+		if err != nil {
+			return resp, err
+		}
+
+		if resp.StatusCode == 429 {
+			retryAfter := 2
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if secs, perr := strconv.Atoi(strings.TrimSpace(ra)); perr == nil && secs > 0 {
+					retryAfter = secs
+				}
+			}
+			pterm.Debug.Printfln("[do429Retry] 429 received, sleeping %ds (attempt %d/%d)", retryAfter, attempt, maxAttempts)
+			if attempt == maxAttempts {
+				// Last attempt — hand the 429 response back to the caller (don't close the body).
+				return resp, nil
+			}
+			resp.Body.Close()
+			time.Sleep(time.Duration(retryAfter) * time.Second)
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			if fiveXXRetried || attempt == maxAttempts {
+				// No more retries — return the response for the caller to inspect.
+				return resp, nil
+			}
+			pterm.Debug.Printfln("[do429Retry] %d received, retrying once after 1s (attempt %d/%d)", resp.StatusCode, attempt, maxAttempts)
+			resp.Body.Close()
+			fiveXXRetried = true
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		return resp, nil
+	}
+
+	return lastResp, lastErr
+}
+
 // Fungsi untuk mengecek validitas OpenAI
 func (a *AWSScanner) CheckOpenAI(key, sourceURL string) bool {
 	if !a.Config.APIValidation.OpenAI && !a.Config.APIValidation.AIAll { // gate: per-vendor OR master AI toggle
@@ -2514,7 +2587,7 @@ func (a *AWSScanner) CheckOpenAI(key, sourceURL string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	resp, err := client.Do(req.WithContext(ctx))
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
 	if err == nil {
 		defer resp.Body.Close()
 
@@ -2560,12 +2633,12 @@ func (a *AWSScanner) CheckAnthropic(key, sourceURL string) bool {
 	// Endpoint sederhana untuk memeriksa status API key
 	req, _ := http.NewRequest("GET", "https://api.anthropic.com/v1/models", nil)
 	req.Header.Set("x-api-key", key)
-	req.Header.Set("anthropic-version", "2023-06-01") // Versi API yang disyaratkan
+	req.Header.Set("anthropic-version", "2023-10-01") // Versi API yang disyaratkan (next stable after 2023-06-01)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	resp, err := client.Do(req.WithContext(ctx))
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
 	if err == nil {
 		defer resp.Body.Close()
 
@@ -2597,6 +2670,12 @@ func (a *AWSScanner) CheckAnthropic(key, sourceURL string) bool {
 // Fungsi untuk mengecek validitas Twilio
 func (a *AWSScanner) CheckTwilio(sid, auth, sourceURL string) bool {
 	if !a.Config.APIValidation.Twilio { // Pengecekan fitur baru
+		return false
+	}
+
+	// Tighten SID validation: must match AC + 32 lowercase hex chars exactly (Account SID format)
+	// before any HTTP call is made. Cuts false-positive validation traffic from loose extractor regex.
+	if !regexp.MustCompile(`^AC[a-f0-9]{32}$`).MatchString(sid) {
 		return false
 	}
 
@@ -2668,7 +2747,7 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	resp, err := client.Do(req.WithContext(ctx))
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
 	if err == nil {
 		defer resp.Body.Close()
 		if resp.StatusCode == 200 {
@@ -2830,7 +2909,7 @@ func (a *AWSScanner) CheckMailgun(key, sourceURL string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	resp, err := client.Do(req.WithContext(ctx))
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
 	if err == nil {
 		defer resp.Body.Close()
 		if resp.StatusCode == 200 {
@@ -3310,9 +3389,11 @@ func (a *AWSScanner) CheckNexmo(key, secret, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
-	url := fmt.Sprintf("https://rest.nexmo.com/account/get-balance?api_key=%s&api_secret=%s", key, secret)
-	req, _ := http.NewRequest("GET", url, nil)
+	// Move credentials out of the query string (server logs, referrer headers, browser history exposure)
+	// and into the standard HTTP Basic auth header. The endpoint and method are unchanged.
+	req, _ := http.NewRequest("GET", "https://rest.nexmo.com/account/get-balance", nil)
 	req.Header.Set("Accept", "application/json")
+	req.SetBasicAuth(key, secret)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -3540,6 +3621,13 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.MandrillAppAPIKeyPattern, a.Config.Features.Mandrill, "Mandrill", a.CheckMandrill},
 		{a.MailerSendAPIKeyPattern, a.Config.Features.MailerSend, "MailerSend", a.CheckMailerSend},
 		{a.NewMailgunAPIKeyPattern, a.Config.Features.NewMailgun, "NewMailgun", a.CheckMailgun},
+		{postmarkPattern, a.Config.APIValidation.Postmark, "Postmark", a.CheckPostmark},
+		{sparkpostPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
+		{mailtrapPattern, a.Config.APIValidation.Mailtrap, "Mailtrap", a.CheckMailtrap},
+		{mailjetPattern, a.Config.APIValidation.Mailjet, "Mailjet", a.CheckMailjet},
+		{herokuPattern, a.Config.APIValidation.Heroku, "Heroku", a.CheckHeroku},
+		{datadogPattern, a.Config.APIValidation.Datadog, "Datadog", a.CheckDatadog},
+		{plivoPattern, a.Config.APIValidation.Plivo, "Plivo", a.CheckPlivo},
 	}
 
 	var wg sync.WaitGroup
