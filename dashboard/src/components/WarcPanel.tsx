@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { warc, type WarcStatus } from '../lib/reconApi'
+import { warc, r2, type WarcStatus, type R2Config } from '../lib/reconApi'
 
 const POLL_MS = 3000
 
@@ -33,6 +33,11 @@ export function WarcPanel({ notify }: Props = {}) {
   const [crtDomain, setCrtDomain] = useState('')
   // Opt-in apex filter (drops FQDNs equal to their own eTLD+1).
   const [subdomainOnly, setSubdomainOnly] = useState(false)
+  // R2 health, refreshed alongside warc/status. Surfaces the same pill
+  // R2Settings shows so the operator can see at the export site whether
+  // a click on "Export to R2" will actually land.
+  const [r2State, setR2State] = useState<R2Config['state']>('unknown')
+  const [r2LastError, setR2LastError] = useState<string | null>(null)
   const pollTimer = useRef<number | null>(null)
 
   async function refresh() {
@@ -40,6 +45,16 @@ export function WarcPanel({ notify }: Props = {}) {
       setStatus(await warc.status())
     } catch (e) {
       setError((e as Error).message)
+    }
+  }
+
+  async function refreshR2Health() {
+    try {
+      const c = await r2.getConfig()
+      setR2State(c.state ?? (c.configured ? 'unknown' : 'misconfigured'))
+      setR2LastError(c.last_error ?? null)
+    } catch {
+      // best-effort — leave the pill at its prior state
     }
   }
 
@@ -65,9 +80,13 @@ export function WarcPanel({ notify }: Props = {}) {
     }
     void refresh()
     void refreshHosts()
+    void refreshR2Health()
     pollTimer.current = window.setInterval(() => {
       void refresh()
       void refreshHosts()
+      // R2 health changes slowly — poll at 1/4 the WARC cadence so we stay
+      // responsive to operator config changes without burning round-trips.
+      if ((Date.now() / POLL_MS) % 4 < 1) void refreshR2Health()
     }, POLL_MS)
     return () => {
       if (pollTimer.current) window.clearInterval(pollTimer.current)
@@ -178,6 +197,27 @@ export function WarcPanel({ notify }: Props = {}) {
                 ↑ R2
               </span>
             )}
+            {(() => {
+              const cls =
+                r2State === 'connected' ? 'pill--ok'
+                : r2State === 'misconfigured' ? 'pill--warn'
+                : r2State === 'unreachable' ? 'pill--danger'
+                : 'pill--muted'
+              const label =
+                r2State === 'connected' ? '● R2 connected'
+                : r2State === 'misconfigured' ? '● R2 not configured'
+                : r2State === 'unreachable' ? '● R2 unreachable'
+                : '● R2 …'
+              return (
+                <span
+                  className={`pill ${cls}`}
+                  style={{ fontSize: '0.72rem' }}
+                  title={r2LastError ?? (r2State === 'connected' ? 'head_bucket ok on last probe' : 'See R2 Settings')}
+                >
+                  {label}
+                </span>
+              )
+            })()}
           </div>
           <div className="warc-controls">
             {running ? (

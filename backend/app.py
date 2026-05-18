@@ -2348,6 +2348,111 @@ def api_fleet_bulk_creds():
     })
 
 
+@app.route('/api/fleet/enroll', methods=['POST'])
+def api_fleet_enroll():
+    """Single-host enrollment endpoint used by `useFleetEnrollment` when a
+    scan hit yields SSH credentials.
+
+    Request body (camelCase per frontend convention):
+        {host, port, user, secret, authType: 'key'|'password', vpsId}
+
+    Behaviour mirrors a one-row /api/fleet/bulk-creds run:
+      1. TCP reachability check (2.5 s)
+      2. paramiko SSH connect with the supplied creds
+      3. If OK: persist via _remember_worker(...) so ssh_manager uses these
+         creds on its monitor cycle (and so _repair_keys_on_worker can
+         install the controller pubkey in the background)
+      4. Append host to server_ips.txt (idempotent dedup)
+      5. Return {ok, message, hostname, region} — shape matches what
+         `enrollSshViaApi` in dashboard/src/lib/fleetControl.ts expects.
+
+    Returning 404 here was the smoking gun for "discovered hosts show live
+    then flip OFFLINE immediately after add" — the frontend was POSTing to
+    a route that simply wasn't registered, so every auto-enroll surfaced
+    as a failure."""
+    try:
+        import paramiko
+    except ImportError:
+        return jsonify({'ok': False, 'message': 'paramiko not installed'}), 500
+
+    data = request.get_json(force=True, silent=True) or {}
+    host = str(data.get('host', '')).strip()
+    if not host:
+        return jsonify({'ok': False, 'message': 'host required'}), 400
+    try:
+        port = int(data.get('port') or 22)
+    except (TypeError, ValueError):
+        port = 22
+    user = str(data.get('user') or 'root').strip() or 'root'
+    secret = str(data.get('secret') or '')
+    auth_type = str(data.get('authType') or 'key').lower()
+    if auth_type not in ('key', 'password'):
+        auth_type = 'key'
+
+    tcp_ok, tcp_err = _tcp_reachable(host, port, timeout=2.5)
+    if not tcp_ok:
+        return jsonify({'ok': False, 'message': f'tcp: {tcp_err}'})
+
+    hostname = None
+    try:
+        cli = paramiko.SSHClient()
+        cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        kwargs = {'hostname': host, 'port': port, 'username': user, 'timeout': 6,
+                  'banner_timeout': 6, 'auth_timeout': 6,
+                  'allow_agent': False, 'look_for_keys': False}
+        if auth_type == 'password':
+            if not secret:
+                return jsonify({'ok': False, 'message': 'password required'})
+            kwargs['password'] = secret
+        else:
+            if secret:
+                kwargs['key_filename'] = secret
+            else:
+                default = os.path.join(os.path.dirname(SCANNER_CONFIG_PATH),
+                                       '..', '.ssh', 'id_ed25519')
+                if os.path.exists(default):
+                    kwargs['key_filename'] = default
+        cli.connect(**kwargs)
+        # Grab a hostname so the card label can show something nicer than
+        # "disc-1.2.3.4". Failures here are non-fatal — the connect already
+        # passed.
+        try:
+            _, stdout, _ = cli.exec_command('hostname -f 2>/dev/null || hostname', timeout=4)
+            hostname = (stdout.read().decode('utf-8', errors='replace').strip() or None)
+        except Exception:
+            hostname = None
+        cli.close()
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'ssh: {e}'})
+
+    # SSH worked — persist creds so the monitor uses them, then append to
+    # the roster. Password rows carry the secret so _repair_keys_on_worker
+    # can install the controller pubkey on the next probe.
+    if auth_type == 'password' and secret:
+        _remember_worker(host, port, user, 'password', password=secret)
+    else:
+        _remember_worker(host, port, user, 'key')
+
+    server_ips = os.path.join('.', 'server_ips.txt')
+    try:
+        existing = set()
+        if os.path.exists(server_ips):
+            with open(server_ips, 'r') as f:
+                existing = {ln.strip() for ln in f if ln.strip()}
+        if host not in existing:
+            with open(server_ips, 'a') as f:
+                f.write(host + '\n')
+    except Exception:
+        pass
+
+    return jsonify({
+        'ok': True,
+        'message': 'SSH verified; pubkey install queued',
+        'hostname': hostname,
+        'region': None,
+    })
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Fleet — install controller pubkey on password-auth workers
 # ──────────────────────────────────────────────────────────────────────────

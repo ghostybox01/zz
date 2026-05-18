@@ -170,7 +170,15 @@ export function FleetBootstrap() {
 
       {error && <p className="settings-hint tg-hint tg-hint--err">{error}</p>}
 
-      {result && result.results.length > 0 && !install && (
+      {result && result.results.length > 0 && !install && (() => {
+        // Operator intent — "only add the live ones, not the dead ones".
+        // The backend already enforces that for server_ips.txt; this UI
+        // change makes the visible table match that invariant by default.
+        // Failed rows stay accessible behind a disclosure so debugging
+        // bad creds is still one click away.
+        const okRows = result.results.filter((r) => r.ok)
+        const failRows = result.results.filter((r) => !r.ok)
+        return (
         <div className="fleet-boot__results">
           <table className="fleet-boot__table">
             <thead>
@@ -183,23 +191,51 @@ export function FleetBootstrap() {
               </tr>
             </thead>
             <tbody>
-              {result.results.map((r, i) => (
-                <tr key={i} className={r.ok ? 'fleet-boot__row--ok' : 'fleet-boot__row--fail'}>
+              {okRows.map((r, i) => (
+                <tr key={`ok-${i}`} className="fleet-boot__row--ok">
                   <td className="mono">{r.host}</td>
                   <td className="mono">{r.user}</td>
                   <td className="mono">{r.port}</td>
                   <td>
-                    <span className={`pill ${r.ok ? 'pill--ok' : 'pill--err'}`}>
-                      {r.ok ? 'OK' : 'FAIL'}
-                    </span>
+                    <span className="pill pill--ok">OK</span>
                   </td>
                   <td className="muted" style={{ fontSize: '.75rem' }}>{r.message}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {failRows.length > 0 && (
+            <details className="fleet-boot__failed" style={{ marginTop: '.5rem' }}>
+              <summary className="muted" style={{ cursor: 'pointer', fontSize: '.78rem' }}>
+                ▸ {failRows.length} row{failRows.length === 1 ? '' : 's'} failed and were not added to the roster
+              </summary>
+              <table className="fleet-boot__table" style={{ marginTop: '.4rem' }}>
+                <thead>
+                  <tr>
+                    <th>Host</th>
+                    <th>User</th>
+                    <th>Port</th>
+                    <th>Status</th>
+                    <th>Why</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {failRows.map((r, i) => (
+                    <tr key={`fail-${i}`} className="fleet-boot__row--fail">
+                      <td className="mono">{r.host}</td>
+                      <td className="mono">{r.user}</td>
+                      <td className="mono">{r.port}</td>
+                      <td><span className="pill pill--err">FAIL</span></td>
+                      <td className="muted" style={{ fontSize: '.75rem' }}>{r.message}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
         </div>
-      )}
+        )
+      })()}
     </section>
   )
 }
