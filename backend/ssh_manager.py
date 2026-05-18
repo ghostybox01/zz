@@ -111,6 +111,11 @@ class SSHManager:
         # blip (NAT idle-flush, sshd MaxStartups bursts, fail2ban,
         # half-second packet loss).
         self._consecutive_misses: Dict[str, int] = {}
+        # Per-IP last SSH error message. Populated when ssh_exec catches an
+        # exception (auth failure, network drop, banner timeout). Consumed
+        # by fetch_server_status to replace the bare "ssh probe returned no
+        # data" string on the card with the real cause.
+        self._last_ssh_error: Dict[str, str] = {}
         self._sticky_threshold = 3
 
         # ── WARC status cache (Effect 3) ─────────────────────────────
@@ -581,14 +586,30 @@ class SSHManager:
             ssh = self._get_pooled_ssh(ip, timeout)
             try:
                 stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
-                return stdout.read().decode('utf-8', errors='replace').strip()
+                out = stdout.read().decode('utf-8', errors='replace').strip()
+                # Successful round-trip clears any prior remembered error so
+                # the card doesn't keep showing yesterday's auth failure
+                # after the operator fixed the creds.
+                self._last_ssh_error.pop(ip, None)
+                return out
             except (paramiko.SSHException, EOFError, OSError):
                 # Connection died mid-exec — evict and retry once with a fresh one.
                 self._evict_pooled_ssh(ip)
                 ssh = self._get_pooled_ssh(ip, timeout)
                 stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
-                return stdout.read().decode('utf-8', errors='replace').strip()
-        except Exception:
+                out = stdout.read().decode('utf-8', errors='replace').strip()
+                self._last_ssh_error.pop(ip, None)
+                return out
+        except Exception as e:
+            # Remember the real cause so fetch_server_status can show
+            # "ssh: AuthenticationException — Permission denied" instead of
+            # the useless "ssh probe returned no data" string the operator
+            # was staring at. Keep it short — the card has limited width.
+            kind = type(e).__name__
+            msg = str(e)
+            if len(msg) > 160:
+                msg = msg[:160] + '…'
+            self._last_ssh_error[ip] = f'{kind}: {msg}' if msg else kind
             self._evict_pooled_ssh(ip)
             return ""
     
@@ -1181,7 +1202,14 @@ echo "PROBE_END"
                     prev.last_update = datetime.now().strftime('%H:%M:%S')
                     return prev
                 status.status = "UNREACHABLE"
-                status.error = 'ssh probe returned no data'
+                # Surface the real cause if ssh_exec remembered one (auth
+                # failure, network drop, banner timeout). Operators staring
+                # at "ssh probe returned no data" had no way to triage; now
+                # the card shows "ssh: AuthenticationException — Permission
+                # denied" or similar so they know to re-paste creds vs.
+                # check the network.
+                real = self._last_ssh_error.get(ip)
+                status.error = f'ssh: {real}' if real else 'ssh probe returned no data'
                 status.last_update = datetime.now().strftime('%H:%M:%S')
                 self.servers[ip] = status
             return status

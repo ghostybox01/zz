@@ -485,12 +485,93 @@ def api_vps_diagnose_server(ip):
 
 @app.route('/api/vps/server/<ip>/fix', methods=['POST'])
 def api_vps_fix_server(ip):
-    """Attempt to fix issues on a server"""
+    """Attempt to fix issues on a server.
+
+    Fire-and-forget: fix_server can take 30-60 s for unreachable hosts
+    (multiple SSH banner timeouts + retries). That blocks an eventlet
+    greenthread long enough to trip nginx's 504 default, which is what
+    the operator was seeing when they hit Reconnect on a dead box.
+    Kick the work to a daemon thread; the monitor cycle reflects the
+    outcome within one tick."""
     manager = get_ssh_manager()
     if not manager:
         return jsonify({'error': 'SSH not available'}), 503
-    
-    return jsonify(manager.fix_server(ip))
+
+    def _bg() -> None:
+        try:
+            manager.fix_server(ip)
+        except Exception as e:
+            print(f'[fleet] async fix_server failed for {ip}: {e}')
+
+    threading.Thread(target=_bg, daemon=True, name=f'vps-fix-{ip}').start()
+    return jsonify({
+        'success': True,
+        'message': f'Reconnect dispatched for {ip}. Status will update on next monitor cycle (~30 s).',
+    }), 202
+
+
+@app.route('/api/vps/server/<ip>/remove', methods=['POST', 'DELETE'])
+def api_vps_remove_server(ip):
+    """Drop a host from the rostered fleet.
+
+    The dashboard's per-card trash icon POSTs here. Endpoint was missing,
+    which is why the operator saw "POST .../remove → 404 (NOT FOUND)" in
+    the console and dead cards couldn't be evicted.
+
+    Cleans up: server_ips.txt (drops the line), fleet_creds.json (drops
+    the entry), the pooled SSHClient, the monitor's status snapshot, and
+    the per-IP last-error/miss counters. Worker filesystem is untouched —
+    operator may want to re-enroll later."""
+    manager = get_ssh_manager()
+    if not manager:
+        return jsonify({'error': 'SSH not available'}), 503
+
+    removed_from_roster = False
+    server_ips = os.path.join('.', 'server_ips.txt')
+    try:
+        if os.path.exists(server_ips):
+            with open(server_ips, 'r') as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+            kept = [ln for ln in lines if ln != ip]
+            if len(kept) != len(lines):
+                with open(server_ips, 'w') as f:
+                    for ln in kept:
+                        f.write(ln + '\n')
+                removed_from_roster = True
+    except Exception as e:
+        return jsonify({'error': f'failed to update roster: {e}'}), 500
+
+    removed_creds = False
+    try:
+        creds = _load_fleet_creds()
+        if ip in creds:
+            del creds[ip]
+            _save_fleet_creds(creds)
+            removed_creds = True
+    except Exception as e:
+        print(f'[fleet] failed to drop creds for {ip}: {e}')
+
+    # Best-effort manager-side cleanup. None of these are fatal if they
+    # silently no-op (e.g., the IP was never probed).
+    try:
+        manager._evict_pooled_ssh(ip)
+    except Exception:
+        pass
+    try:
+        with manager.lock:
+            manager.servers.pop(ip, None)
+            manager._consecutive_misses.pop(ip, None)
+            if hasattr(manager, '_last_ssh_error'):
+                manager._last_ssh_error.pop(ip, None)
+    except Exception:
+        pass
+
+    return jsonify({
+        'success': True,
+        'ip': ip,
+        'removed_from_roster': removed_from_roster,
+        'removed_creds': removed_creds,
+    })
 
 @app.route('/api/vps/server/<ip>/deploy', methods=['POST'])
 def api_vps_deploy_server(ip):
