@@ -152,7 +152,13 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
 
     if (presignResult) {
       // ── R2 path ────────────────────────────────────────────────────────
+      // Best case: browser PUTs straight to R2, controller never sees the
+      // bytes. Falls back to the chunked controller-proxy path on any
+      // failure (CORS, network, R2 HTTP error) — the operator just sees
+      // a slower upload, not a broken one. Without the fallback a missing
+      // CORS rule on the bucket would render the Lists panel unusable.
       const { url, key } = presignResult
+      let r2Ok = false
       try {
         await new Promise<void>((resolve, reject) => {
           const xhr = new XMLHttpRequest()
@@ -167,36 +173,47 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
             if (xhr.status >= 200 && xhr.status < 300) resolve()
             else reject(new Error(`R2 PUT failed: HTTP ${xhr.status}`))
           }
-          xhr.onerror = () => reject(new Error('R2 PUT network error'))
+          xhr.onerror = () => reject(new Error('R2 PUT network error (likely CORS — see R2 Settings → Configure browser uploads)'))
           xhr.send(file)
         })
-
-        setUploadProgress(97)
-        const result = await r2.complete(key, file.name)
-        setUploadProgress(100)
-
-        const next: TargetList = {
-          id: makeListId(),
-          name: file.name,
-          uploadedAt: new Date().toISOString(),
-          lineCount: result.targets,
-          fileSize: file.size,
-          contentHash: `r2-${key}`,
-          preview,
-          assignedVpsIds: [],
-          status: 'idle',
-          note: 'Uploaded via Cloudflare R2 — list body saved on server as targets.txt',
-        }
-        onUpload(next)
+        r2Ok = true
       } catch (e) {
-        setError({
-          kind: 'too-large',
-          message: `R2 upload failed: ${(e as Error).message}`,
-        })
-      } finally {
-        setUploadProgress(null)
+        // Surface the CORS hint as a warning but DO NOT bail — fall
+        // through to the chunked path so the upload still completes.
+        console.warn('R2 direct PUT failed; falling back to chunked path:', e)
+        setUploadProgress(0)
       }
-      return
+
+      if (r2Ok) {
+        try {
+          setUploadProgress(97)
+          const result = await r2.complete(key, file.name)
+          setUploadProgress(100)
+
+          const next: TargetList = {
+            id: makeListId(),
+            name: file.name,
+            uploadedAt: new Date().toISOString(),
+            lineCount: result.targets,
+            fileSize: file.size,
+            contentHash: `r2-${key}`,
+            preview,
+            assignedVpsIds: [],
+            status: 'idle',
+            note: 'Uploaded via Cloudflare R2 — list body saved on server as targets.txt',
+          }
+          onUpload(next)
+        } catch (e) {
+          setError({
+            kind: 'too-large',
+            message: `R2 complete callback failed: ${(e as Error).message}`,
+          })
+        } finally {
+          setUploadProgress(null)
+        }
+        return
+      }
+      // R2 PUT failed — drop through to the chunked path below.
     }
 
     // ── Chunked XHR fallback (original path) ───────────────────────────

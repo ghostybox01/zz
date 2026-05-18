@@ -2197,6 +2197,40 @@ def api_r2_objects():
     return jsonify({'ok': True, 'bucket': bucket, 'prefix': prefix, 'objects': objects})
 
 
+@app.route('/api/r2/cors-setup', methods=['POST'])
+def api_r2_cors_setup():
+    """One-click CORS rule install for the configured bucket.
+
+    Without this, browser-direct PUTs from the Lists panel fail with the
+    opaque "R2 PUT network error" (which is what XMLHttpRequest reports
+    when a CORS preflight is blocked). Operators shouldn't have to paste
+    JSON into the Cloudflare dashboard — they click a button here and the
+    rule lands.
+
+    Sets a permissive but bounded policy: PUT/GET/HEAD from any origin,
+    short max-age so updates propagate quickly, ETag exposed so multipart
+    flows can verify upload integrity. Refuses to widen further (no DELETE,
+    no wildcard headers) so a misclick can't accidentally open the bucket
+    up to cross-origin DELETE attacks."""
+    client, bucket, state, err = _get_r2_client()
+    if not client:
+        return jsonify({'ok': False, 'error': err or f'R2 unavailable ({state})'}), 503
+    cors_rules = {
+        'CORSRules': [{
+            'AllowedOrigins': ['*'],
+            'AllowedMethods': ['PUT', 'GET', 'HEAD'],
+            'AllowedHeaders': ['Content-Type', 'Content-MD5', 'x-amz-*'],
+            'ExposeHeaders': ['ETag'],
+            'MaxAgeSeconds': 300,
+        }],
+    }
+    try:
+        client.put_bucket_cors(Bucket=bucket, CORSConfiguration=cors_rules)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    return jsonify({'ok': True, 'bucket': bucket, 'rules': cors_rules['CORSRules']})
+
+
 @app.route('/api/r2/object', methods=['DELETE'])
 def api_r2_object_delete():
     """Delete a single object by exact key (passed as ?key=warc/...).

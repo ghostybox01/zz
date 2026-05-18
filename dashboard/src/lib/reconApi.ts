@@ -441,6 +441,10 @@ export const r2 = {
     getJson<{ ok: boolean; bucket?: string; prefix?: string; objects: R2Object[]; error?: string }>(
       `/r2/objects?prefix=${encodeURIComponent(prefix ?? '')}&limit=${limit}`,
     ),
+  /** One-click CORS rule install — allows browser-direct PUTs from any
+   * origin so the Lists panel's R2 upload path works without manual CF
+   * dashboard configuration. */
+  setupCors: () => postJson<{ ok: boolean; bucket?: string; rules?: unknown; error?: string }>('/r2/cors-setup', {}),
   /** Delete one object by exact key. Used by the WARC cockpit's exports list. */
   deleteObject: async (key: string): Promise<{ ok: boolean; deleted?: string; error?: string }> => {
     const res = await fetch(`${BASE}/r2/object?key=${encodeURIComponent(key)}`, { method: 'DELETE' })

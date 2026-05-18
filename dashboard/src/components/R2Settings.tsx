@@ -55,6 +55,26 @@ export function R2Settings() {
     }
   }
 
+  /** Idempotent CORS install — see /api/r2/cors-setup. The Lists panel's
+   * browser-direct PUTs fail with "R2 PUT network error" until the bucket
+   * has a CORS rule that permits the dashboard's origin. */
+  const [corsStatus, setCorsStatus] = useState<'idle' | 'working' | 'ok' | 'err'>('idle')
+  const [corsErr, setCorsErr] = useState<string | null>(null)
+  async function setupCors() {
+    setCorsStatus('working'); setCorsErr(null)
+    try {
+      const r = await r2.setupCors()
+      if (r.ok) {
+        setCorsStatus('ok')
+        setTimeout(() => setCorsStatus('idle'), 2500)
+      } else {
+        setCorsStatus('err'); setCorsErr(r.error ?? 'unknown error')
+      }
+    } catch (e) {
+      setCorsStatus('err'); setCorsErr((e as Error).message)
+    }
+  }
+
   const pillClass = STATE_PILL_CLASS[healthState] || STATE_PILL_CLASS.unknown
   const pillLabel = STATE_LABELS[healthState] || STATE_LABELS.unknown
   const pillTitle = lastError
@@ -103,7 +123,31 @@ export function R2Settings() {
         <button type="button" className="btn-primary" onClick={save} disabled={status === 'saving'}>
           {status === 'saving' ? 'Saving…' : status === 'saved' ? 'Saved ✓' : status === 'error' ? 'Error — retry' : 'Save R2 config'}
         </button>
+        <button
+          type="button"
+          className="btn-glass"
+          onClick={() => void setupCors()}
+          disabled={corsStatus === 'working' || healthState !== 'connected'}
+          title={
+            healthState !== 'connected'
+              ? 'Connect R2 first (save credentials), then click here'
+              : 'Install a CORS rule on the bucket so the Lists panel can upload target lists directly to R2'
+          }
+        >
+          {corsStatus === 'working'
+            ? 'Installing CORS…'
+            : corsStatus === 'ok'
+              ? 'CORS installed ✓'
+              : corsStatus === 'err'
+                ? 'CORS install failed — retry'
+                : 'Allow browser uploads (CORS)'}
+        </button>
       </div>
+      {corsStatus === 'err' && corsErr && (
+        <p className="settings-hint" style={{ color: 'var(--danger)' }}>
+          CORS install error: {corsErr}
+        </p>
+      )}
       {lastError && (healthState === 'unreachable' || healthState === 'misconfigured') && (
         <p className="settings-hint" style={{ color: 'var(--danger)' }}>
           R2 probe error: {lastError}
