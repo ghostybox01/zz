@@ -422,21 +422,51 @@ export type R2Usage = {
   threshold_95_hit: boolean
 }
 
+export type R2HealthState = 'connected' | 'misconfigured' | 'unreachable' | 'unknown'
+
+/** One row in the canonical multi-account R2 config. The dashboard
+ *  surfaces these as separate cards in R2Settings; the backend's
+ *  priority picker walks them in array order looking for the first
+ *  account whose `counted_bytes < 0.95 * limit_bytes`. */
+export type R2Account = {
+  id: string
+  label: string
+  account_id: string
+  access_key_id: string
+  /** Masked (`●●●●●●●●`) on read so we never echo real secrets back to
+   *  the browser. Submit empty to keep the existing value; non-empty to
+   *  rotate. */
+  secret_access_key: string
+  bucket_name: string
+  priority: number
+  /** Per-account soft cap in GB. Default 9.5 (Cloudflare R2 free-tier). */
+  max_gb: number
+  configured: boolean
+  state?: R2HealthState
+  last_error?: string | null
+  usage?: R2Usage | null
+}
+
 export type R2Config = {
+  /** Canonical multi-account list. Always present in new backends. */
+  accounts: R2Account[]
+  /** Id of the account the picker will route the next upload to. May be
+   *  null when no account is configured. */
+  primary_id: string | null
+  /** True when every configured account is at or past 95% usage — the
+   *  caller can still proceed but should warn the operator that the
+   *  next upload is going into a near-full bucket. */
+  all_full: boolean
+  /* ── Legacy single-account mirrors (account #0). Kept so existing
+   *    code paths that read these fields keep compiling during the
+   *    cutover. New code should read `accounts[]`. ─────────────────── */
   account_id: string
   access_key_id: string
   secret_access_key: string
   bucket_name: string
   configured: boolean
-  /** Cached health state from the backend's periodic head_bucket probe.
-   *  Optional so a stale frontend cache survives a backend without the
-   *  field set yet. */
-  state?: 'connected' | 'misconfigured' | 'unreachable' | 'unknown'
-  /** Real error string from the most recent probe — `null` when healthy
-   *  or before the first probe completes. */
+  state?: R2HealthState
   last_error?: string | null
-  /** Cached bucket-wide usage breakdown. `null` until the first probe
-   *  completes; refreshed every monitor cycle (~30 s). */
   usage?: R2Usage | null
 }
 
@@ -445,25 +475,88 @@ export type R2Object = {
   size: number
   modified: string | null
   storage_class?: string | null
+  /** Which account this row came from. Stamped by the backend on the
+   *  multi-account list endpoint so the UI can badge the source bucket. */
+  account_id?: string
+  account_label?: string
+}
+
+/** Per-account write payload. Mirrors R2Account minus the server-only
+ *  computed fields (configured/state/last_error/usage). The `id` field
+ *  is optional on create — the backend will mint one. */
+export type R2AccountInput = {
+  id?: string
+  label: string
+  account_id: string
+  access_key_id: string
+  secret_access_key: string
+  bucket_name: string
+  max_gb: number
 }
 
 export const r2 = {
   getConfig: () => getJson<R2Config>('/upload/r2-config'),
-  saveConfig: (cfg: Omit<R2Config, 'configured'>) => postJson<R2Config>('/upload/r2-config', cfg),
-  presign: (filename: string) => getJson<{ url: string; key: string; upload_id: string }>(`/upload/presign?filename=${encodeURIComponent(filename)}`),
-  complete: (key: string, filename: string) => postJson<{ success: boolean; targets: number; preview: string[]; filename: string }>('/upload/complete', { key, filename }),
-  /** List objects in the configured bucket. Optional prefix filter. */
-  listObjects: (prefix?: string, limit = 100) =>
-    getJson<{ ok: boolean; bucket?: string; prefix?: string; objects: R2Object[]; error?: string }>(
-      `/r2/objects?prefix=${encodeURIComponent(prefix ?? '')}&limit=${limit}`,
+  /** Replace the full account list. Per-account blank secret means
+   *  "keep existing for this id". */
+  saveAccounts: (accounts: R2AccountInput[]) =>
+    postJson<R2Config>('/upload/r2-config', { accounts }),
+  /** Legacy single-account save — kept for the original form path. */
+  saveConfig: (cfg: Omit<R2Account, 'id' | 'configured' | 'priority' | 'max_gb' | 'label'> & Partial<Pick<R2Account, 'label' | 'max_gb'>>) =>
+    postJson<R2Config>('/upload/r2-config', cfg),
+  deleteAccount: (id: string) =>
+    getJson<{ ok: boolean; deleted_id?: string; remaining?: number; error?: string }>(
+      `/upload/r2-config/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
     ),
-  /** One-click CORS rule install — allows browser-direct PUTs from any
-   * origin so the Lists panel's R2 upload path works without manual CF
-   * dashboard configuration. */
-  setupCors: () => postJson<{ ok: boolean; bucket?: string; rules?: unknown; error?: string }>('/r2/cors-setup', {}),
-  /** Delete one object by exact key. Used by the WARC cockpit's exports list. */
-  deleteObject: async (key: string): Promise<{ ok: boolean; deleted?: string; error?: string }> => {
-    const res = await fetch(`${BASE}/r2/object?key=${encodeURIComponent(key)}`, { method: 'DELETE' })
+  reorderAccount: (id: string, priority: number) =>
+    postJson<{ ok: boolean; id: string; priority: number; error?: string }>(
+      `/upload/r2-config/${encodeURIComponent(id)}/reorder`,
+      { priority },
+    ),
+  presign: (filename: string) =>
+    getJson<{ url: string; key: string; upload_id: string; account_id?: string; account_label?: string }>(
+      `/upload/presign?filename=${encodeURIComponent(filename)}`,
+    ),
+  complete: (key: string, filename: string, accountId?: string) =>
+    postJson<{ success: boolean; targets: number; preview: string[]; filename: string }>(
+      '/upload/complete', { key, filename, account_id: accountId },
+    ),
+  /** List objects across one or all accounts. Optional prefix filter.
+   *  Without `accountId` the backend unions across every connected
+   *  account and tags each row with its origin. */
+  listObjects: (prefix?: string, limit = 100, accountId?: string) => {
+    const params = new URLSearchParams()
+    if (prefix) params.set('prefix', prefix)
+    params.set('limit', String(limit))
+    if (accountId) params.set('account', accountId)
+    return getJson<{
+      ok: boolean
+      bucket?: string
+      prefix?: string
+      objects: R2Object[]
+      accounts?: Array<{ id: string; label: string; state: string; error?: string | null }>
+      warnings?: string[]
+      error?: string
+    }>(`/r2/objects?${params.toString()}`)
+  },
+  /** Install the dashboard's CORS rule. Without `accountId` installs on
+   *  every connected account in one batch. */
+  setupCors: (accountId?: string) => {
+    const qs = accountId ? `?account=${encodeURIComponent(accountId)}` : ''
+    return postJson<{
+      ok: boolean
+      results?: Array<{ id: string; label: string; ok: boolean; error?: string }>
+      rules?: unknown
+      error?: string
+    }>(`/r2/cors-setup${qs}`, {})
+  },
+  /** Delete one object by exact key. Optional `accountId` targets one
+   *  bucket; without it the backend HEADs across accounts and deletes
+   *  in whichever one holds the key. */
+  deleteObject: async (key: string, accountId?: string): Promise<{ ok: boolean; deleted?: string; error?: string }> => {
+    const params = new URLSearchParams({ key })
+    if (accountId) params.set('account', accountId)
+    const res = await fetch(`${BASE}/r2/object?${params.toString()}`, { method: 'DELETE' })
     if (!res.ok) {
       let body: { error?: string } = {}
       try { body = (await res.json()) as { error?: string } } catch { /* ignore */ }
@@ -486,6 +579,11 @@ export type WarcStatus = {
   r2_key: string | null
   r2_uploaded_at: string | null
   r2_error: string | null
+  /** Which R2 account absorbed the last upload. Stamped by the backend
+   *  on every export path so the cockpit can label the destination
+   *  bucket. */
+  r2_account_id?: string | null
+  r2_account_label?: string | null
   log_tail: string[]
   run_on: string | null
   remote_pid: number | null
@@ -514,7 +612,19 @@ export const warc = {
   start:  (opts: WarcStartOptions = {}) =>
     postJson<{ success: boolean; pid: number; run_id: string; max_domains: number }>('/warc/start', opts),
   stop:   () => postJson<{ success: boolean; message?: string }>('/warc/stop', {}),
-  exportToR2: () => postJson<{ success: boolean; r2_key: string }>('/warc/export-to-r2', {}),
+  exportToR2: () => postJson<{
+    success: boolean
+    r2_key: string
+    /** When `noop` is true the upload was short-circuited — same content
+     *  already exists at the named key. */
+    noop?: boolean
+    message?: string
+    sha256?: string
+    /** Which R2 account absorbed the upload. Populated on both success
+     *  and noop paths. */
+    account_id?: string | null
+    account_label?: string | null
+  }>('/warc/export-to-r2', {}),
   hosts:  () => getJson<{ hosts: string[] }>('/warc/hosts'),
 }
 

@@ -75,13 +75,17 @@ export function WarcPanel({ notify }: Props = {}) {
     }
   }
 
-  async function onDeleteR2(key: string) {
-    if (!window.confirm(`Delete ${key} from R2? This cannot be undone.`)) return
-    notify?.('Deleting R2 object', key, 'info')
-    const res = await r2.deleteObject(key)
+  async function onDeleteR2(key: string, accountId?: string, accountLabel?: string) {
+    // Account-scoped delete prompt so the operator knows which bucket
+    // the row lives in — important now that multiple accounts can hold
+    // overlapping prefixes.
+    const where = accountLabel ? ` in ${accountLabel}` : ''
+    if (!window.confirm(`Delete ${key}${where} from R2? This cannot be undone.`)) return
+    notify?.('Deleting R2 object', `${key}${where}`, 'info')
+    const res = await r2.deleteObject(key, accountId)
     if (res.ok) {
-      notify?.('R2 delete complete', key, 'info')
-      setR2Objects((prev) => prev.filter((o) => o.key !== key))
+      notify?.('R2 delete complete', `${key}${where}`, 'info')
+      setR2Objects((prev) => prev.filter((o) => !(o.key === key && (!accountId || o.account_id === accountId))))
       // If the dedup pointer was this object, status will re-sync on next poll.
       await refresh()
     } else {
@@ -185,11 +189,15 @@ export function WarcPanel({ notify }: Props = {}) {
     const count = status?.domains_found ?? 0
     notify?.('Uploading to R2', `Shipping ${count.toLocaleString()} domains to Cloudflare R2…`, 'info')
     try {
-      const r = await warc.exportToR2() as { r2_key?: string; noop?: boolean; message?: string }
+      const r = await warc.exportToR2()
+      // Name the destination bucket in the toast so the operator knows
+      // which account absorbed it (priority spillover means it might
+      // not be the "primary" they expect).
+      const dest = r.account_label ? ` in ${r.account_label}` : ''
       if (r.noop) {
-        notify?.('No upload needed', `${r.message ?? 'content unchanged'} — kept ${r.r2_key}`, 'info')
+        notify?.('No upload needed', `${r.message ?? 'content unchanged'} — kept ${r.r2_key}${dest}`, 'info')
       } else {
-        notify?.('R2 upload complete', `Saved as ${r.r2_key}`, 'info')
+        notify?.('R2 upload complete', `Saved as ${r.r2_key}${dest}`, 'info')
       }
       await refresh()
       void refreshR2Objects()
@@ -545,6 +553,7 @@ export function WarcPanel({ notify }: Props = {}) {
             <thead>
               <tr>
                 <th>Key</th>
+                <th>Account</th>
                 <th style={{ textAlign: 'right' }}>Size</th>
                 <th>Modified</th>
                 <th />
@@ -552,8 +561,21 @@ export function WarcPanel({ notify }: Props = {}) {
             </thead>
             <tbody>
               {r2Objects.map((o) => (
-                <tr key={o.key}>
+                <tr key={`${o.account_id ?? ''}::${o.key}`}>
                   <td className="mono" style={{ wordBreak: 'break-all' }}>{o.key}</td>
+                  <td>
+                    {o.account_label ? (
+                      <span
+                        className="pill pill--muted"
+                        style={{ fontSize: '.7rem' }}
+                        title={`Stored in R2 account "${o.account_label}"`}
+                      >
+                        {o.account_label}
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
                   <td className="mono" style={{ textAlign: 'right' }}>{(o.size / 1024).toFixed(1)} KB</td>
                   <td className="muted">{o.modified ? new Date(o.modified).toLocaleString() : '—'}</td>
                   <td>
@@ -561,8 +583,8 @@ export function WarcPanel({ notify }: Props = {}) {
                       type="button"
                       className="btn-danger-outline"
                       style={{ fontSize: '.7rem', padding: '.15rem .5rem' }}
-                      onClick={() => void onDeleteR2(o.key)}
-                      title={`Delete ${o.key} from R2`}
+                      onClick={() => void onDeleteR2(o.key, o.account_id, o.account_label)}
+                      title={`Delete ${o.key} from R2${o.account_label ? ` (${o.account_label})` : ''}`}
                     >
                       Delete
                     </button>

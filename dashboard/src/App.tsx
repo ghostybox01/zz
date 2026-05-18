@@ -106,41 +106,62 @@ export default function App() {
     )
   }, [])
 
-  // Background R2 usage watcher — fires a single toast each time we cross
-  // the 75 % or 95 % threshold, so the operator gets a warning even when
-  // they're not on the Settings tab. We track the last seen tier per
-  // session via a ref-style boolean: a toast only fires on a transition
-  // *into* the warn/danger zone, not on every poll while sitting there.
+  // Background R2 usage watcher — fires a single toast each time an
+  // account crosses the 75% or 95% threshold, so the operator gets a
+  // warning even when they're not on the Settings tab. With multiple
+  // R2 accounts in rotation, we track the last-seen tier *per account*
+  // in a Map keyed by id: each account fires its own toast on its own
+  // transition. Removing an account drops it from the map on the next
+  // poll so a re-add doesn't carry stale state across.
   useEffect(() => {
     if (!backendLive) return
     let alive = true
-    let prevTier: 'ok' | 'warn' | 'bad' | 'unknown' = 'unknown'
+    const prevTiers = new Map<string, 'ok' | 'warn' | 'bad'>()
     const poll = async () => {
       try {
         const cfg = await reconR2.getConfig()
-        const u = cfg.usage
-        if (!alive || !u || u.error) return
-        const tier: 'ok' | 'warn' | 'bad' = u.threshold_95_hit ? 'bad'
-          : u.threshold_75_hit ? 'warn'
-          : 'ok'
-        if (prevTier === 'unknown') { prevTier = tier; return }
-        if (tier !== prevTier) {
-          const gb = (u.counted_bytes / 1024 ** 3).toFixed(2)
-          const limGb = (u.limit_bytes / 1024 ** 3).toFixed(1)
-          if (tier === 'bad') {
-            pushAlertToast(
-              'R2 storage at 95% — prune now',
-              `${gb} GB of ${limGb} GB cap used. Delete old WARC exports or target lists.`,
-              'error',
-            )
-          } else if (tier === 'warn') {
-            pushAlertToast(
-              'R2 storage at 75%',
-              `${gb} GB of ${limGb} GB cap used. Consider pruning before it fills up.`,
-              'info',
-            )
+        if (!alive) return
+        const accounts = cfg.accounts || []
+        const seenIds = new Set<string>()
+        for (const acct of accounts) {
+          if (!acct.id) continue
+          seenIds.add(acct.id)
+          const u = acct.usage
+          if (!u || u.error) continue
+          const tier: 'ok' | 'warn' | 'bad' = u.threshold_95_hit ? 'bad'
+            : u.threshold_75_hit ? 'warn'
+            : 'ok'
+          const prev = prevTiers.get(acct.id)
+          if (prev === undefined) {
+            // First sighting — record the tier but don't fire; we'd
+            // toast the operator every refresh otherwise.
+            prevTiers.set(acct.id, tier)
+            continue
           }
-          prevTier = tier
+          if (tier !== prev) {
+            const gb = (u.counted_bytes / 1024 ** 3).toFixed(2)
+            const limGb = (u.limit_bytes / 1024 ** 3).toFixed(1)
+            const label = acct.label || acct.bucket_name || acct.id
+            if (tier === 'bad') {
+              pushAlertToast(
+                `R2 "${label}" at 95% — spillover armed`,
+                `${gb} GB of ${limGb} GB used. New uploads will route to the next-priority account.`,
+                'error',
+              )
+            } else if (tier === 'warn') {
+              pushAlertToast(
+                `R2 "${label}" at 75%`,
+                `${gb} GB of ${limGb} GB used. Consider pruning before it fills up.`,
+                'info',
+              )
+            }
+            prevTiers.set(acct.id, tier)
+          }
+        }
+        // Drop tracking for accounts that have been removed since the
+        // last poll so a fresh add doesn't inherit stale state.
+        for (const id of Array.from(prevTiers.keys())) {
+          if (!seenIds.has(id)) prevTiers.delete(id)
         }
       } catch { /* ignore — settings panel will surface explicit errors */ }
     }

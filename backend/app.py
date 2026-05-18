@@ -974,46 +974,169 @@ def api_telegram_test():
         return jsonify({'success': False, 'error': str(e)}), 502
 
 
-# ── Cloudflare R2 upload ───────────────────────────────────────────────────
+# ── Cloudflare R2 upload (multi-account with priority spillover) ─────────
+# Legacy single-account key. Read on first load for migration, written
+# only by the backwards-compat single-account POST path. The canonical
+# store is `r2_accounts` (list of dicts) under R2_ACCOUNTS_KEY.
 R2_CONFIG_KEY = 'r2'
+R2_ACCOUNTS_KEY = 'r2_accounts'
 
-def _get_r2_client():
-    """Return (boto3_client, bucket_name, state, error).
+# Default per-account soft cap. Free-tier Cloudflare R2 gives 10 GB; we
+# stop adding to a bucket at 95 % of this so the operator has slack to
+# delete old objects before the bucket itself errors out. Each account
+# can override via its `max_gb` field.
+R2_DEFAULT_MAX_GB = 9.5
 
-    state ∈ {'connected', 'misconfigured', 'unreachable', 'unknown'}.
-    - 'connected'      → client + bucket usable (constructor succeeded;
-                          live reachability is verified separately by the
-                          periodic head_bucket probe)
-    - 'misconfigured'  → one or more credential fields blank/missing
-    - 'unreachable'    → boto3 missing or constructor raised
-    - 'unknown'        → reserved for the cache before the first probe
+# Legacy module-level constant — preserved so the dedup/export comments
+# that mention it still typecheck. The picker uses per-account limits.
+R2_USAGE_LIMIT_BYTES = int(R2_DEFAULT_MAX_GB * 1024 * 1024 * 1024)
 
-    The previous shape collapsed every failure mode into (None, None)
-    which is why /api/warc/export-to-r2 reported "R2 not configured"
-    when the real cause was a missing boto3 install. Callers must now
-    unpack four values; pass `error` through to the user instead of
-    hard-coding a misleading default message.
-    """
+
+def _account_limit_bytes(acct: dict) -> int:
+    """Resolve an account's soft cap in bytes. Falls back to the global
+    default when the row hasn't been migrated yet or carries a garbage
+    `max_gb`."""
+    try:
+        gb = float(acct.get('max_gb') or R2_DEFAULT_MAX_GB)
+        if gb <= 0:
+            gb = R2_DEFAULT_MAX_GB
+    except (TypeError, ValueError):
+        gb = R2_DEFAULT_MAX_GB
+    return int(gb * 1024 * 1024 * 1024)
+
+
+def _account_id_for(acct: dict) -> str:
+    """Stable opaque id for an account row. Hash of account_id+bucket so
+    a re-save of the same credentials keeps the same id (and so the
+    monitor/UI cache lines don't churn). Persisted in the row's `id`
+    field once computed."""
+    existing = (acct.get('id') or '').strip()
+    if existing:
+        return existing
+    seed = f"{acct.get('account_id','')}|{acct.get('bucket_name','')}"
+    import hashlib as _h
+    return _h.sha1(seed.encode('utf-8')).hexdigest()[:12]
+
+
+def _migrate_legacy_r2(cfg: dict) -> 'list[dict]':
+    """One-shot conversion of the legacy single-account `r2` key into a
+    one-element `r2_accounts` list. Idempotent: returns the existing list
+    untouched when migration has already happened. The legacy key is left
+    in place so an admin who rolls back doesn't lose their creds."""
+    accounts = cfg.get(R2_ACCOUNTS_KEY)
+    if isinstance(accounts, list) and accounts:
+        # Already migrated. Backfill any missing default fields so older
+        # rows still have `id` / `priority` / `max_gb` / `label`.
+        out: 'list[dict]' = []
+        for i, raw in enumerate(accounts):
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            row['account_id'] = str(row.get('account_id', '')).strip()
+            row['access_key_id'] = str(row.get('access_key_id', '')).strip()
+            row['secret_access_key'] = str(row.get('secret_access_key', '') or '')
+            row['bucket_name'] = str(row.get('bucket_name', '')).strip()
+            row['label'] = str(row.get('label') or row['bucket_name'] or 'r2')
+            try:
+                row['priority'] = int(row.get('priority', i))
+            except (TypeError, ValueError):
+                row['priority'] = i
+            try:
+                row['max_gb'] = float(row.get('max_gb') or R2_DEFAULT_MAX_GB)
+            except (TypeError, ValueError):
+                row['max_gb'] = R2_DEFAULT_MAX_GB
+            row['id'] = _account_id_for(row)
+            out.append(row)
+        return out
+    legacy = cfg.get(R2_CONFIG_KEY)
+    if isinstance(legacy, dict) and any(legacy.get(k) for k in ('account_id', 'bucket_name')):
+        row = {
+            'account_id': str(legacy.get('account_id', '')).strip(),
+            'access_key_id': str(legacy.get('access_key_id', '')).strip(),
+            'secret_access_key': str(legacy.get('secret_access_key', '') or ''),
+            'bucket_name': str(legacy.get('bucket_name', '')).strip(),
+            'label': str(legacy.get('bucket_name', '') or 'r2'),
+            'priority': 0,
+            'max_gb': R2_DEFAULT_MAX_GB,
+        }
+        row['id'] = _account_id_for(row)
+        return [row]
+    return []
+
+
+def _load_r2_accounts() -> 'list[dict]':
+    """Load the canonical accounts list, migrating from legacy `r2` on
+    first read. Sorted ascending by priority — primary first. Each row is
+    guaranteed to have `id`, `label`, `priority`, `max_gb`."""
     cfg = _load_scanner_config()
-    r2 = cfg.get(R2_CONFIG_KEY, {})
-    account_id  = r2.get('account_id', '').strip()
-    access_key  = r2.get('access_key_id', '').strip()
-    secret_key  = r2.get('secret_access_key', '').strip()
-    bucket      = r2.get('bucket_name', '').strip()
+    accounts = _migrate_legacy_r2(cfg)
+    accounts.sort(key=lambda a: (int(a.get('priority', 0)), a.get('id', '')))
+    return accounts
 
+
+def _save_r2_accounts(accounts: 'list[dict]') -> None:
+    """Persist the accounts list, renumbering priorities to the array
+    order. Caller is responsible for ordering the list before calling."""
+    cfg = _load_scanner_config()
+    cleaned: 'list[dict]' = []
+    for i, raw in enumerate(accounts):
+        if not isinstance(raw, dict):
+            continue
+        row = {
+            'id': _account_id_for(raw),
+            'label': str(raw.get('label') or raw.get('bucket_name') or 'r2'),
+            'account_id': str(raw.get('account_id', '')).strip(),
+            'access_key_id': str(raw.get('access_key_id', '')).strip(),
+            'secret_access_key': str(raw.get('secret_access_key', '') or ''),
+            'bucket_name': str(raw.get('bucket_name', '')).strip(),
+            'priority': i,
+            'max_gb': float(raw.get('max_gb') or R2_DEFAULT_MAX_GB),
+        }
+        cleaned.append(row)
+    cfg[R2_ACCOUNTS_KEY] = cleaned
+    # Keep the legacy key in sync with the lowest-priority row so an old
+    # gunicorn worker that hasn't reloaded still has *something* to use.
+    if cleaned:
+        primary = cleaned[0]
+        cfg[R2_CONFIG_KEY] = {
+            'account_id': primary['account_id'],
+            'access_key_id': primary['access_key_id'],
+            'secret_access_key': primary['secret_access_key'],
+            'bucket_name': primary['bucket_name'],
+        }
+    with open(SCANNER_CONFIG_PATH, 'w') as f:
+        json.dump(cfg, f, indent=2)
+
+
+def _find_account(accounts: 'list[dict]', account_id: str) -> 'dict | None':
+    if not account_id:
+        return None
+    for a in accounts:
+        if a.get('id') == account_id:
+            return a
+    return None
+
+
+def _build_r2_client(acct: dict) -> 'tuple[object | None, str, str, str | None, str]':
+    """Construct a boto3 client for one account row. Returns
+    (client, bucket, state, error, account_id_for_row). Pure on `acct` —
+    no I/O beyond the boto3 constructor."""
+    aid = acct.get('id') or ''
+    account_id = (acct.get('account_id') or '').strip()
+    access_key = (acct.get('access_key_id') or '').strip()
+    secret_key = (acct.get('secret_access_key') or '').strip()
+    bucket     = (acct.get('bucket_name') or '').strip()
     missing = []
     if not account_id: missing.append('account_id')
     if not access_key: missing.append('access_key_id')
     if not secret_key: missing.append('secret_access_key')
     if not bucket:     missing.append('bucket_name')
     if missing:
-        return None, None, 'misconfigured', f"missing fields: {', '.join(missing)}"
-
+        return None, '', 'misconfigured', f"missing fields: {', '.join(missing)}", aid
     try:
         import boto3
     except Exception as e:
-        return None, None, 'unreachable', f'boto3 import failed: {e}'
-
+        return None, bucket, 'unreachable', f'boto3 import failed: {e}', aid
     try:
         client = boto3.client(
             's3',
@@ -1023,19 +1146,87 @@ def _get_r2_client():
             region_name='auto',
         )
     except Exception as e:
-        return None, None, 'unreachable', str(e)
-
-    return client, bucket, 'connected', None
-
-
-# Soft cap on total R2 storage. The operator-facing rule is "stay under
-# 9.5 GB" — at 75% / 95% the dashboard fires warnings; we never refuse an
-# upload here so a noisy harvest can still finish. Eviction is left to the
-# lifecycle rule + manual delete from the cockpit listing.
-R2_USAGE_LIMIT_BYTES = int(9.5 * 1024 * 1024 * 1024)
+        return None, bucket, 'unreachable', str(e), aid
+    return client, bucket, 'connected', None, aid
 
 
-def _r2_usage_breakdown(client, bucket: str) -> dict:
+def _pick_r2_account_for_upload() -> 'tuple[dict | None, bool]':
+    """Walk accounts in priority order and pick the first whose
+    cached counted_bytes < 95% of its limit. Returns (account, all_full).
+    `all_full` is True iff every account is at-or-past 95%; in that case
+    we still return the first account so the caller can attempt the
+    upload (with a warning). Returns (None, False) when no accounts are
+    configured at all."""
+    accounts = _load_r2_accounts()
+    if not accounts:
+        return None, False
+    mgr = get_ssh_manager()
+    health_map: dict = {}
+    if mgr is not None:
+        try:
+            cached = mgr.get_r2_health() or {}
+            for entry in (cached.get('accounts') or []):
+                if isinstance(entry, dict) and entry.get('id'):
+                    health_map[entry['id']] = entry
+        except Exception:
+            health_map = {}
+    for acct in accounts:
+        limit = _account_limit_bytes(acct)
+        entry = health_map.get(acct.get('id') or '') or {}
+        usage = entry.get('usage') or {}
+        # If we have no usage data yet (cold start), trust this account.
+        # If the probe says misconfigured/unreachable, skip it — there's
+        # no point trying to upload there.
+        state = entry.get('state')
+        if state in ('misconfigured', 'unreachable'):
+            continue
+        counted = int(usage.get('counted_bytes') or 0)
+        if counted < int(limit * 0.95):
+            return acct, False
+    # Every account either failed health or is at/past 95 %. Fall back to
+    # the first that's not flat-out broken; if none are healthy, fall back
+    # to the primary anyway so the caller can surface the real error.
+    for acct in accounts:
+        entry = health_map.get(acct.get('id') or '') or {}
+        if entry.get('state') not in ('misconfigured', 'unreachable'):
+            return acct, True
+    return accounts[0], True
+
+
+def _get_r2_client(account_id: 'str | None' = None) -> 'tuple[object | None, str, str, str | None, str]':
+    """Return (boto3_client, bucket_name, state, error, account_id_used).
+
+    With no argument, runs the priority picker and builds a client for
+    whichever account currently has headroom. With an explicit account_id,
+    builds a client for exactly that one (or returns a misconfigured
+    state if the id doesn't match anything).
+
+    state ∈ {'connected', 'misconfigured', 'unreachable', 'unknown'}.
+    - 'connected'      → client + bucket usable (constructor succeeded;
+                          live reachability is verified separately by the
+                          periodic head_bucket probe)
+    - 'misconfigured'  → no accounts configured, or one or more credential
+                          fields blank/missing on the targeted account
+    - 'unreachable'    → boto3 missing or constructor raised
+
+    The fifth tuple slot is the id of the account actually used (empty
+    string on the no-account-configured path). Callers that only care
+    about the legacy 4-tuple can unpack `*_` to discard it."""
+    accounts = _load_r2_accounts()
+    if not accounts:
+        return None, '', 'misconfigured', 'no R2 accounts configured', ''
+    if account_id:
+        acct = _find_account(accounts, account_id)
+        if acct is None:
+            return None, '', 'misconfigured', f'unknown account id: {account_id}', ''
+        return _build_r2_client(acct)
+    chosen, _all_full = _pick_r2_account_for_upload()
+    if chosen is None:
+        return None, '', 'misconfigured', 'no R2 accounts configured', ''
+    return _build_r2_client(chosen)
+
+
+def _r2_usage_breakdown(client, bucket: str, limit_bytes: int = R2_USAGE_LIMIT_BYTES) -> dict:
     """List every object in the bucket and bucket-sum sizes by category.
     Categories are determined by key prefix: `warc/` = WARC harvests,
     `uploads/` = target lists, `hits/` = scan hits (priority — never count
@@ -1076,118 +1267,348 @@ def _r2_usage_breakdown(client, bucket: str) -> dict:
                 'bytes_by': bytes_by, 'count_by': count_by}
     # Counted-toward-cap = everything except hits, per operator policy.
     counted = total - bytes_by['hits']
-    pct = (counted / R2_USAGE_LIMIT_BYTES * 100) if R2_USAGE_LIMIT_BYTES else 0
+    limit = int(limit_bytes) if limit_bytes and limit_bytes > 0 else R2_USAGE_LIMIT_BYTES
+    pct = (counted / limit * 100) if limit else 0
     return {
         'error': None,
         'total_bytes': total,
         'counted_bytes': counted,
         'bytes_by': bytes_by,
         'count_by': count_by,
-        'limit_bytes': R2_USAGE_LIMIT_BYTES,
+        'limit_bytes': limit,
         'percent': round(pct, 2),
         # Thresholds operators care about: 75% (info toast) and 95% (warn).
-        'threshold_75_hit': counted >= R2_USAGE_LIMIT_BYTES * 0.75,
-        'threshold_95_hit': counted >= R2_USAGE_LIMIT_BYTES * 0.95,
+        'threshold_75_hit': counted >= limit * 0.75,
+        'threshold_95_hit': counted >= limit * 0.95,
     }
 
 
 def _r2_health_probe() -> dict:
-    """Run by SSHManager.monitor_thread each cycle. Calls
-    _get_r2_client() and (when connected) verifies bucket reachability
-    via head_bucket plus inventories usage. Returns the dict shape the
-    SSH manager cache expects."""
-    client, bucket, state, err = _get_r2_client()
-    if state != 'connected' or client is None or not bucket:
-        return {'state': state, 'last_error': err, 'usage': None}
+    """Run by SSHManager.monitor_thread each cycle. Iterates every
+    configured account, runs head_bucket + usage breakdown on each, and
+    returns a dict shape with one entry per account plus a `primary_id`
+    pointer that names the currently-active upload target. The SSH
+    manager caches this so the dashboard pill + per-card usage bars
+    don't pay for round-trips on every render.
+
+    Output shape:
+        {
+          'accounts': [{id, label, state, last_error, usage}, ...],
+          'primary_id': 'abc...' or None,
+          'all_full': bool,
+          # Legacy mirrors for code paths that still read the flat shape:
+          'state', 'last_error', 'usage'  — mirror the primary's row.
+        }
+    """
+    accounts = _load_r2_accounts()
+    out_rows: 'list[dict]' = []
+    for acct in accounts:
+        client, bucket, state, err, aid = _build_r2_client(acct)
+        row = {
+            'id': aid or acct.get('id'),
+            'label': acct.get('label') or acct.get('bucket_name') or 'r2',
+            'state': state,
+            'last_error': err,
+            'usage': None,
+        }
+        if state == 'connected' and client is not None and bucket:
+            try:
+                client.head_bucket(Bucket=bucket)
+                row['usage'] = _r2_usage_breakdown(
+                    client, bucket, _account_limit_bytes(acct),
+                )
+            except Exception as e:
+                row['state'] = 'unreachable'
+                row['last_error'] = f'head_bucket failed: {e}'
+        out_rows.append(row)
+    # Pick the primary the same way the upload picker would, but only
+    # using the rows we just computed (saves a second cache read).
+    primary_id: 'str | None' = None
+    all_full = bool(out_rows)
+    for row, acct in zip(out_rows, accounts):
+        if row.get('state') in ('misconfigured', 'unreachable'):
+            continue
+        limit = _account_limit_bytes(acct)
+        counted = int((row.get('usage') or {}).get('counted_bytes') or 0)
+        if counted < int(limit * 0.95):
+            primary_id = row['id']
+            all_full = False
+            break
+    if primary_id is None and out_rows:
+        for row in out_rows:
+            if row.get('state') not in ('misconfigured', 'unreachable'):
+                primary_id = row['id']
+                break
+        if primary_id is None:
+            primary_id = out_rows[0]['id']
+    # Legacy mirrors (state/last_error/usage) reflect the primary so old
+    # callers that haven't been updated still see something sensible.
+    primary_row = next((r for r in out_rows if r['id'] == primary_id), None) if primary_id else None
+    return {
+        'accounts': out_rows,
+        'primary_id': primary_id,
+        'all_full': all_full,
+        'state': (primary_row or {}).get('state', 'misconfigured' if not out_rows else 'unknown'),
+        'last_error': (primary_row or {}).get('last_error'),
+        'usage': (primary_row or {}).get('usage'),
+    }
+
+
+def _mask_secret(s: str) -> str:
+    """Render a secret for the GET response. Empty stays empty so the
+    dashboard knows the field is unset; otherwise return 8 bullets so
+    the form shows 'configured' without echoing the real value back to
+    the browser."""
+    return ('●' * 8) if s else ''
+
+
+def _r2_health_map() -> 'dict[str, dict]':
+    """Return cached per-account health rows keyed by id. Empty dict on
+    cold start or when the SSH manager isn't running."""
+    mgr = get_ssh_manager()
+    if mgr is None:
+        return {}
     try:
-        client.head_bucket(Bucket=bucket)
-    except Exception as e:
-        return {'state': 'unreachable', 'last_error': f'head_bucket failed: {e}', 'usage': None}
-    usage = _r2_usage_breakdown(client, bucket)
-    return {'state': 'connected', 'last_error': None, 'usage': usage}
+        cached = mgr.get_r2_health() or {}
+    except Exception:
+        return {}
+    out: 'dict[str, dict]' = {}
+    for entry in (cached.get('accounts') or []):
+        if isinstance(entry, dict) and entry.get('id'):
+            out[entry['id']] = entry
+    return out
+
+
+def _r2_account_view(acct: dict, health: dict) -> dict:
+    """Public-facing render of one account row. Secret is masked. Health
+    fields are pulled from the SSH manager cache so the dashboard pill +
+    usage bar don't pay for an inline head_bucket."""
+    h = health.get(acct.get('id') or '') or {}
+    return {
+        'id': acct.get('id'),
+        'label': acct.get('label') or acct.get('bucket_name') or 'r2',
+        'account_id': acct.get('account_id', ''),
+        'access_key_id': acct.get('access_key_id', ''),
+        'secret_access_key': _mask_secret(acct.get('secret_access_key', '')),
+        'bucket_name': acct.get('bucket_name', ''),
+        'priority': int(acct.get('priority', 0)),
+        'max_gb': float(acct.get('max_gb') or R2_DEFAULT_MAX_GB),
+        'configured': bool(
+            acct.get('account_id') and acct.get('access_key_id')
+            and acct.get('secret_access_key') and acct.get('bucket_name')
+        ),
+        'state': h.get('state', 'unknown'),
+        'last_error': h.get('last_error'),
+        'usage': h.get('usage'),
+    }
 
 
 @app.route('/api/upload/r2-config', methods=['GET', 'POST'])
 def api_r2_config():
     """Read or write R2 credentials in config.json.
 
-    On POST: if the secret_access_key field comes in blank, keep the
-    previously-stored secret. The dashboard form intentionally clears
-    that field on re-edit (it's a password input — we don't echo it
-    back), so a naive overwrite would wipe credentials every time the
-    user re-saved to change the bucket or account."""
-    cfg = _load_scanner_config()
+    Multi-account: the canonical store is `r2_accounts`. POST accepts:
+      • `{accounts: [...]}` — full-list replace. Per-account blank
+        `secret_access_key` means "keep existing for this id".
+      • `{account_id, access_key_id, secret_access_key, bucket_name}` —
+        legacy single-account body. Updates the row matched by
+        `account_id+bucket_name`, or appends a new row if no match (and
+        the list was empty, populates row 0). This keeps the original
+        R2Settings form working byte-for-byte.
+
+    GET always returns the new multi-account shape:
+      {accounts: [...], primary_id, all_full,
+       # Legacy mirrors of account 0 (or empty) so a stale frontend
+       # cache doesn't blow up:
+       account_id, access_key_id, secret_access_key, bucket_name,
+       configured, state, last_error, usage}.
+    """
     if request.method == 'POST':
         data = request.get_json(force=True, silent=True) or {}
-        existing = cfg.get(R2_CONFIG_KEY, {}) if isinstance(cfg.get(R2_CONFIG_KEY), dict) else {}
-        new_secret = str(data.get('secret_access_key', '')).strip()
-        cfg[R2_CONFIG_KEY] = {
-            'account_id':       str(data.get('account_id', '')).strip(),
-            'access_key_id':    str(data.get('access_key_id', '')).strip(),
-            'secret_access_key': new_secret or str(existing.get('secret_access_key', '') or ''),
-            'bucket_name':      str(data.get('bucket_name', '')).strip(),
-        }
-        with open(SCANNER_CONFIG_PATH, 'w') as f:
-            json.dump(cfg, f, indent=2)
-    r2 = cfg.get(R2_CONFIG_KEY, {})
-    # Surface the cached health state from SSHManager so the dashboard
-    # pill can show ● connected / misconfigured / unreachable without
-    # blocking on a fresh head_bucket call per request.
-    health = {'state': 'unknown', 'last_error': None, 'usage': None}
+        existing_accounts = _load_r2_accounts()
+        existing_by_id = {a.get('id'): a for a in existing_accounts}
+        if isinstance(data.get('accounts'), list):
+            # Full-list replace. Preserve secrets when the incoming row
+            # leaves the field blank — the dashboard masks it for re-edit.
+            new_list: 'list[dict]' = []
+            for raw in data['accounts']:
+                if not isinstance(raw, dict):
+                    continue
+                incoming_id = (raw.get('id') or '').strip()
+                prev = existing_by_id.get(incoming_id) or {}
+                new_secret = str(raw.get('secret_access_key', '') or '').strip()
+                # If the incoming secret is the masked placeholder OR
+                # blank, keep the previously-stored secret. We treat any
+                # all-bullet string as the masked placeholder.
+                if new_secret and not all(c == '●' for c in new_secret):
+                    secret = new_secret
+                else:
+                    secret = prev.get('secret_access_key', '') or ''
+                row = {
+                    'id': incoming_id or None,
+                    'label': str(raw.get('label') or '').strip()
+                              or str(raw.get('bucket_name') or 'r2'),
+                    'account_id': str(raw.get('account_id', '')).strip(),
+                    'access_key_id': str(raw.get('access_key_id', '')).strip(),
+                    'secret_access_key': secret,
+                    'bucket_name': str(raw.get('bucket_name', '')).strip(),
+                    'max_gb': raw.get('max_gb', R2_DEFAULT_MAX_GB),
+                }
+                row['id'] = row['id'] or _account_id_for(row)
+                new_list.append(row)
+            _save_r2_accounts(new_list)
+        else:
+            # Legacy single-account POST. Match-or-append into row 0.
+            new_secret = str(data.get('secret_access_key', '')).strip()
+            target_account_id = str(data.get('account_id', '')).strip()
+            target_bucket = str(data.get('bucket_name', '')).strip()
+            row = None
+            for a in existing_accounts:
+                if a.get('account_id') == target_account_id and a.get('bucket_name') == target_bucket:
+                    row = a
+                    break
+            if row is None and existing_accounts:
+                # Same shape as before: legacy POST updates the
+                # lowest-priority (current primary) row.
+                row = existing_accounts[0]
+            if row is None:
+                row = {
+                    'label': target_bucket or 'r2',
+                    'priority': 0,
+                    'max_gb': R2_DEFAULT_MAX_GB,
+                    'secret_access_key': '',
+                }
+                existing_accounts.append(row)
+            row['account_id'] = target_account_id
+            row['access_key_id'] = str(data.get('access_key_id', '')).strip()
+            row['secret_access_key'] = new_secret or str(row.get('secret_access_key', '') or '')
+            row['bucket_name'] = target_bucket
+            if 'label' in data:
+                row['label'] = str(data.get('label') or row.get('label') or target_bucket)
+            row['id'] = _account_id_for(row)
+            _save_r2_accounts(existing_accounts)
+    # Build the GET response.
+    accounts = _load_r2_accounts()
+    health_map = _r2_health_map()
+    rendered = [_r2_account_view(a, health_map) for a in accounts]
+    # Primary id: prefer the cached probe answer, else first row.
     mgr = get_ssh_manager()
+    primary_id = None
+    all_full = False
     if mgr is not None:
         try:
             cached = mgr.get_r2_health() or {}
-            health = {
-                'state': cached.get('state', 'unknown'),
-                'last_error': cached.get('last_error'),
-                'usage': cached.get('usage'),
-            }
+            primary_id = cached.get('primary_id')
+            all_full = bool(cached.get('all_full'))
         except Exception:
-            pass
+            primary_id = None
+    if not primary_id and rendered:
+        primary_id = rendered[0]['id']
+    # Legacy single-account mirror — keep the old shape so a stale
+    # frontend can still render *something* during a deploy window.
+    primary = next((r for r in rendered if r['id'] == primary_id), rendered[0] if rendered else None)
+    if primary is None:
+        primary = {
+            'id': '', 'account_id': '', 'access_key_id': '',
+            'secret_access_key': '', 'bucket_name': '',
+            'configured': False, 'state': 'misconfigured',
+            'last_error': 'no R2 accounts configured', 'usage': None,
+        }
     return jsonify({
-        'account_id':    r2.get('account_id', ''),
-        'access_key_id': r2.get('access_key_id', ''),
-        'secret_access_key': '●' * 8 if r2.get('secret_access_key') else '',
-        'bucket_name':   r2.get('bucket_name', ''),
-        'configured':    bool(r2.get('account_id') and r2.get('access_key_id') and r2.get('secret_access_key') and r2.get('bucket_name')),
-        'state':         health['state'],
-        'last_error':    health['last_error'],
-        # Usage breakdown surfaced to the dashboard's R2Settings card and
-        # the WarcPanel for the 75% / 95% threshold toasts. `null` until
-        # the first successful health probe completes.
-        'usage':         health['usage'],
+        'accounts': rendered,
+        'primary_id': primary_id,
+        'all_full': all_full,
+        # Legacy mirrors.
+        'account_id':    primary.get('account_id', ''),
+        'access_key_id': primary.get('access_key_id', ''),
+        'secret_access_key': primary.get('secret_access_key', ''),
+        'bucket_name':   primary.get('bucket_name', ''),
+        'configured':    primary.get('configured', False),
+        'state':         primary.get('state', 'unknown'),
+        'last_error':    primary.get('last_error'),
+        'usage':         primary.get('usage'),
     })
+
+
+@app.route('/api/upload/r2-config/<acct_id>', methods=['DELETE'])
+def api_r2_config_delete(acct_id):
+    """Remove one account from the list. Returns 404 when the id is
+    unknown so the dashboard can tell the operator the row was already
+    gone (race between two browser tabs)."""
+    accounts = _load_r2_accounts()
+    matched = [a for a in accounts if a.get('id') == acct_id]
+    if not matched:
+        return jsonify({'ok': False, 'error': f'unknown account id: {acct_id}'}), 404
+    remaining = [a for a in accounts if a.get('id') != acct_id]
+    _save_r2_accounts(remaining)
+    return jsonify({'ok': True, 'deleted_id': acct_id, 'remaining': len(remaining)})
+
+
+@app.route('/api/upload/r2-config/<acct_id>/reorder', methods=['POST'])
+def api_r2_config_reorder(acct_id):
+    """Move an account to a new priority. Body: `{priority: N}` (0-based).
+    Out-of-range values clamp to [0, len-1]; same-priority is a no-op."""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        new_prio = int(data.get('priority'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'priority must be int'}), 400
+    accounts = _load_r2_accounts()
+    target = next((a for a in accounts if a.get('id') == acct_id), None)
+    if target is None:
+        return jsonify({'ok': False, 'error': f'unknown account id: {acct_id}'}), 404
+    new_prio = max(0, min(len(accounts) - 1, new_prio))
+    accounts.remove(target)
+    accounts.insert(new_prio, target)
+    _save_r2_accounts(accounts)
+    return jsonify({'ok': True, 'id': acct_id, 'priority': new_prio})
 
 
 @app.route('/api/upload/presign', methods=['GET'])
 def api_upload_presign():
-    """Generate a pre-signed PUT URL for direct browser → R2 upload."""
-    client, bucket, state, err = _get_r2_client()
+    """Generate a pre-signed PUT URL for direct browser → R2 upload.
+
+    Account selection: the priority picker decides where to land the
+    upload. We pass back the resolved account label so the toast can
+    name the bucket — without that, an operator with three buckets has
+    no idea which one absorbed their list."""
+    client, bucket, state, err, acct_id = _get_r2_client()
     if not client:
         return jsonify({'error': err or f'R2 unavailable ({state})'}), 503
     import uuid as _uuid
     filename   = request.args.get('filename', 'targets.txt')
     upload_id  = _uuid.uuid4().hex
     key        = f'uploads/{upload_id}/{filename}'
+    # Resolve the picked account's label for UI display. Cheap — the
+    # accounts list is short (single-digit at fleet scale).
+    label = next((a.get('label') for a in _load_r2_accounts() if a.get('id') == acct_id), '')
     try:
         url = client.generate_presigned_url(
             'put_object',
             Params={'Bucket': bucket, 'Key': key, 'ContentType': 'text/plain'},
             ExpiresIn=7200,
         )
-        return jsonify({'url': url, 'key': key, 'upload_id': upload_id})
+        return jsonify({
+            'url': url, 'key': key, 'upload_id': upload_id,
+            'account_id': acct_id, 'account_label': label,
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/upload/complete', methods=['POST'])
 def api_upload_complete():
-    """Download the uploaded file from R2, save as targets.txt, return line count + preview."""
-    client, bucket, state, err = _get_r2_client()
+    """Download the uploaded file from R2, save as targets.txt, return line count + preview.
+
+    The presign step stamps `account_id` into the response so the
+    completion call can re-target the same account. We accept it via
+    body to avoid drift if the picker would now route a *new* upload
+    elsewhere."""
+    data     = request.get_json(force=True, silent=True) or {}
+    acct_id  = (data.get('account_id') or '').strip() or None
+    client, bucket, state, err, _used = _get_r2_client(acct_id)
     if not client:
         return jsonify({'error': err or f'R2 unavailable ({state})'}), 503
-    data     = request.get_json(force=True, silent=True) or {}
     key      = str(data.get('key', ''))
     filename = str(data.get('filename', 'targets.txt'))
     if not key:
@@ -1240,6 +1661,12 @@ _warc_state: dict = {
     'r2_key': None,
     'r2_uploaded_at': None,
     'r2_error': None,
+    # Which R2 account absorbed the upload. The picker chooses by
+    # priority+headroom, so multiple harvests in sequence can land in
+    # different buckets — the cockpit needs this stamped explicitly to
+    # show "saved to <label>" rather than inferring from the key.
+    'r2_account_id': None,
+    'r2_account_label': None,
     'last_exit_code': None,
     # Effect 1: where this run lives.
     #   'controller' → managed by local _warc_proc.Popen
@@ -1416,9 +1843,17 @@ def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
 
     r2_key = None
     r2_error = None
+    r2_account_id = None
+    r2_account_label = None
     if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-        client, bucket, r2_state, r2_err = _get_r2_client()
+        client, bucket, r2_state, r2_err, r2_account_id = _get_r2_client()
         if client and bucket:
+            # Resolve the label once so we can stamp it into _warc_state
+            # for the cockpit display.
+            r2_account_label = next(
+                (a.get('label') for a in _load_r2_accounts() if a.get('id') == r2_account_id),
+                None,
+            )
             try:
                 ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
                 r2_key = f'warc/live_domains_{ts}_{run_id}.txt'
@@ -1435,6 +1870,8 @@ def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
         _warc_state['r2_key'] = r2_key
         _warc_state['r2_uploaded_at'] = datetime.now().isoformat() if r2_key else None
         _warc_state['r2_error'] = r2_error
+        _warc_state['r2_account_id'] = r2_account_id if r2_key else None
+        _warc_state['r2_account_label'] = r2_account_label if r2_key else None
     _save_warc_state()
 
     # Clean up local files only if we successfully shipped to R2; otherwise
@@ -1585,6 +2022,8 @@ def api_warc_start():
                         'r2_key': None,
                         'r2_uploaded_at': None,
                         'r2_error': None,
+                        'r2_account_id': None,
+                        'r2_account_label': None,
                     })
                 _save_warc_state()
                 return jsonify({
@@ -1672,6 +2111,8 @@ def api_warc_start():
             _warc_state['r2_key'] = None
             _warc_state['r2_uploaded_at'] = None
             _warc_state['r2_error'] = None
+            _warc_state['r2_account_id'] = None
+            _warc_state['r2_account_label'] = None
             _warc_state['last_exit_code'] = None
         _save_warc_state()
 
@@ -1748,6 +2189,8 @@ def api_warc_start():
         _warc_state['r2_key'] = None
         _warc_state['r2_uploaded_at'] = None
         _warc_state['r2_error'] = None
+        _warc_state['r2_account_id'] = None
+        _warc_state['r2_account_label'] = None
         _warc_state['last_exit_code'] = None
     _save_warc_state()
 
@@ -1928,6 +2371,8 @@ def api_warc_status():
         if (not running) and state.get('finished_at') is None and remote_pid:
             r2_key_done = None
             r2_err_done = None
+            r2_acct_id_done = None
+            r2_acct_label_done = None
             try:
                 # Compute sha first so the harvest-finished auto-export
                 # also lands at the content-addressed key. Without this,
@@ -1935,7 +2380,7 @@ def api_warc_status():
                 # object that the dedup logic later tries to skip but
                 # can't because the keys don't collide.
                 _auto_sha = _sha256_remote(mgr, ip, output_path) if mgr else None
-                r2_key_done, r2_err_done = _warc_remote_export_to_r2(
+                r2_key_done, r2_err_done, r2_acct_id_done, r2_acct_label_done = _warc_remote_export_to_r2(
                     ip, output_path, state.get('run_id'), content_sha=_auto_sha,
                 )
             except Exception as e:
@@ -1949,6 +2394,8 @@ def api_warc_status():
                         _warc_state['r2_key'] = r2_key_done
                         _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
                         _warc_state['r2_error'] = None
+                        _warc_state['r2_account_id'] = r2_acct_id_done
+                        _warc_state['r2_account_label'] = r2_acct_label_done
                     else:
                         _warc_state['r2_error'] = r2_err_done
                 state = dict(_warc_state)
@@ -1990,26 +2437,36 @@ def api_warc_status():
         'r2_key': state.get('r2_key'),
         'r2_uploaded_at': state.get('r2_uploaded_at'),
         'r2_error': state.get('r2_error'),
+        'r2_account_id': state.get('r2_account_id'),
+        'r2_account_label': state.get('r2_account_label'),
         'log_tail': _truncate_log_tail(log_tail),
     })
 
 
 def _warc_remote_export_to_r2(ip: str, remote_output_path: str,
                               run_id: 'str | None',
-                              content_sha: 'str | None' = None) -> 'tuple[str | None, str | None]':
+                              content_sha: 'str | None' = None,
+                              account_id: 'str | None' = None,
+                              ) -> 'tuple[str | None, str | None, str | None, str | None]':
     """Push the worker's live_domains.txt directly to R2 via a presigned
     PUT URL — the file never round-trips through the controller. Returns
-    (r2_key, error_string). Either may be None.
+    (r2_key, error_string, account_id_used, account_label_used). The
+    label is resolved on success so callers can stamp it into
+    `_warc_state['r2_account_label']` for the cockpit.
 
     When ``content_sha`` is provided we use a content-addressed key so a
     repeat upload of byte-identical content lands at the same place. The
     presigned URL is bound to that exact key, so a presigning round-trip
     can't accidentally write to a different one."""
     if not remote_output_path:
-        return None, 'no remote output path in state'
-    client, bucket, state, err = _get_r2_client()
+        return None, 'no remote output path in state', None, None
+    client, bucket, state, err, used_id = _get_r2_client(account_id)
     if not client or not bucket:
-        return None, err or f'R2 unavailable ({state})'
+        return None, err or f'R2 unavailable ({state})', None, None
+    used_label = next(
+        (a.get('label') for a in _load_r2_accounts() if a.get('id') == used_id),
+        None,
+    )
     r2_key = _content_addressed_key(content_sha)
     if not r2_key:
         ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
@@ -2027,11 +2484,11 @@ def _warc_remote_export_to_r2(ip: str, remote_output_path: str,
             ExpiresIn=3600,
         )
     except Exception as e:
-        return None, f'presign failed: {e}'
+        return None, f'presign failed: {e}', None, None
 
     mgr = get_ssh_manager()
     if mgr is None:
-        return None, 'SSH manager unavailable'
+        return None, 'SSH manager unavailable', None, None
 
     # Single-quote-escape: replace ' with '\'' so we can safely wrap the URL
     # in single quotes for the remote shell.
@@ -2049,8 +2506,8 @@ def _warc_remote_export_to_r2(ip: str, remote_output_path: str,
     )
     out = mgr.ssh_exec(ip, cmd, 120)
     if (out or '').strip().endswith('OK'):
-        return r2_key, None
-    return None, f'remote curl upload failed: {out!r}'
+        return r2_key, None, used_id, used_label
+    return None, f'remote curl upload failed: {out!r}', None, None
 
 
 def _content_addressed_key(sha256: 'str | None') -> 'str | None':
@@ -2064,17 +2521,37 @@ def _content_addressed_key(sha256: 'str | None') -> 'str | None':
     return f'warc/by-content/live_domains_{sha256[:16]}.txt'
 
 
-def _r2_head(key: str) -> 'dict | None':
-    """HEAD an R2 object. Returns the response dict on hit, None on miss
-    or any error. Lets the upload path probe "does this content already
-    exist?" with one cheap API call, independent of our local pointer."""
-    client, bucket, _state, _err = _get_r2_client()
+def _r2_head(key: str, account_id: 'str | None' = None) -> 'dict | None':
+    """HEAD an R2 object on a single account. Returns the response dict
+    on hit, None on miss or any error. With ``account_id=None`` runs
+    against the priority-picked primary."""
+    client, bucket, _state, _err, _used = _get_r2_client(account_id)
     if not client or not bucket or not key:
         return None
     try:
         return client.head_object(Bucket=bucket, Key=key)
     except Exception:
         return None
+
+
+def _r2_head_find(key: str) -> 'dict | None':
+    """Find which configured account holds `key`. Walks every account
+    and returns the first matching {id, label} dict; None if no account
+    has it. Used by the dedup short-circuit so a second click finds an
+    existing object even after spillover moved subsequent uploads to a
+    different account."""
+    if not key:
+        return None
+    for acct in _load_r2_accounts():
+        client, bucket, state, _err, _used = _build_r2_client(acct)
+        if state != 'connected' or not client or not bucket:
+            continue
+        try:
+            client.head_object(Bucket=bucket, Key=key)
+            return {'id': acct.get('id'), 'label': acct.get('label')}
+        except Exception:
+            continue
+    return None
 
 
 def _sha256_local(path: str) -> 'str | None':
@@ -2135,38 +2612,54 @@ def api_warc_export_to_r2():
                 'success': True, 'noop': True, 'r2_key': last_key,
                 'message': 'content unchanged — reusing existing R2 object',
                 'sha256': cur_sha,
+                'account_id': _warc_state.get('r2_account_id'),
+                'account_label': _warc_state.get('r2_account_label'),
             })
         # Slow-but-correct path: ask the bucket. Content-addressed key
         # means we can probe with one HEAD; if it exists, the content is
         # already there regardless of whether our local pointer remembers
-        # it (state wipes, second worker, manual upload, etc.).
+        # it (state wipes, second worker, manual upload, etc.). The HEAD
+        # scan walks every account so we don't double-upload across
+        # buckets either.
         ck = _content_addressed_key(cur_sha) if cur_sha else None
         if ck:
-            existing = _r2_head(ck)
-            if existing is not None:
+            existing_account = _r2_head_find(ck)
+            if existing_account is not None:
                 with _warc_lock:
                     _warc_state['r2_key'] = ck
                     _warc_state['r2_error'] = None
                     _warc_state['r2_last_export_sha'] = cur_sha
                     _warc_state['r2_last_export_key'] = ck
+                    _warc_state['r2_account_id'] = existing_account.get('id')
+                    _warc_state['r2_account_label'] = existing_account.get('label')
                 _save_warc_state()
                 return jsonify({
                     'success': True, 'noop': True, 'r2_key': ck,
                     'message': 'content already in R2 at content-addressed key',
                     'sha256': cur_sha,
+                    'account_id': existing_account.get('id'),
+                    'account_label': existing_account.get('label'),
                 })
-        r2_key, err = _warc_remote_export_to_r2(run_on, output_path, run_id, content_sha=cur_sha)
+        r2_key, err, used_id, used_label = _warc_remote_export_to_r2(
+            run_on, output_path, run_id, content_sha=cur_sha,
+        )
         if not r2_key:
             return jsonify({'error': err or 'R2 upload failed'}), 502
         with _warc_lock:
             _warc_state['r2_key'] = r2_key
             _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
             _warc_state['r2_error'] = None
+            _warc_state['r2_account_id'] = used_id
+            _warc_state['r2_account_label'] = used_label
             if cur_sha:
                 _warc_state['r2_last_export_sha'] = cur_sha
                 _warc_state['r2_last_export_key'] = r2_key
         _save_warc_state()
-        return jsonify({'success': True, 'r2_key': r2_key, 'run_on': run_on, 'sha256': cur_sha})
+        return jsonify({
+            'success': True, 'r2_key': r2_key, 'run_on': run_on,
+            'sha256': cur_sha,
+            'account_id': used_id, 'account_label': used_label,
+        })
 
     # ── Controller path: legacy boto3 upload from local disk ──────────
     if not output_path or not os.path.exists(output_path):
@@ -2182,27 +2675,39 @@ def api_warc_export_to_r2():
             'success': True, 'noop': True, 'r2_key': last_key,
             'message': 'content unchanged — reusing existing R2 object',
             'sha256': cur_sha,
+            'account_id': _warc_state.get('r2_account_id'),
+            'account_label': _warc_state.get('r2_account_label'),
         })
-    client, bucket, state, err = _get_r2_client()
+    client, bucket, state, err, used_id = _get_r2_client()
     if not client:
         return jsonify({'error': err or f'R2 unavailable ({state})'}), 503
+    used_label = next(
+        (a.get('label') for a in _load_r2_accounts() if a.get('id') == used_id),
+        None,
+    )
     # Slow path — content-addressed key. Same hash always lands at the
     # same key. A second click while state is wiped, a sibling controller,
     # or an out-of-band re-upload all funnel into the same object.
     r2_key = _content_addressed_key(cur_sha) if cur_sha else None
     if r2_key:
-        existing = _r2_head(r2_key)
-        if existing is not None:
+        # Probe across every account so a second click after spillover
+        # still finds the existing object.
+        existing_account = _r2_head_find(r2_key)
+        if existing_account is not None:
             with _warc_lock:
                 _warc_state['r2_key'] = r2_key
                 _warc_state['r2_error'] = None
                 _warc_state['r2_last_export_sha'] = cur_sha
                 _warc_state['r2_last_export_key'] = r2_key
+                _warc_state['r2_account_id'] = existing_account.get('id')
+                _warc_state['r2_account_label'] = existing_account.get('label')
             _save_warc_state()
             return jsonify({
                 'success': True, 'noop': True, 'r2_key': r2_key,
                 'message': 'content already in R2 at content-addressed key',
                 'sha256': cur_sha,
+                'account_id': existing_account.get('id'),
+                'account_label': existing_account.get('label'),
             })
     if not r2_key:
         # No hash available (read failed). Fall back to timestamp-based
@@ -2224,51 +2729,97 @@ def api_warc_export_to_r2():
         _warc_state['r2_key'] = r2_key
         _warc_state['r2_uploaded_at'] = datetime.now().isoformat()
         _warc_state['r2_error'] = None
+        _warc_state['r2_account_id'] = used_id
+        _warc_state['r2_account_label'] = used_label
         if cur_sha:
             _warc_state['r2_last_export_sha'] = cur_sha
             _warc_state['r2_last_export_key'] = r2_key
     _save_warc_state()
-    return jsonify({'success': True, 'r2_key': r2_key, 'sha256': cur_sha})
+    return jsonify({
+        'success': True, 'r2_key': r2_key, 'sha256': cur_sha,
+        'account_id': used_id, 'account_label': used_label,
+    })
 
 
 @app.route('/api/r2/objects', methods=['GET'])
 def api_r2_objects():
-    """List objects in the configured R2 bucket. Optional ?prefix=warc/.
+    """List objects across one or all configured R2 accounts. Optional
+    ?prefix=warc/ and ?account=<id>. Without ?account we union the
+    listing across every connected account, tagging each row with the
+    `account_id` + `account_label` it came from so the dashboard can
+    badge the source bucket.
 
-    Returns `{ok, objects: [{key, size, modified, storage_class}]}`. The
-    dashboard renders this as a deletable list so the operator can prune
-    duplicates without leaving the cockpit."""
-    client, bucket, state, err = _get_r2_client()
-    if not client:
-        return jsonify({'ok': False, 'error': err or f'R2 unavailable ({state})'}), 503
+    Returns `{ok, objects: [{key, size, modified, storage_class,
+    account_id, account_label}], accounts: [...]}`. The trailing
+    `accounts` array surfaces a per-bucket configured flag so the UI can
+    explain *why* a particular account contributed no rows."""
     prefix = request.args.get('prefix', '')
+    explicit_id = (request.args.get('account') or '').strip() or None
     try:
         max_keys = max(1, min(1000, int(request.args.get('limit') or 100)))
     except (TypeError, ValueError):
         max_keys = 100
-    objects = []
-    try:
-        kwargs = {'Bucket': bucket, 'MaxKeys': max_keys}
-        if prefix:
-            kwargs['Prefix'] = prefix
-        resp = client.list_objects_v2(**kwargs)
-        for o in resp.get('Contents', []) or []:
-            objects.append({
-                'key': o.get('Key'),
-                'size': o.get('Size', 0),
-                'modified': (o.get('LastModified').isoformat()
-                             if o.get('LastModified') else None),
-                'storage_class': o.get('StorageClass'),
-            })
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+
+    accounts = _load_r2_accounts()
+    if not accounts:
+        return jsonify({'ok': False, 'error': 'no R2 accounts configured'}), 503
+
+    targets = [a for a in accounts if a.get('id') == explicit_id] if explicit_id else accounts
+    if explicit_id and not targets:
+        return jsonify({'ok': False, 'error': f'unknown account id: {explicit_id}'}), 404
+
+    objects: list = []
+    per_account_status: list = []
+    errors: list = []
+    for acct in targets:
+        client, bucket, state, err, _used = _build_r2_client(acct)
+        per_account_status.append({
+            'id': acct.get('id'),
+            'label': acct.get('label'),
+            'bucket': bucket,
+            'state': state,
+            'error': err,
+        })
+        if state != 'connected' or not client or not bucket:
+            if err:
+                errors.append(f"{acct.get('label')}: {err}")
+            continue
+        try:
+            kwargs = {'Bucket': bucket, 'MaxKeys': max_keys}
+            if prefix:
+                kwargs['Prefix'] = prefix
+            resp = client.list_objects_v2(**kwargs)
+            for o in resp.get('Contents', []) or []:
+                objects.append({
+                    'key': o.get('Key'),
+                    'size': o.get('Size', 0),
+                    'modified': (o.get('LastModified').isoformat()
+                                 if o.get('LastModified') else None),
+                    'storage_class': o.get('StorageClass'),
+                    'account_id': acct.get('id'),
+                    'account_label': acct.get('label'),
+                })
+        except Exception as e:
+            errors.append(f"{acct.get('label')}: {e}")
+            continue
     objects.sort(key=lambda x: x.get('modified') or '', reverse=True)
-    return jsonify({'ok': True, 'bucket': bucket, 'prefix': prefix, 'objects': objects})
+    payload = {
+        'ok': True, 'prefix': prefix, 'objects': objects,
+        'accounts': per_account_status,
+    }
+    # Legacy single-bucket shape: when there's exactly one target, mirror
+    # `bucket` at the top level for any frontend that hasn't updated.
+    if len(targets) == 1:
+        payload['bucket'] = (targets[0].get('bucket_name') or '')
+    if errors:
+        payload['warnings'] = errors
+    return jsonify(payload)
 
 
 @app.route('/api/r2/cors-setup', methods=['POST'])
 def api_r2_cors_setup():
-    """One-click CORS rule install for the configured bucket.
+    """One-click CORS rule install. ?account=<id> targets one bucket;
+    omit it to install on every connected account in one call.
 
     Without this, browser-direct PUTs from the Lists panel fail with the
     opaque "R2 PUT network error" (which is what XMLHttpRequest reports
@@ -2281,9 +2832,13 @@ def api_r2_cors_setup():
     flows can verify upload integrity. Refuses to widen further (no DELETE,
     no wildcard headers) so a misclick can't accidentally open the bucket
     up to cross-origin DELETE attacks."""
-    client, bucket, state, err = _get_r2_client()
-    if not client:
-        return jsonify({'ok': False, 'error': err or f'R2 unavailable ({state})'}), 503
+    explicit_id = (request.args.get('account') or '').strip() or None
+    accounts = _load_r2_accounts()
+    if not accounts:
+        return jsonify({'ok': False, 'error': 'no R2 accounts configured'}), 503
+    targets = [a for a in accounts if a.get('id') == explicit_id] if explicit_id else accounts
+    if explicit_id and not targets:
+        return jsonify({'ok': False, 'error': f'unknown account id: {explicit_id}'}), 404
     cors_rules = {
         'CORSRules': [{
             'AllowedOrigins': ['*'],
@@ -2293,23 +2848,60 @@ def api_r2_cors_setup():
             'MaxAgeSeconds': 300,
         }],
     }
-    try:
-        client.put_bucket_cors(Bucket=bucket, CORSConfiguration=cors_rules)
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
-    return jsonify({'ok': True, 'bucket': bucket, 'rules': cors_rules['CORSRules']})
+    results: list = []
+    any_ok = False
+    for acct in targets:
+        client, bucket, state, err, _used = _build_r2_client(acct)
+        if state != 'connected' or not client or not bucket:
+            results.append({
+                'id': acct.get('id'), 'label': acct.get('label'),
+                'ok': False, 'error': err or f'R2 unavailable ({state})',
+            })
+            continue
+        try:
+            client.put_bucket_cors(Bucket=bucket, CORSConfiguration=cors_rules)
+            results.append({
+                'id': acct.get('id'), 'label': acct.get('label'),
+                'bucket': bucket, 'ok': True,
+            })
+            any_ok = True
+        except Exception as e:
+            results.append({
+                'id': acct.get('id'), 'label': acct.get('label'),
+                'ok': False, 'error': str(e),
+            })
+    if not any_ok:
+        return jsonify({
+            'ok': False,
+            'error': '; '.join(r.get('error') or '' for r in results if not r.get('ok')) or 'CORS install failed',
+            'results': results,
+        }), 500
+    return jsonify({'ok': True, 'results': results, 'rules': cors_rules['CORSRules']})
 
 
 @app.route('/api/r2/object', methods=['DELETE'])
 def api_r2_object_delete():
     """Delete a single object by exact key (passed as ?key=warc/...).
+    Optional ?account=<id> targets a specific bucket; without it we
+    HEAD across every account and delete in the first one that has it.
 
     Refuses to delete an empty key as a guard against client bugs that
     would otherwise list_objects + delete the bucket root."""
     key = request.args.get('key') or ''
     if not key.strip():
         return jsonify({'ok': False, 'error': 'key required'}), 400
-    client, bucket, state, err = _get_r2_client()
+    explicit_id = (request.args.get('account') or '').strip() or None
+
+    if explicit_id:
+        client, bucket, state, err, _used = _get_r2_client(explicit_id)
+    else:
+        # Find which account holds the object so we don't blast a delete
+        # at every bucket (one of which would 204 successfully but on the
+        # wrong target, leaving the real object untouched).
+        owner = _r2_head_find(key)
+        if owner is None:
+            return jsonify({'ok': False, 'error': f'no R2 account holds key {key!r}'}), 404
+        client, bucket, state, err, _used = _get_r2_client(owner.get('id'))
     if not client:
         return jsonify({'ok': False, 'error': err or f'R2 unavailable ({state})'}), 503
     try:

@@ -135,7 +135,16 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     setUploadProgress(0)
 
     // Try R2 direct upload first; fall back to chunked XHR if R2 is not configured (503).
-    let presignResult: { url: string; key: string; upload_id: string } | null = null
+    // `account_id`/`account_label` are stamped by the backend's priority
+    // picker so the toast can name the destination bucket and the
+    // /upload/complete call can pin to the same account.
+    let presignResult: {
+      url: string
+      key: string
+      upload_id: string
+      account_id?: string
+      account_label?: string
+    } | null = null
     try {
       presignResult = await r2.presign(file.name)
     } catch (e) {
@@ -157,7 +166,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
       // failure (CORS, network, R2 HTTP error) — the operator just sees
       // a slower upload, not a broken one. Without the fallback a missing
       // CORS rule on the bucket would render the Lists panel unusable.
-      const { url, key } = presignResult
+      const { url, key, account_id: r2AccountId, account_label: r2AccountLabel } = presignResult
       let r2Ok = false
       try {
         await new Promise<void>((resolve, reject) => {
@@ -187,9 +196,18 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
       if (r2Ok) {
         try {
           setUploadProgress(97)
-          const result = await r2.complete(key, file.name)
+          // Pin the completion call to the same account the presign
+          // landed on — otherwise a spillover that happens between the
+          // two requests would point /upload/complete at a bucket that
+          // doesn't hold the key.
+          const result = await r2.complete(key, file.name, r2AccountId)
           setUploadProgress(100)
 
+          // Operator-facing note: name the account so the upload
+          // destination is unambiguous when multiple buckets are wired
+          // up. Reads as e.g. "Uploaded via Cloudflare R2 (overflow) —
+          // list body saved on server as targets.txt".
+          const accountSuffix = r2AccountLabel ? ` (${r2AccountLabel})` : ''
           const next: TargetList = {
             id: makeListId(),
             name: file.name,
@@ -200,7 +218,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
             preview,
             assignedVpsIds: [],
             status: 'idle',
-            note: 'Uploaded via Cloudflare R2 — list body saved on server as targets.txt',
+            note: `Uploaded via Cloudflare R2${accountSuffix} — list body saved on server as targets.txt`,
           }
           onUpload(next)
         } catch (e) {

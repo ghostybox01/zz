@@ -147,11 +147,20 @@ class SSHManager:
         # ── R2 health cache (Effect 4) ───────────────────────────────
         # Refreshed each monitor cycle via an app-injected probe
         # callable (set via set_r2_health_probe). The probe runs
-        # _get_r2_client() + head_bucket and reports back. The
-        # /api/upload/r2-config GET endpoint surfaces this cache so
-        # the dashboard can show a status pill without doing the
-        # round-trip inline.
+        # head_bucket + usage breakdown per configured account and
+        # reports back the full shape. The /api/upload/r2-config GET
+        # endpoint and the dashboard's account cards read this cache
+        # so neither pays for an inline round-trip per render.
+        #
+        # The legacy single-account keys (state/last_error/usage) are
+        # kept at the top level and mirror whichever account the
+        # priority picker named primary on the last cycle, so old
+        # frontends and the existing 75/95% toast watcher still work
+        # while the new multi-account dashboard ships.
         self._r2_health_cache: dict = {
+            'accounts': [],        # list of {id, label, state, last_error, usage}
+            'primary_id': None,
+            'all_full': False,
             'state': 'unknown',
             'last_check': None,
             'last_error': None,
@@ -424,6 +433,42 @@ class SSHManager:
         except Exception:
             pass
 
+    # Paramiko 3.x disables `ssh-rsa` host-key signing and several legacy
+    # KEX/MAC algorithms by default, which is correct for modern servers
+    # but produces a bare "Channel closed" mid-handshake against vintage
+    # sshd (OpenSSH ≤ 6.x on Debian wheezy etc.). Passing an EMPTY
+    # disabled-algorithms map opts the connection back into the full set
+    # so legacy boxes negotiate normally. Modern servers still prefer
+    # their stronger algorithms — this is purely additive compatibility,
+    # not a security downgrade for healthy fleets.
+    _LEGACY_FRIENDLY_DISABLED: Dict[str, list] = {}
+
+    def _ssh_connect(self, ssh: paramiko.SSHClient, **kwargs) -> None:
+        """Wrap paramiko.connect with two retries and progressive crypto
+        relaxation. First try with modern defaults; on `SSHException`
+        (typically the "Channel closed" handshake failure against
+        ancient sshd) retry with `disabled_algorithms={}` so paramiko
+        keeps every algorithm on the table. The retry is paramiko-only —
+        the connection params (host, user, password/pkey) are unchanged."""
+        kwargs.setdefault('banner_timeout', 10)
+        kwargs.setdefault('auth_timeout', 10)
+        kwargs.setdefault('allow_agent', False)
+        kwargs.setdefault('look_for_keys', False)
+        try:
+            ssh.connect(**kwargs)
+            return
+        except paramiko.SSHException as e:
+            msg = str(e).lower()
+            # Only retry on the legacy-sshd symptoms — auth-fail / wrong-
+            # password should bubble up immediately so the caller can flip
+            # to the password fallback path.
+            if 'channel closed' not in msg and 'no matching' not in msg \
+                    and 'unable to negotiate' not in msg:
+                raise
+        # Second attempt — same params, looser crypto.
+        kwargs['disabled_algorithms'] = self._LEGACY_FRIENDLY_DISABLED
+        ssh.connect(**kwargs)
+
     def _get_ssh_client(self, ip: str, timeout: int = None) -> paramiko.SSHClient:
         timeout = timeout or self.config.get("ssh_timeout", 10)
         ssh = paramiko.SSHClient()
@@ -447,16 +492,13 @@ class SSHManager:
         # daemon thread to (re)install the controller's pubkey so the next
         # probe upgrades itself to key auth.
         if auth_kind == 'password' and password:
-            ssh.connect(
-                ip,
+            self._ssh_connect(
+                ssh,
+                hostname=ip,
                 port=port,
                 username=username,
                 password=password,
                 timeout=timeout,
-                banner_timeout=10,
-                auth_timeout=10,
-                allow_agent=False,
-                look_for_keys=False,
             )
             threading.Thread(target=self._repair_keys_on_worker,
                              args=(ip, ssh), daemon=True).start()
@@ -468,29 +510,23 @@ class SSHManager:
         # probe.
         try:
             if pkey:
-                ssh.connect(
-                    ip,
+                self._ssh_connect(
+                    ssh,
+                    hostname=ip,
                     port=port,
                     username=username,
                     pkey=pkey,
                     timeout=timeout,
-                    banner_timeout=10,
-                    auth_timeout=10,
-                    look_for_keys=False,
-                    allow_agent=False
                 )
             else:
                 # Fallback to key_filename if _load_private_key fails
-                ssh.connect(
-                    ip,
+                self._ssh_connect(
+                    ssh,
+                    hostname=ip,
                     port=port,
                     username=username,
                     key_filename=ssh_key_path,
                     timeout=timeout,
-                    banner_timeout=10,
-                    auth_timeout=10,
-                    look_for_keys=False,
-                    allow_agent=False
                 )
         except paramiko.AuthenticationException:
             if not password:
@@ -501,16 +537,13 @@ class SSHManager:
             except Exception: pass
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(
-                ip,
+            self._ssh_connect(
+                ssh,
+                hostname=ip,
                 port=port,
                 username=username,
                 password=password,
                 timeout=timeout,
-                banner_timeout=10,
-                auth_timeout=10,
-                allow_agent=False,
-                look_for_keys=False,
             )
             threading.Thread(target=self._repair_keys_on_worker,
                              args=(ip, ssh), daemon=True).start()
@@ -1598,18 +1631,44 @@ echo "PROBE_END"
         try:
             result = probe() or {}
         except Exception as e:
-            result = {'state': 'unreachable', 'last_error': f'probe raised: {e}'}
-        state = result.get('state') if isinstance(result, dict) else 'unknown'
+            result = {'state': 'unreachable', 'last_error': f'probe raised: {e}', 'accounts': []}
+        if not isinstance(result, dict):
+            result = {'accounts': [], 'state': 'unknown'}
+        # New multi-account fields.
+        raw_accounts = result.get('accounts') if isinstance(result.get('accounts'), list) else []
+        accounts: list = []
+        for entry in raw_accounts:
+            if not isinstance(entry, dict):
+                continue
+            est = entry.get('state')
+            if est not in ('connected', 'misconfigured', 'unreachable', 'unknown'):
+                est = 'unknown'
+            accounts.append({
+                'id': entry.get('id'),
+                'label': entry.get('label'),
+                'state': est,
+                'last_error': entry.get('last_error'),
+                # `usage` is the bucket inventory dict produced by
+                # app.py's _r2_usage_breakdown — None until the bucket
+                # is reachable.
+                'usage': entry.get('usage'),
+            })
+        primary_id = result.get('primary_id')
+        all_full = bool(result.get('all_full'))
+        # Legacy mirror — the picker's primary determines the
+        # `state/last_error/usage` triple so the existing single-account
+        # frontend still has something to render.
+        primary = next((a for a in accounts if a.get('id') == primary_id), None)
+        state = (primary or {}).get('state') if primary else result.get('state')
         if state not in ('connected', 'misconfigured', 'unreachable', 'unknown'):
             state = 'unknown'
-        last_error = result.get('last_error') if isinstance(result, dict) else None
-        # `usage` is the bucket inventory dict produced by app.py's
-        # _r2_usage_breakdown — None when the bucket is unreachable. The
-        # dashboard reads it through get_r2_health() to render the usage
-        # bar without paying for a per-request list_objects round-trip.
-        usage = result.get('usage') if isinstance(result, dict) else None
+        last_error = (primary or {}).get('last_error') if primary else result.get('last_error')
+        usage = (primary or {}).get('usage') if primary else result.get('usage')
         with self._r2_health_lock:
             self._r2_health_cache = {
+                'accounts': accounts,
+                'primary_id': primary_id,
+                'all_full': all_full,
                 'state': state,
                 'last_check': datetime.now().isoformat(),
                 'last_error': last_error,
