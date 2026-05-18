@@ -1,5 +1,14 @@
-import type { ComponentType, SVGProps } from 'react'
+// Created by https://t.me/boxxboyy
+import { useEffect, useState, type ComponentType, type SVGProps } from 'react'
 import type { ReconScannerConfig, ReconScannerConfigPatch } from '../lib/reconApi'
+import { scannerConfig } from '../lib/reconApi'
+import {
+  getEnabledAddons,
+  parseScannerKey,
+  type AddonCategory,
+  type AddonEntry,
+  type CrackerAddonEnabledMap,
+} from '../data/addonCatalog'
 import {
   BrandLogo,
   GlyphAI,
@@ -17,28 +26,69 @@ import {
 
 type Glyph = ComponentType<SVGProps<SVGSVGElement>>
 
-type AddonDef = {
-  id: string
-  label: string
-  Glyph: Glyph
-  domain: string
-  section: keyof ReconScannerConfig
-  key: string
+// Per-id brand metadata (domain for BrandLogo lookup + inline-SVG fallback).
+// Only the legacy 11 had hand-rolled glyphs; everything else gets a
+// category-derived glyph. New entries can graduate to a custom glyph by
+// adding a row here.
+const BRAND_BY_ID: Record<string, { domain: string; Glyph: Glyph }> = {
+  ai:        { domain: '',                Glyph: GlyphAI },
+  ses:       { domain: 'aws.amazon.com',  Glyph: GlyphAwsSes },
+  'aws-deep':{ domain: 'aws.amazon.com',  Glyph: GlyphAwsDeep },
+  'aws-access': { domain: 'aws.amazon.com', Glyph: GlyphAwsDeep },
+  sendgrid:  { domain: 'sendgrid.com',    Glyph: GlyphSendGrid },
+  mailgun:   { domain: 'mailgun.com',     Glyph: GlyphMailgun },
+  brevo:     { domain: 'brevo.com',       Glyph: GlyphBrevo },
+  mandrill:  { domain: 'mailchimp.com',   Glyph: GlyphMandrill },
+  mailersend:{ domain: 'mailersend.com',  Glyph: GlyphSendGrid },
+  postmark:  { domain: 'postmarkapp.com', Glyph: GlyphSendGrid },
+  sparkpost: { domain: 'sparkpost.com',   Glyph: GlyphSendGrid },
+  mailtrap:  { domain: 'mailtrap.io',     Glyph: GlyphSendGrid },
+  mailjet:   { domain: 'mailjet.com',     Glyph: GlyphSendGrid },
+  smtp:      { domain: '',                Glyph: GlyphSmtp },
+  stripe:    { domain: 'stripe.com',      Glyph: GlyphStripe },
+  'tencent-ses':  { domain: 'cloud.tencent.com', Glyph: GlyphSendGrid },
+  socketlabs:     { domain: 'socketlabs.com',    Glyph: GlyphSmtp },
+  zeptomail:      { domain: 'zoho.com',          Glyph: GlyphSmtp },
+  elasticemail:   { domain: 'elasticemail.com',  Glyph: GlyphSmtp },
+  twilio:    { domain: 'twilio.com',      Glyph: GlyphTwilio },
+  nexmo:     { domain: 'vonage.com',      Glyph: GlyphTwilio },
+  telnyx:    { domain: 'telnyx.com',      Glyph: GlyphTwilio },
+  plivo:     { domain: 'plivo.com',       Glyph: GlyphTwilio },
+  messagebird:    { domain: 'messagebird.com', Glyph: GlyphTwilio },
+  github:    { domain: 'github.com',      Glyph: GlyphGitHub },
+  heroku:    { domain: 'heroku.com',      Glyph: GlyphGitHub },
+  datadog:   { domain: 'datadoghq.com',   Glyph: GlyphGitHub },
 }
 
-const ADDONS: readonly AddonDef[] = [
-  { id: 'ai',        label: 'AI Keys',     Glyph: GlyphAI,       domain: '',               section: 'api_validation',    key: 'ai_all' },
-  { id: 'ses',       label: 'AWS SES',     Glyph: GlyphAwsSes,   domain: 'aws.amazon.com', section: 'aws_checks',        key: 'ses_quota_check' },
-  { id: 'aws-deep',  label: 'AWS Deep',    Glyph: GlyphAwsDeep,  domain: 'aws.amazon.com', section: 'scanning_features', key: 'aws_main_scan' },
-  { id: 'sendgrid',  label: 'SendGrid',    Glyph: GlyphSendGrid, domain: 'sendgrid.com',   section: 'api_validation',    key: 'sendgrid' },
-  { id: 'mailgun',   label: 'Mailgun',     Glyph: GlyphMailgun,  domain: 'mailgun.com',    section: 'api_validation',    key: 'mailgun' },
-  { id: 'brevo',     label: 'Brevo',       Glyph: GlyphBrevo,    domain: 'brevo.com',      section: 'features',          key: 'brevo' },
-  { id: 'mandrill',  label: 'Mandrill',    Glyph: GlyphMandrill, domain: 'mailchimp.com',  section: 'features',          key: 'mandrill' },
-  { id: 'stripe',    label: 'Stripe',      Glyph: GlyphStripe,   domain: 'stripe.com',     section: 'api_validation',    key: 'stripe' },
-  { id: 'twilio',    label: 'Twilio',      Glyph: GlyphTwilio,   domain: 'twilio.com',     section: 'api_validation',    key: 'twilio' },
-  { id: 'github',    label: 'GitHub',      Glyph: GlyphGitHub,   domain: 'github.com',     section: 'scanning_features', key: 'github_token_deep_scan' },
-  { id: 'smtp',      label: 'Random SMTP', Glyph: GlyphSmtp,     domain: '',               section: 'scanning_features', key: 'smtp_credentials_scan' },
-]
+function fallbackGlyphForCategory(category: AddonCategory): Glyph {
+  switch (category) {
+    case 'ai':         return GlyphAI
+    case 'cloud':      return GlyphAwsDeep
+    case 'email-api':  return GlyphSendGrid
+    case 'smtp':       return GlyphSmtp
+    case 'payment':    return GlyphStripe
+    case 'sms':        return GlyphTwilio
+    case 'vcs':        return GlyphGitHub
+    case 'dev':        return GlyphGitHub
+  }
+}
+
+function brandFor(entry: AddonEntry): { domain: string; Glyph: Glyph } {
+  return BRAND_BY_ID[entry.id] ?? { domain: '', Glyph: fallbackGlyphForCategory(entry.category) }
+}
+
+/** True when the scanner config currently has this addon's `scannerKey`
+ *  flag set. Returns false for keys outside the typed config schema
+ *  (those are valid catalog entries that the backend whitelist doesn't
+ *  yet surface — the tile will show OFF). */
+function readFlag(entry: AddonEntry, config: ReconScannerConfig | null): boolean {
+  if (!config) return false
+  const parsed = parseScannerKey(entry.scannerKey)
+  if (!parsed) return false
+  const [section, key] = parsed
+  const block = (config as unknown as Record<string, Record<string, boolean> | undefined>)[section]
+  return !!(block && block[key])
+}
 
 type Props = {
   config: ReconScannerConfig | null
@@ -46,10 +96,25 @@ type Props = {
 }
 
 export function AddonsStrip({ config, onPatch }: Props) {
-  const states = ADDONS.map((a) => ({
-    ...a,
-    on: !!(config && (config[a.section] as Record<string, boolean>)[a.key]),
-  }))
+  // Operator's catalog-level enabled map. Same surface Settings writes to.
+  // If the backend doesn't surface it (whitelist drops the key) we fall
+  // through to `defaultOn` per `getEnabledAddons`.
+  const [enabledMap, setEnabledMap] = useState<CrackerAddonEnabledMap | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    scannerConfig.get()
+      .then((c) => {
+        if (cancelled) return
+        const raw = (c as unknown as { cracker_addons?: CrackerAddonEnabledMap }).cracker_addons
+        setEnabledMap(raw && typeof raw === 'object' ? raw : null)
+      })
+      .catch(() => { /* leave null → defaults govern */ })
+    return () => { cancelled = true }
+  }, [])
+
+  const visible = getEnabledAddons(enabledMap)
+  const states = visible.map((a) => ({ entry: a, on: readFlag(a, config) }))
   const selected = states.filter((s) => s.on).length
 
   return (
@@ -59,31 +124,39 @@ export function AddonsStrip({ config, onPatch }: Props) {
           <h3>Addons</h3>
           <p className="muted">Click any tile to flip the matching <code>config.json</code> flag — workers consume it on next deploy.</p>
         </div>
-        <span className="cw-addons__count">{selected} / {ADDONS.length} ACTIVE</span>
+        <span className="cw-addons__count">{selected} / {visible.length} ACTIVE</span>
       </header>
       <div className="cw-addons__row">
-        {states.map(({ id, label, Glyph, domain, section, key, on }) => (
-          <button
-            key={id}
-            type="button"
-            className={`cw-addon${on ? ' cw-addon--on' : ''}`}
-            onClick={() => onPatch({ [section]: { [key]: !on } } as ReconScannerConfigPatch)}
-            title={config ? `${label} — ${section}.${key}` : `Loading config…  ${label}`}
-            aria-pressed={on}
-          >
-            <span className="cw-addon__logo" aria-hidden>
-              {domain ? (
-                <BrandLogo domain={domain} Fallback={Glyph} alt={label} size={42} />
-              ) : (
-                <Glyph width={42} height={42} />
-              )}
-            </span>
-            <span className="cw-addon__label">{label}</span>
-            <span className={`cw-addon__state cw-addon__state--${on ? 'on' : 'off'}`}>
-              {on ? 'ON' : 'OFF'}
-            </span>
-          </button>
-        ))}
+        {states.map(({ entry, on }) => {
+          const { domain, Glyph } = brandFor(entry)
+          const parsed = parseScannerKey(entry.scannerKey)
+          return (
+            <button
+              key={entry.id}
+              type="button"
+              className={`cw-addon${on ? ' cw-addon--on' : ''}`}
+              onClick={() => {
+                if (!parsed) return
+                const [section, key] = parsed
+                onPatch({ [section]: { [key]: !on } } as ReconScannerConfigPatch)
+              }}
+              title={config ? `${entry.label} — ${entry.scannerKey}` : `Loading config…  ${entry.label}`}
+              aria-pressed={on}
+            >
+              <span className="cw-addon__logo" aria-hidden>
+                {domain ? (
+                  <BrandLogo domain={domain} Fallback={Glyph} alt={entry.label} size={42} />
+                ) : (
+                  <Glyph width={42} height={42} />
+                )}
+              </span>
+              <span className="cw-addon__label">{entry.label}</span>
+              <span className={`cw-addon__state cw-addon__state--${on ? 'on' : 'off'}`}>
+                {on ? 'ON' : 'OFF'}
+              </span>
+            </button>
+          )
+        })}
       </div>
     </section>
   )

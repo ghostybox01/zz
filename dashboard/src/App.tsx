@@ -17,6 +17,7 @@ import { FleetBootstrap } from './components/FleetBootstrap'
 import { UpdateBanner } from './components/UpdateBanner'
 import { UpdateSettings } from './components/UpdateSettings'
 import { R2Settings } from './components/R2Settings'
+import { CrackerAddonsSettings } from './components/CrackerAddonsSettings'
 import { SSHKeySettings } from './components/SSHKeySettings'
 import { StartupCheck, shouldSkipStartupCheck } from './components/StartupCheck'
 import { ScannerConfigPanel } from './components/ScannerConfigPanel'
@@ -731,6 +732,13 @@ export default function App() {
                   <summary>Storage · Cloudflare R2</summary>
                   <div className="settings-acc__body">
                     <R2Settings />
+                  </div>
+                </details>
+
+                <details className="settings-acc" open>
+                  <summary>Cracker addons</summary>
+                  <div className="settings-acc__body">
+                    <CrackerAddonsSettings />
                   </div>
                 </details>
 

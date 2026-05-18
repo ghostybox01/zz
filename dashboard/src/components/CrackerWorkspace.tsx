@@ -1,10 +1,18 @@
+// Created by https://t.me/boxxboyy
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { Finding, Scan, ScanShard, TargetList, VpsNode } from '../types'
 import {
   scannerConfig,
+  crack,
+  type CrackSession,
   type ReconScannerConfig,
   type ReconScannerConfigPatch,
 } from '../lib/reconApi'
+import {
+  ADDON_CATALOG,
+  getEnabledAddons,
+  type CrackerAddonEnabledMap,
+} from '../data/addonCatalog'
 import { AddonsStrip } from './AddonsStrip'
 import { CrackerListTile } from './CrackerListTile'
 import { CrackerSessionPanel } from './CrackerSessionPanel'
@@ -32,32 +40,7 @@ type Props = {
   onToast: (t: Omit<CrackerToast, 'id'>) => void
 }
 
-// Addon catalogue for the New-Crack composer — mirrors AddonsStrip's tiles so
-// the operator sees the same names. Each entry maps to the scanner-config flag
-// that the workers actually consume. The composer toggles `selectedAddonIds`
-// locally; on submit we surface the full picked-set in the queued callout.
-const COMPOSER_ADDONS: ReadonlyArray<{ id: string; label: string }> = [
-  { id: 'ai',        label: 'AI Keys' },
-  { id: 'ses',       label: 'AWS SES' },
-  { id: 'aws-deep',  label: 'AWS Deep' },
-  { id: 'sendgrid',  label: 'SendGrid' },
-  { id: 'mailgun',   label: 'Mailgun' },
-  { id: 'brevo',     label: 'Brevo' },
-  { id: 'mandrill',  label: 'Mandrill' },
-  { id: 'stripe',    label: 'Stripe' },
-  { id: 'twilio',    label: 'Twilio' },
-  { id: 'github',    label: 'GitHub' },
-  { id: 'smtp',      label: 'Random SMTP' },
-]
-
-type QueuedCrack = {
-  id: string
-  sessionName: string
-  listId: string
-  listName: string
-  addonIds: ReadonlyArray<string>
-  queuedAt: string
-}
+const CRACK_POLL_MS = 5000
 
 export function CrackerWorkspace({
   scans,
@@ -75,19 +58,33 @@ export function CrackerWorkspace({
   const [config, setConfig] = useState<ReconScannerConfig | null>(null)
   const saveSeq = useRef(0)
 
-  // New-Crack composer state — local only; no backend POST exists for
-  // "start crack session", so submissions stay client-side and surface as
-  // a queued-list callout (Path B in the brief).
+  // Operator's catalog-level enabled map — read from /api/scanner-config
+  // under the `cracker_addons` key. Missing → fall through to defaultOn
+  // via `getEnabledAddons`.
+  const [enabledMap, setEnabledMap] = useState<CrackerAddonEnabledMap | null>(null)
+
+  // Crack session state — live list reconciled with backend on a 5s poll.
+  const [sessions, setSessions] = useState<CrackSession[]>([])
+  const [composerError, setComposerError] = useState<string | null>(null)
+
+  // New-Crack composer state
   const [composerOpen, setComposerOpen] = useState(false)
   const [sessionName, setSessionName] = useState('')
   const [pickedListId, setPickedListId] = useState<string>('')
   const [pickedAddons, setPickedAddons] = useState<ReadonlySet<string>>(() => new Set())
-  const [queued, setQueued] = useState<ReadonlyArray<QueuedCrack>>([])
+  const [pickedVpsIds, setPickedVpsIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [submitting, setSubmitting] = useState(false)
 
+  // ── Scanner config (existing live-flag patch path) ─────────────────
   useEffect(() => {
     let cancelled = false
     scannerConfig.get()
-      .then((c) => { if (!cancelled) setConfig(c) })
+      .then((c) => {
+        if (cancelled) return
+        setConfig(c)
+        const raw = (c as unknown as { cracker_addons?: CrackerAddonEnabledMap }).cracker_addons
+        setEnabledMap(raw && typeof raw === 'object' ? raw : null)
+      })
       .catch(() => { /* silent — AddonsStrip will simply disable */ })
     return () => { cancelled = true }
   }, [])
@@ -118,6 +115,25 @@ export function CrackerWorkspace({
       })
   }
 
+  // ── Crack session polling ──────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const r = await crack.list()
+        if (!cancelled && Array.isArray(r?.sessions)) {
+          setSessions(r.sessions)
+        }
+      } catch {
+        // Backend endpoint may not be live yet — keep the optimistic-UI
+        // entries we have and try again next tick.
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => { void refresh() }, CRACK_POLL_MS)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [])
+
   const activeScan = useMemo(() => {
     const pick = activeScanId ? scans.find((s) => s.id === activeScanId) : null
     if (pick) return pick
@@ -138,10 +154,19 @@ export function CrackerWorkspace({
     )
   }, [config])
 
+  // ── Catalog-driven composer addon list ─────────────────────────────
+  const composerAddons = useMemo(() => getEnabledAddons(enabledMap), [enabledMap])
+
+  // ── Fleet filter for the worker-chip block ─────────────────────────
+  const activeFleet = useMemo(() => fleet.filter((n) => n.status !== 'removed'), [fleet])
+  const deployableFleet = useMemo(
+    () => activeFleet.filter((n) => n.status === 'healthy' || n.status === 'degraded'),
+    [activeFleet],
+  )
+
   function openComposer() {
-    // Default the picked list to the first available so the operator can
-    // submit immediately when there's only one option.
     setPickedListId((prev) => prev || lists[0]?.id || '')
+    setComposerError(null)
     setComposerOpen(true)
   }
 
@@ -154,31 +179,70 @@ export function CrackerWorkspace({
     })
   }
 
-  function submitComposer(e: FormEvent) {
+  function toggleVps(id: string) {
+    setPickedVpsIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  async function submitComposer(e: FormEvent) {
     e.preventDefault()
+    setComposerError(null)
     const list = lists.find((l) => l.id === pickedListId)
     if (!list) {
       onToast({ kind: 'error', title: 'Pick a target list', message: 'Upload one on the Lists tab if none are available.' })
       return
     }
-    const trimmedName = sessionName.trim() || `crack-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`
-    const entry: QueuedCrack = {
-      id: `q-${Date.now().toString(36)}`,
-      sessionName: trimmedName,
-      listId: list.id,
-      listName: list.name,
-      addonIds: Array.from(pickedAddons),
-      queuedAt: new Date().toISOString(),
+    if (pickedVpsIds.size === 0) {
+      setComposerError('Pick at least one worker.')
+      return
     }
-    setQueued((prev) => [entry, ...prev])
-    // Reset the form for the next submission but leave the panel open so the
-    // operator can see the queued entry appear immediately.
-    setSessionName('')
-    setPickedAddons(new Set())
-  }
+    // Translate selected vpsIds → IPs/hosts that the backend can reach.
+    const pickedNodes = deployableFleet.filter((n) => pickedVpsIds.has(n.id))
+    const worker_ips = pickedNodes.map((n) => n.host).filter((h): h is string => !!h)
+    if (worker_ips.length === 0) {
+      setComposerError('Selected workers have no host/IP. Re-enrol them via Fleet.')
+      return
+    }
+    const trimmedName = sessionName.trim() || `crack-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`
 
-  function clearQueued(id: string) {
-    setQueued((prev) => prev.filter((q) => q.id !== id))
+    setSubmitting(true)
+    try {
+      const r = await crack.start({
+        session_name: trimmedName,
+        list_id: list.id,
+        addon_ids: Array.from(pickedAddons),
+        worker_ips,
+      })
+      if (!r.ok || !r.session) {
+        setComposerError(r.error || 'Backend rejected the request.')
+        return
+      }
+      // Optimistic prepend; the next poll cycle will reconcile.
+      setSessions((prev) => {
+        const existing = prev.find((s) => s.id === r.session.id)
+        if (existing) return prev
+        return [r.session, ...prev]
+      })
+      // Trigger a fresh fetch so liveness/pids land within the same tick.
+      crack.list()
+        .then((rr) => { if (Array.isArray(rr?.sessions)) setSessions(rr.sessions) })
+        .catch(() => { /* poller will catch up */ })
+      onToast({ kind: 'info', title: 'Crack queued', message: `${trimmedName} → ${pickedNodes.length} worker(s)` })
+      // Reset form, close panel.
+      setSessionName('')
+      setPickedAddons(new Set())
+      setPickedVpsIds(new Set())
+      setComposerOpen(false)
+    } catch (err) {
+      const e = err as Error
+      setComposerError(e.message || 'Submit failed')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   if (viewStats && activeScan) {
@@ -193,6 +257,8 @@ export function CrackerWorkspace({
       />
     )
   }
+
+  const canSubmit = pickedVpsIds.size > 0 && lists.length > 0 && !submitting
 
   return (
     <div className="cw">
@@ -235,9 +301,7 @@ export function CrackerWorkspace({
               <div className="card-block__head">
                 <h3 style={{ margin: 0 }}>Compose new crack</h3>
                 <p className="card-block__lede card-block__lede--short">
-                  Pick a target list, choose addons, name the session. There is no backend
-                  endpoint to spawn a crack run yet — submissions queue locally so the
-                  operator can see what would have been fired.
+                  Pick a target list, choose addons, name the session, and select the workers to split it across.
                 </p>
               </div>
               <form onSubmit={submitComposer} className="cw-composer">
@@ -273,7 +337,7 @@ export function CrackerWorkspace({
                 <fieldset className="cw-composer__field">
                   <legend className="cw-composer__label">Addons ({pickedAddons.size} selected)</legend>
                   <div className="cw-composer__addons">
-                    {COMPOSER_ADDONS.map((a) => {
+                    {composerAddons.map((a) => {
                       const on = pickedAddons.has(a.id)
                       return (
                         <button
@@ -291,44 +355,108 @@ export function CrackerWorkspace({
                         </button>
                       )
                     })}
+                    {composerAddons.length === 0 && (
+                      <span className="muted">No addons enabled. Toggle some on in Settings → Cracker addons.</span>
+                    )}
                   </div>
                 </fieldset>
+
+                <fieldset className="cw-composer__field">
+                  <legend className="cw-composer__label">
+                    Workers ({pickedVpsIds.size} of {deployableFleet.length} selected)
+                  </legend>
+                  <div className="tlist__chips">
+                    {deployableFleet.length === 0 ? (
+                      <span className="muted-callout">No healthy workers — add nodes via Fleet first.</span>
+                    ) : (
+                      deployableFleet.map((node) => {
+                        const on = pickedVpsIds.has(node.id)
+                        return (
+                          <button
+                            key={node.id}
+                            type="button"
+                            className={`tlist-chip${on ? ' tlist-chip--on' : ''}`}
+                            onClick={() => toggleVps(node.id)}
+                            title={`${node.region} · ${node.host}${node.source === 'discovered' ? ' · discovered' : ''}`}
+                          >
+                            <span className={`tlist-chip__dot tlist-chip__dot--${node.status}`} aria-hidden />
+                            {node.label}
+                            {node.source === 'discovered' && <span className="tlist-chip__disc">disc</span>}
+                          </button>
+                        )
+                      })
+                    )}
+                  </div>
+                </fieldset>
+
+                {composerError && (
+                  <p className="settings-hint" style={{ color: 'var(--danger)', marginTop: '.5rem' }}>{composerError}</p>
+                )}
+
                 <div className="settings-btn-row" style={{ marginTop: '0.75rem' }}>
-                  <button type="submit" className="btn-primary" disabled={lists.length === 0}>
-                    Queue crack
+                  <button type="submit" className="btn-primary" disabled={!canSubmit}>
+                    {submitting ? 'Queueing…' : 'Queue crack'}
                   </button>
                   <button
                     type="button"
                     className="btn-glass btn-glass--xs"
                     onClick={() => setComposerOpen(false)}
+                    disabled={submitting}
                   >
                     Close
                   </button>
                 </div>
               </form>
 
-              {queued.length > 0 && (
+              {sessions.length > 0 && (
                 <div className="muted-callout" style={{ marginTop: '0.75rem' }}>
-                  <strong>Crack session queued locally — no backend handler is wired yet.</strong>
-                  {' '}The selected addons + target list have been saved to the workspace. These entries clear on page refresh.
+                  <strong>Active crack sessions</strong>
                   <ul style={{ marginTop: '0.5rem', paddingLeft: '1.2rem' }}>
-                    {queued.map((q) => (
-                      <li key={q.id} style={{ marginBottom: '0.25rem' }}>
-                        <strong>{q.sessionName}</strong> — list <code>{q.listName}</code>
-                        {q.addonIds.length > 0
-                          ? <> · addons: <code>{q.addonIds.join(', ')}</code></>
-                          : <> · no addons</>}
-                        {' '}
-                        <button
-                          type="button"
-                          className="btn-glass btn-glass--xs"
-                          onClick={() => clearQueued(q.id)}
-                          style={{ marginLeft: '0.4rem' }}
-                        >
-                          Dismiss
-                        </button>
-                      </li>
-                    ))}
+                    {sessions.map((s) => {
+                      const addonLabels = s.addon_ids.map((id) =>
+                        ADDON_CATALOG.find((a) => a.id === id)?.label ?? id,
+                      )
+                      return (
+                        <li key={s.id} style={{ marginBottom: '0.25rem' }}>
+                          <strong>{s.name}</strong>
+                          {' · '}<code>{s.status}</code>
+                          {' · list '}<code>{s.list_name}</code>
+                          {' · '}<code>{s.worker_ips.length} worker(s)</code>
+                          {addonLabels.length > 0
+                            ? <> · addons: <code>{addonLabels.join(', ')}</code></>
+                            : null}
+                          {(s.status === 'running' || s.status === 'queued') && (
+                            <button
+                              type="button"
+                              className="btn-glass btn-glass--xs"
+                              onClick={() => {
+                                crack.stop(s.id)
+                                  .then(() => crack.list())
+                                  .then((rr) => { if (Array.isArray(rr?.sessions)) setSessions(rr.sessions) })
+                                  .catch(() => { /* swallow */ })
+                              }}
+                              style={{ marginLeft: '0.4rem' }}
+                            >
+                              Stop
+                            </button>
+                          )}
+                          {(s.status === 'completed' || s.status === 'stopped' || s.status === 'failed') && (
+                            <button
+                              type="button"
+                              className="btn-glass btn-glass--xs"
+                              onClick={() => {
+                                crack.remove(s.id)
+                                  .then(() => setSessions((prev) => prev.filter((x) => x.id !== s.id)))
+                                  .catch(() => { /* swallow */ })
+                              }}
+                              style={{ marginLeft: '0.4rem' }}
+                            >
+                              Dismiss
+                            </button>
+                          )}
+                        </li>
+                      )
+                    })}
                   </ul>
                 </div>
               )}

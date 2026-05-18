@@ -5119,7 +5119,7 @@
 .cw-addons__count { font-size:.62rem; font-weight:700; letter-spacing:.1em; color:var(--gold); white-space:nowrap; }
 .cw-addons__row { display:grid; grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr)); gap:.6rem; }
 @media (min-width: 1280px) { .cw-addons__row { grid-template-columns:repeat(11, minmax(0, 1fr)); } }
-.cw-addon { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-width:0; padding:.95rem .55rem 1rem; border-radius:13px; border:1px solid var(--hairline); background:rgba(0,0,0,.18); cursor:pointer; transition:border-color 140ms ease, transform 140ms ease, background 140ms ease, box-shadow 140ms ease; }
+.cw-addon { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-width:0; padding:.95rem 3.25rem 1rem .55rem; border-radius:13px; border:1px solid var(--hairline); background:rgba(0,0,0,.18); cursor:pointer; transition:border-color 140ms ease, transform 140ms ease, background 140ms ease, box-shadow 140ms ease; }
 .cw-addon:hover { border-color:rgba(255,255,255,.18); background:rgba(255,255,255,.03); transform:translateY(-1px); }
 .cw-addon:active { transform:translateY(0); }
 .cw-addon__logo { display:flex; align-items:center; justify-content:center; width:44px; height:44px; margin-bottom:.55rem; }

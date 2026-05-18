@@ -653,4 +653,36 @@ export const logs = {
   workersList: () => getJson<{ ips: string[] }>('/logs/workers'),
 }
 
+/* ── Crack sessions (Contract B — HMS Iris owns the backend) ─────────── */
+
+export type CrackSession = {
+  id: string
+  name: string
+  list_id: string
+  list_name: string
+  addon_ids: string[]
+  worker_ips: string[]
+  created_at: string
+  status: 'queued' | 'running' | 'completed' | 'stopped' | 'failed'
+  remote_pids?: Record<string, number>
+  finished_at?: string
+  last_error?: string
+}
+
+export const crack = {
+  start: (body: { session_name: string; list_id: string; addon_ids: string[]; worker_ips: string[] }) =>
+    postJson<{ ok: boolean; session: CrackSession; error?: string }>('/crack/start', body),
+  list: () => getJson<{ sessions: CrackSession[] }>('/crack/sessions'),
+  stop: (id: string) => postJson<{ ok: boolean }>(`/crack/${encodeURIComponent(id)}/stop`),
+  remove: async (id: string): Promise<{ ok: boolean; error?: string }> => {
+    const res = await fetch(`${BASE}/crack/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!res.ok) {
+      let body: { error?: string } = {}
+      try { body = (await res.json()) as { error?: string } } catch { /* ignore */ }
+      return { ok: false, error: body.error ?? `HTTP ${res.status}` }
+    }
+    return (await res.json()) as { ok: boolean }
+  },
+}
+
 export { ReconApiError }

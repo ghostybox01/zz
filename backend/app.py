@@ -875,6 +875,12 @@ def _scanner_config_view(cfg):
     for section, keys in SCANNER_CONFIG_SCHEMA.items():
         block = cfg.get(section) or {}
         out[section] = {k: bool(block.get(k, False)) for k in keys}
+    # Surface the Cracker catalog's per-addon toggle map. Stored as a flat
+    # {addon_id: bool} dict; the dashboard's Settings tab governs it and the
+    # Composer reads it to filter visible chips. Outside SCANNER_CONFIG_SCHEMA
+    # because it's a dashboard-side preference, not a main.go-consumed flag.
+    cra = cfg.get('cracker_addons')
+    out['cracker_addons'] = cra if isinstance(cra, dict) else {}
     return out
 
 
@@ -900,6 +906,13 @@ def api_scanner_config():
             for k in keys:
                 if k in incoming:
                     current[k] = bool(incoming[k])
+        # Cracker addon catalog visibility map. Lives at the top level so it
+        # doesn't collide with scanner-section keys; values are coerced to
+        # bool so a misbehaving client can't smuggle objects into the store.
+        if isinstance(body.get('cracker_addons'), dict):
+            cfg['cracker_addons'] = {
+                str(k): bool(v) for k, v in body['cracker_addons'].items()
+            }
         try:
             with open(SCANNER_CONFIG_PATH, 'w') as f:
                 json.dump(cfg, f, indent=2)
@@ -2933,6 +2946,550 @@ def api_warc_hosts():
     creds = _load_fleet_creds()
     warc_ips = [ip for ip in roster if (creds.get(ip) or {}).get('role') == 'warc']
     return jsonify({'hosts': ['controller', *warc_ips]})
+
+
+# ==================== CRACK SESSIONS (/api/crack/*) ====================
+#
+# Multi-session dispatch console. Operator picks a target list, a set of
+# addon toggles, and N workers from the fleet; this namespace slices the
+# list N ways, ships a per-session config.json snapshot to each worker, and
+# spawns the scanner against that slice. Sessions persist to
+# crack_sessions.json keyed by session_id so multiple cracks can coexist on
+# different workers — distinct from the single-slot warc_state.json shape.
+#
+# File ownership: this block is self-contained. The /api/warc/* and
+# /api/vps/* handlers above are untouched; the only outside surface is
+# /api/scanner-config, which has been widened to allow a top-level
+# `cracker_addons` map (the Cracker catalog's visibility prefs).
+
+CRACK_SESSIONS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'crack_sessions.json'
+)
+
+_crack_lock = threading.Lock()
+_crack_sessions: dict = {}
+_crack_sessions_mtime: float = 0.0
+
+# Addon-id → scanner config dotted path. This is the wire format negotiated
+# with the dashboard's addonCatalog.ts (Contract A in the battle plan); the
+# values land verbatim as nested booleans in the per-session config.json
+# snapshot before it's shipped to the worker. Unknown ids are skipped
+# silently — a stale dashboard build asking for a removed addon must not
+# fail the whole dispatch.
+_CRACK_ADDON_SCANNER_KEY = {
+    'ai':            'api_validation.ai_all',
+    'ses':           'aws_checks.ses',
+    'aws-deep':      'aws_checks.deep',
+    'aws-access':    'api_validation.aws_access',
+    'sendgrid':      'api_validation.sendgrid',
+    'mailgun':       'api_validation.mailgun',
+    'brevo':         'api_validation.brevo',
+    'mandrill':      'api_validation.mandrill',
+    'mailersend':    'api_validation.mailersend',
+    'postmark':      'api_validation.postmark',
+    'sparkpost':     'api_validation.sparkpost',
+    'mailtrap':      'api_validation.mailtrap',
+    'mailjet':       'api_validation.mailjet',
+    'smtp':          'api_validation.smtp',
+    'stripe':        'api_validation.stripe',
+    'tencent-ses':   'api_validation.tencent',
+    'socketlabs':    'api_validation.socketlabs',
+    'zeptomail':     'api_validation.zeptomail',
+    'elasticemail':  'api_validation.elasticemail',
+    'twilio':        'api_validation.twilio',
+    'nexmo':         'api_validation.nexmo',
+    'telnyx':        'api_validation.telnyx',
+    'plivo':         'api_validation.plivo',
+    'messagebird':   'api_validation.messagebird',
+    'github':        'api_validation.github',
+    'heroku':        'api_validation.heroku',
+    'datadog':       'api_validation.datadog',
+}
+
+
+def _load_crack_sessions() -> dict:
+    """Hydrate the in-memory store from disk. Returns {} on missing file or
+    a malformed payload — never raises, so a corrupted sidecar can't take
+    the whole namespace offline."""
+    if not os.path.exists(CRACK_SESSIONS_FILE):
+        return {}
+    try:
+        with open(CRACK_SESSIONS_FILE, 'r') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f'[crack] state load failed: {e}')
+        return {}
+
+
+def _save_crack_sessions(sessions: dict) -> None:
+    """Persist the session store atomically and chmod 600. Mirrors
+    _save_warc_state — sessions can carry worker IPs and PIDs that we don't
+    want world-readable."""
+    try:
+        tmp = CRACK_SESSIONS_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(sessions, f, indent=2)
+        os.replace(tmp, CRACK_SESSIONS_FILE)
+        try: os.chmod(CRACK_SESSIONS_FILE, 0o600)
+        except Exception: pass
+    except Exception as e:
+        print(f'[crack] state persist failed: {e}')
+
+
+def _reload_crack_state_if_changed() -> None:
+    """Re-hydrate _crack_sessions when the sidecar's mtime has advanced.
+    Mirrors _reload_warc_state_if_changed exactly: gunicorn runs multiple
+    workers with separate memory, so without this a session minted by
+    worker A is invisible to worker B's GET handler until restart."""
+    global _crack_sessions_mtime, _crack_sessions
+    try:
+        if not os.path.exists(CRACK_SESSIONS_FILE):
+            return
+        mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
+        if mtime <= _crack_sessions_mtime:
+            return
+        _crack_sessions = _load_crack_sessions()
+        _crack_sessions_mtime = mtime
+    except Exception as e:
+        print(f'[crack] state reload check failed: {e}')
+
+
+# Warm the in-memory store at import time, mirroring _load_warc_state's
+# bootstrap. Survives a gunicorn restart so the cockpit still shows
+# in-flight cracks after `systemctl restart raven-dashboard`.
+_crack_sessions = _load_crack_sessions()
+try:
+    _crack_sessions_mtime = (
+        os.path.getmtime(CRACK_SESSIONS_FILE)
+        if os.path.exists(CRACK_SESSIONS_FILE) else 0.0
+    )
+except Exception:
+    _crack_sessions_mtime = 0.0
+
+
+def _build_crack_config_snapshot(addon_ids: list) -> dict:
+    """Build a per-session config.json by starting from the controller's
+    current config.json and forcing the boolean at each addon's scannerKey
+    path to True. Does NOT mutate the on-disk config — the snapshot is
+    returned as a fresh dict for shipping to the worker.
+
+    The controller's existing toggle state is preserved as the floor: any
+    flag that was already True stays True. The session can therefore enable
+    its declared addons on top of whatever the operator considers the
+    baseline scan, without forcing them to turn the world on globally."""
+    try:
+        base = _load_scanner_config()
+    except Exception:
+        base = {}
+    if not isinstance(base, dict):
+        base = {}
+    # Deep-copy the relevant slice so writes don't leak back into the
+    # controller's config. json.loads(json.dumps(...)) is the cheapest
+    # safe deep copy for plain JSON.
+    try:
+        snapshot = json.loads(json.dumps(base))
+    except Exception:
+        snapshot = {}
+    # cracker_addons is a dashboard-side preference, not a scanner flag —
+    # strip it from the per-session config so the worker never sees it.
+    snapshot.pop('cracker_addons', None)
+    for aid in addon_ids or []:
+        if not isinstance(aid, str):
+            continue
+        dotted = _CRACK_ADDON_SCANNER_KEY.get(aid)
+        if not dotted:
+            continue  # unknown addon id → skip silently
+        parts = dotted.split('.')
+        if not parts:
+            continue
+        cur = snapshot
+        for p in parts[:-1]:
+            nxt = cur.get(p)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                cur[p] = nxt
+            cur = nxt
+        cur[parts[-1]] = True
+    return snapshot
+
+
+def _slice_targets(lines: list, n: int) -> list:
+    """Split `lines` into `n` roughly-equal slices. Mirrors deploy_full's
+    chunker (per_server = total // n with the tail going to the last
+    worker) so a crack dispatched against the same list shapes identically
+    to a regular /api/vps/deploy."""
+    n = max(1, int(n))
+    total = len(lines)
+    if total == 0:
+        return [[] for _ in range(n)]
+    per = total // n
+    out = []
+    for i in range(n):
+        start = i * per
+        end = start + per if i < n - 1 else total
+        out.append(lines[start:end])
+    return out
+
+
+def _extract_remote_pid(out: str) -> 'int | None':
+    """Parse `nohup ... & echo $!` output to recover the worker-side PID.
+    Mirrors the WARC remote-spawn parser: nohup may emit a `[1] 12345` job
+    tag before the echoed PID, so we walk the lines in reverse looking
+    for the last all-digit token."""
+    if not out:
+        return None
+    for ln in out.splitlines():
+        for tok in reversed(ln.strip().split()):
+            if tok.isdigit():
+                try:
+                    return int(tok)
+                except ValueError:
+                    continue
+    return None
+
+
+def _resolve_crack_target_path(mgr) -> 'str | None':
+    """Resolve the controller's active target list bytes — the file the
+    dashboard last uploaded via /api/vps/upload-targets or selected via
+    /api/vps/select-file. Mirrors /api/vps/deploy's resolution path so the
+    operator's Composer pick and a follow-up `Deploy` button see the same
+    bytes. Returns the path or None if the file is missing on disk."""
+    target_path = None
+    if mgr is not None:
+        try:
+            target_path = mgr.config.get('target_file')
+        except Exception:
+            target_path = None
+    if not target_path:
+        target_path = 'targets.txt'
+    return target_path if os.path.exists(target_path) else None
+
+
+def _crack_session_view(sess: dict) -> dict:
+    """Project the on-disk session into the wire shape the dashboard
+    expects (Contract B). Keeps the JSON schema stable even if internal
+    bookkeeping grows extra fields later."""
+    return {
+        'id':            str(sess.get('id') or ''),
+        'name':          str(sess.get('name') or ''),
+        'list_id':       str(sess.get('list_id') or ''),
+        'list_name':     str(sess.get('list_name') or ''),
+        'addon_ids':     list(sess.get('addon_ids') or []),
+        'worker_ips':    list(sess.get('worker_ips') or []),
+        'created_at':    str(sess.get('created_at') or ''),
+        'status':        str(sess.get('status') or 'queued'),
+        'remote_pids':   dict(sess.get('remote_pids') or {}),
+        'finished_at':   sess.get('finished_at'),
+        'last_error':    sess.get('last_error'),
+    }
+
+
+@app.route('/api/crack/start', methods=['POST'])
+def api_crack_start():
+    """Mint a crack session: validate input, resolve target bytes, slice
+    across workers, ship per-session config.json + targets.txt, spawn the
+    scanner. Persists the session to crack_sessions.json and returns the
+    full session record."""
+    data = request.get_json(force=True, silent=True) or {}
+    session_name = str(data.get('session_name') or '').strip()
+    list_id = str(data.get('list_id') or '').strip()
+    list_name = str(data.get('list_name') or '').strip() or list_id
+    addon_ids = data.get('addon_ids') or []
+    worker_ips = data.get('worker_ips') or []
+
+    # ── Validate input ─────────────────────────────────────────────────
+    if not session_name:
+        return jsonify({'ok': False, 'error': 'session_name is required'}), 400
+    if not list_id:
+        return jsonify({'ok': False, 'error': 'list_id is required'}), 400
+    if not isinstance(worker_ips, list) or not worker_ips:
+        return jsonify({'ok': False, 'error': 'worker_ips must be a non-empty list'}), 400
+    if not isinstance(addon_ids, list):
+        return jsonify({'ok': False, 'error': 'addon_ids must be a list'}), 400
+    # Coerce + dedupe IPs while preserving order so the slicing assignment
+    # is stable across retries.
+    seen = set()
+    norm_ips: list = []
+    for ip in worker_ips:
+        s = str(ip).strip()
+        if s and s not in seen:
+            seen.add(s)
+            norm_ips.append(s)
+    if not norm_ips:
+        return jsonify({'ok': False, 'error': 'worker_ips must contain at least one non-empty entry'}), 400
+
+    mgr = get_ssh_manager()
+    if mgr is None:
+        return jsonify({'ok': False, 'error': 'SSH manager unavailable'}), 503
+
+    # ── Resolve target list bytes via the same path /api/vps/deploy uses ─
+    target_path = _resolve_crack_target_path(mgr)
+    if not target_path:
+        return jsonify({'ok': False, 'error': 'target list not found'}), 404
+    try:
+        with open(target_path, 'r', errors='ignore') as f:
+            all_targets = [ln.strip() for ln in f if ln.strip()]
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'cannot read target list: {e}'}), 500
+    if not all_targets:
+        return jsonify({'ok': False, 'error': 'target list is empty'}), 400
+
+    # ── Mint session id + per-session config snapshot ──────────────────
+    session_id = uuid.uuid4().hex[:12]
+    config_snapshot = _build_crack_config_snapshot([str(a) for a in addon_ids])
+    work_dir = mgr.config.get('work_dir', '/root/python_job') if hasattr(mgr, 'config') else '/root/python_job'
+    remote_dir = f'{work_dir}/crack_{session_id}'
+
+    # ── Slice the target list and dispatch per worker ──────────────────
+    slices = _slice_targets(all_targets, len(norm_ips))
+    remote_pids: dict = {}
+    dispatch_errors: list = []
+    config_bytes = json.dumps(config_snapshot, indent=2).encode('utf-8')
+
+    import tempfile as _tempfile
+    for idx, ip in enumerate(norm_ips):
+        slice_lines = slices[idx] if idx < len(slices) else []
+        try:
+            # Ensure remote work dir exists and is empty. The session id is
+            # uuid4-derived so we can't collide with a prior crack here, but
+            # belt-and-braces removal protects against a half-finished
+            # previous attempt on the same operator workflow.
+            mgr.ssh_exec(ip, f'mkdir -p {remote_dir}', 5)
+
+            # Write slice + config to local tempfiles, then SFTP. mkstemp +
+            # explicit close before scp_upload sidesteps paramiko's habit
+            # of reading 0 bytes when the file handle's still open.
+            tf_targets = _tempfile.NamedTemporaryFile(
+                mode='w', suffix=f'_{session_id}_targets.txt', delete=False
+            )
+            try:
+                tf_targets.write('\n'.join(slice_lines))
+                if slice_lines:
+                    tf_targets.write('\n')
+            finally:
+                tf_targets.close()
+
+            tf_config = _tempfile.NamedTemporaryFile(
+                mode='wb', suffix=f'_{session_id}_config.json', delete=False
+            )
+            try:
+                tf_config.write(config_bytes)
+            finally:
+                tf_config.close()
+
+            try:
+                if not mgr.scp_upload(ip, tf_targets.name, f'{remote_dir}/targets.txt'):
+                    raise Exception('scp_upload(targets.txt) returned False')
+                if not mgr.scp_upload(ip, tf_config.name, f'{remote_dir}/config.json'):
+                    raise Exception('scp_upload(config.json) returned False')
+            finally:
+                try: os.unlink(tf_targets.name)
+                except Exception: pass
+                try: os.unlink(tf_config.name)
+                except Exception: pass
+
+            # Re-use the already-deployed reconx-scanner binary from the
+            # worker's main work_dir rather than re-uploading it per session.
+            # A symlink keeps the session dir self-contained for the scanner's
+            # relative ./reconx-scanner invocation while preserving disk space.
+            mgr.ssh_exec(
+                ip,
+                f'ln -sf {work_dir}/reconx-scanner {remote_dir}/reconx-scanner',
+                5,
+            )
+
+            # nohup + background + echo $! → recover worker-side PID, same
+            # shape as the WARC remote spawn. cwd is the session dir so the
+            # scanner reads our per-session config.json and not the
+            # controller's global one.
+            remote_cmd = (
+                f"cd {remote_dir} && "
+                f"nohup ./reconx-scanner targets.txt "
+                f"> crack.log 2>&1 & echo $!"
+            )
+            out = mgr.ssh_exec(ip, remote_cmd, 15)
+            pid = _extract_remote_pid(out or '')
+            if pid is None:
+                raise Exception(f'remote spawn returned no pid; ssh output: {out!r}')
+            remote_pids[ip] = pid
+        except Exception as e:
+            dispatch_errors.append(f'{ip}: {e}')
+
+    # If every worker failed, surface as failed status with a 502 — the
+    # operator needs to fix the fleet before retrying. Partial success
+    # (some workers up, some down) is recorded as `running` with
+    # last_error set so the cockpit can flag the partial.
+    status = 'running' if remote_pids else 'failed'
+    last_error = '; '.join(dispatch_errors) if dispatch_errors else None
+
+    session = {
+        'id':           session_id,
+        'name':         session_name,
+        'list_id':      list_id,
+        'list_name':    list_name,
+        'addon_ids':    [str(a) for a in addon_ids if isinstance(a, (str, int))],
+        'worker_ips':   norm_ips,
+        'created_at':   datetime.now().isoformat(),
+        'status':       status,
+        'remote_pids':  remote_pids,
+        'finished_at':  None,
+        'last_error':   last_error,
+        'remote_dir':   remote_dir,  # bookkeeping; not in wire view
+    }
+
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        _crack_sessions[session_id] = session
+        _save_crack_sessions(_crack_sessions)
+    try:
+        global _crack_sessions_mtime
+        _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
+    except Exception:
+        pass
+
+    if not remote_pids:
+        return jsonify({
+            'ok': False,
+            'error': f'all workers failed to spawn: {last_error}',
+            'session': _crack_session_view(session),
+        }), 502
+
+    return jsonify({'ok': True, 'session': _crack_session_view(session)})
+
+
+@app.route('/api/crack/sessions', methods=['GET'])
+def api_crack_sessions():
+    """List all sessions with liveness-verified status. Active sessions get
+    a per-worker `kill -0 $pid` probe; if every worker is dead the session
+    transitions to completed and the change is persisted."""
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sessions = {sid: dict(s) for sid, s in _crack_sessions.items()}
+
+    mgr = get_ssh_manager()
+    mutated = False
+
+    for sid, sess in sessions.items():
+        if sess.get('status') not in ('running', 'queued'):
+            continue
+        pids = sess.get('remote_pids') or {}
+        if not pids or mgr is None:
+            continue
+        alive_count = 0
+        for ip, pid in pids.items():
+            try:
+                out = mgr.ssh_exec(
+                    ip,
+                    f'kill -0 {int(pid)} 2>/dev/null && echo alive || echo dead',
+                    5,
+                )
+                if (out or '').strip().endswith('alive'):
+                    alive_count += 1
+            except Exception:
+                # Network blip — count as alive so we don't flap the
+                # session to completed on a transient SSH failure.
+                alive_count += 1
+        if alive_count == 0:
+            sess['status'] = 'completed'
+            sess['finished_at'] = datetime.now().isoformat()
+            mutated = True
+
+    if mutated:
+        with _crack_lock:
+            for sid, sess in sessions.items():
+                if sid in _crack_sessions:
+                    _crack_sessions[sid].update({
+                        'status': sess['status'],
+                        'finished_at': sess.get('finished_at'),
+                    })
+            _save_crack_sessions(_crack_sessions)
+        try:
+            global _crack_sessions_mtime
+            _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
+        except Exception:
+            pass
+
+    out = [_crack_session_view(s) for s in sessions.values()]
+    # Newest first — the cockpit rail reads top-to-bottom.
+    out.sort(key=lambda s: s.get('created_at') or '', reverse=True)
+    return jsonify({'sessions': out})
+
+
+@app.route('/api/crack/<sid>/stop', methods=['POST'])
+def api_crack_stop(sid):
+    """SIGTERM + SIGKILL escalation on each worker pid; status flips to
+    stopped. Mirrors the WARC stop shape but iterates per-worker since
+    crack sessions are inherently multi-host."""
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sess = _crack_sessions.get(sid)
+        if sess is None:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        # Local copy so the kill loop doesn't hold the lock during SSH.
+        worker_pids = dict(sess.get('remote_pids') or {})
+
+    mgr = get_ssh_manager()
+    if mgr is not None:
+        for ip, pid in worker_pids.items():
+            try:
+                mgr.ssh_exec(
+                    ip,
+                    f'kill -TERM {int(pid)} 2>/dev/null; '
+                    f'sleep 1; '
+                    f'kill -KILL {int(pid)} 2>/dev/null; true',
+                    8,
+                )
+            except Exception as e:
+                print(f'[crack] stop failed for {ip} pid {pid}: {e}')
+
+    with _crack_lock:
+        if sid in _crack_sessions:
+            _crack_sessions[sid]['status'] = 'stopped'
+            _crack_sessions[sid]['finished_at'] = datetime.now().isoformat()
+            _save_crack_sessions(_crack_sessions)
+    try:
+        global _crack_sessions_mtime
+        _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
+    except Exception:
+        pass
+    return jsonify({'ok': True})
+
+
+@app.route('/api/crack/<sid>', methods=['DELETE'])
+def api_crack_delete(sid):
+    """Drop the session from the persistent store. Best-effort rm -rf of
+    the worker-side session dir so we don't accumulate per-session
+    targets/config/log artefacts across many cracks."""
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sess = _crack_sessions.get(sid)
+        if sess is None:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        worker_ips = list(sess.get('worker_ips') or [])
+        remote_dir = sess.get('remote_dir') or ''
+        del _crack_sessions[sid]
+        _save_crack_sessions(_crack_sessions)
+    try:
+        global _crack_sessions_mtime
+        _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
+    except Exception:
+        pass
+
+    mgr = get_ssh_manager()
+    if mgr is not None and remote_dir and remote_dir.startswith('/root/python_job/crack_'):
+        # Path guard above is defensive — we only ever shell out rm -rf on
+        # a path we minted ourselves. A malformed sidecar can't trick us
+        # into rm-rf'ing /root/python_job or worse.
+        for ip in worker_ips:
+            try:
+                mgr.ssh_exec(ip, f'rm -rf {remote_dir}', 5)
+            except Exception as e:
+                print(f'[crack] cleanup failed for {ip}: {e}')
+
+    return jsonify({'ok': True})
+
+# ==================== END CRACK SESSIONS ====================
 
 
 # ==================== SSH BULK CREDS ====================
