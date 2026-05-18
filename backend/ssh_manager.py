@@ -155,6 +155,7 @@ class SSHManager:
             'state': 'unknown',
             'last_check': None,
             'last_error': None,
+            'usage': None,
         }
         self._r2_health_lock = threading.Lock()
         self._r2_health_probe: Optional[Callable[[], dict]] = None
@@ -1602,11 +1603,17 @@ echo "PROBE_END"
         if state not in ('connected', 'misconfigured', 'unreachable', 'unknown'):
             state = 'unknown'
         last_error = result.get('last_error') if isinstance(result, dict) else None
+        # `usage` is the bucket inventory dict produced by app.py's
+        # _r2_usage_breakdown — None when the bucket is unreachable. The
+        # dashboard reads it through get_r2_health() to render the usage
+        # bar without paying for a per-request list_objects round-trip.
+        usage = result.get('usage') if isinstance(result, dict) else None
         with self._r2_health_lock:
             self._r2_health_cache = {
                 'state': state,
                 'last_check': datetime.now().isoformat(),
                 'last_error': last_error,
+                'usage': usage,
             }
 
     def get_r2_health(self) -> dict:
