@@ -132,6 +132,11 @@ class SSHManager:
         # by fetch_server_status to replace the bare "ssh probe returned no
         # data" string on the card with the real cause.
         self._last_ssh_error: Dict[str, str] = {}
+        # IPs whose sshd refuses `exec` channel requests — only `shell`
+        # channels work. Once a host trips Channel-closed-on-exec we mark
+        # it here so future probes skip exec_command entirely and run via
+        # invoke_shell. Saves a wasted round-trip per cycle.
+        self._exec_blocked_ips: set = set()
         self._sticky_threshold = 3
 
         # ── WARC status cache (Effect 3) ─────────────────────────────
@@ -630,10 +635,91 @@ class SSHManager:
             try: ssh.close()
             except Exception: pass
 
+    def _ssh_exec_via_shell(self, ssh: paramiko.SSHClient, cmd: str,
+                            timeout: int) -> str:
+        """Run `cmd` inside an interactive shell channel. Used when the
+        server refuses `exec` channel requests (some hardened sshd
+        configs, ForceCommand, restricted-environment chroots). We wrap
+        the command in sentinel markers so the output we read back can
+        be reliably trimmed of MOTDs, prompt strings, and ANSI escapes."""
+        import time, re
+        chan = ssh.get_transport().open_session()
+        chan.get_pty('xterm-256color', 200, 50)
+        chan.invoke_shell()
+        chan.settimeout(timeout)
+        # Drain whatever the shell emits on attach (motd, prompt, etc).
+        time.sleep(0.4)
+        try:
+            while chan.recv_ready():
+                chan.recv(65536)
+        except Exception:
+            pass
+        # Sentinel-wrapped command. `unset PROMPT_COMMAND PS1` calms down
+        # interactive shells that would otherwise smear escape codes into
+        # the output. The trailing `exit` ensures the channel closes on
+        # its own so we have a clean read termination.
+        sentinel = '___RCNX_OUT_END___'
+        wrapped = (
+            f"unset PROMPT_COMMAND PS1 2>/dev/null; "
+            f"{cmd}; echo '{sentinel}'\n"
+        )
+        chan.send(wrapped)
+        # Read until we see the sentinel or the timeout fires.
+        deadline = time.monotonic() + timeout
+        buf = ''
+        while time.monotonic() < deadline:
+            if chan.recv_ready():
+                chunk = chan.recv(65536).decode('utf-8', errors='replace')
+                buf += chunk
+                if sentinel in buf:
+                    break
+            elif chan.closed:
+                break
+            else:
+                time.sleep(0.08)
+        try: chan.send('exit\n')
+        except Exception: pass
+        try: chan.close()
+        except Exception: pass
+        # Strip everything before the sentinel marker on its own line.
+        # The exec'd command's output sits between the echoed command and
+        # the sentinel — we keep that slice and drop the rest.
+        ansi = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]|\x1B\][^\x07]*\x07')
+        cleaned = ansi.sub('', buf)
+        # Find the sentinel and snip up to it; before that, drop the echo
+        # of the wrapped command itself by removing the first line that
+        # contains '{sentinel}\''.
+        idx = cleaned.find(sentinel)
+        if idx < 0:
+            return cleaned.strip()
+        head = cleaned[:idx]
+        # Discard the echoed command line (the one containing the
+        # literal `echo '___RCNX_OUT_END___'` we just sent).
+        lines = head.splitlines()
+        out_lines: list = []
+        seen_cmd = False
+        for ln in lines:
+            if not seen_cmd and sentinel in ln:
+                seen_cmd = True; continue
+            out_lines.append(ln)
+        return '\n'.join(out_lines).strip()
+
     def ssh_exec(self, ip: str, cmd: str, timeout: int = None) -> str:
         timeout = timeout or self.config.get("ssh_timeout", 10)
         try:
             ssh = self._get_pooled_ssh(ip, timeout)
+            # Fast-path for hosts known to refuse exec channels.
+            if ip in self._exec_blocked_ips:
+                try:
+                    out = self._ssh_exec_via_shell(ssh, cmd, timeout)
+                    self._last_ssh_error.pop(ip, None)
+                    return out
+                except (paramiko.SSHException, EOFError, OSError):
+                    self._evict_pooled_ssh(ip)
+                    ssh = self._get_pooled_ssh(ip, timeout)
+                    out = self._ssh_exec_via_shell(ssh, cmd, timeout)
+                    self._last_ssh_error.pop(ip, None)
+                    return out
             try:
                 stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
                 out = stdout.read().decode('utf-8', errors='replace').strip()
@@ -642,7 +728,21 @@ class SSHManager:
                 # after the operator fixed the creds.
                 self._last_ssh_error.pop(ip, None)
                 return out
-            except (paramiko.SSHException, EOFError, OSError):
+            except (paramiko.SSHException, EOFError, OSError) as e:
+                msg = str(e).lower()
+                # If the server explicitly refuses exec — common on hardened
+                # sshd configs that only allow interactive shells — flip
+                # this IP to invoke_shell mode permanently and retry.
+                if 'channel closed' in msg or 'administratively prohibited' in msg:
+                    self._evict_pooled_ssh(ip)
+                    ssh = self._get_pooled_ssh(ip, timeout)
+                    try:
+                        out = self._ssh_exec_via_shell(ssh, cmd, timeout)
+                        self._exec_blocked_ips.add(ip)
+                        self._last_ssh_error.pop(ip, None)
+                        return out
+                    except Exception:
+                        pass  # fall through to the generic retry below
                 # Connection died mid-exec — evict and retry once with a fresh one.
                 self._evict_pooled_ssh(ip)
                 ssh = self._get_pooled_ssh(ip, timeout)
