@@ -1858,8 +1858,14 @@ def api_warc_status():
             r2_key_done = None
             r2_err_done = None
             try:
+                # Compute sha first so the harvest-finished auto-export
+                # also lands at the content-addressed key. Without this,
+                # a deterministic harvest re-run would create a second
+                # object that the dedup logic later tries to skip but
+                # can't because the keys don't collide.
+                _auto_sha = _sha256_remote(mgr, ip, output_path) if mgr else None
                 r2_key_done, r2_err_done = _warc_remote_export_to_r2(
-                    ip, output_path, state.get('run_id')
+                    ip, output_path, state.get('run_id'), content_sha=_auto_sha,
                 )
             except Exception as e:
                 r2_err_done = f'remote R2 export failed: {e}'
@@ -1918,21 +1924,35 @@ def api_warc_status():
 
 
 def _warc_remote_export_to_r2(ip: str, remote_output_path: str,
-                              run_id: 'str | None') -> 'tuple[str | None, str | None]':
+                              run_id: 'str | None',
+                              content_sha: 'str | None' = None) -> 'tuple[str | None, str | None]':
     """Push the worker's live_domains.txt directly to R2 via a presigned
     PUT URL — the file never round-trips through the controller. Returns
-    (r2_key, error_string). Either may be None."""
+    (r2_key, error_string). Either may be None.
+
+    When ``content_sha`` is provided we use a content-addressed key so a
+    repeat upload of byte-identical content lands at the same place. The
+    presigned URL is bound to that exact key, so a presigning round-trip
+    can't accidentally write to a different one."""
     if not remote_output_path:
         return None, 'no remote output path in state'
     client, bucket, state, err = _get_r2_client()
     if not client or not bucket:
         return None, err or f'R2 unavailable ({state})'
-    ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
-    r2_key = f'warc/live_domains_{ts}_{run_id or "manual"}.txt'
+    r2_key = _content_addressed_key(content_sha)
+    if not r2_key:
+        ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
+        r2_key = f'warc/live_domains_{ts}_{run_id or "manual"}.txt'
+    presign_params = {'Bucket': bucket, 'Key': r2_key, 'ContentType': 'text/plain'}
+    if content_sha:
+        # Forwarding the metadata header at presign time means the
+        # worker's curl PUT carries the sha into the stored object's
+        # metadata — no extra round-trip from the controller.
+        presign_params['Metadata'] = {'sha256': content_sha}
     try:
         url = client.generate_presigned_url(
             'put_object',
-            Params={'Bucket': bucket, 'Key': r2_key, 'ContentType': 'text/plain'},
+            Params=presign_params,
             ExpiresIn=3600,
         )
     except Exception as e:
@@ -1947,15 +1967,43 @@ def _warc_remote_export_to_r2(ip: str, remote_output_path: str,
     safe_url = url.replace("'", "'\\''")
     # `--fail` (-f) flips curl's exit code on HTTP 4xx/5xx; `--silent --show-error`
     # keeps the log readable. The trailing `&& echo OK` makes the success path
-    # unambiguous over an SSH stdout that strips return codes.
+    # unambiguous over an SSH stdout that strips return codes. When we
+    # presigned with Metadata={'sha256': ...} R2 verifies the matching
+    # `x-amz-meta-sha256` header against the signature, so curl must send
+    # it back unchanged.
+    meta_header = f" -H 'x-amz-meta-sha256: {content_sha}'" if content_sha else ''
     cmd = (
         f"curl -fsS -X PUT --upload-file {remote_output_path} "
-        f"-H 'Content-Type: text/plain' '{safe_url}' && echo OK"
+        f"-H 'Content-Type: text/plain'{meta_header} '{safe_url}' && echo OK"
     )
     out = mgr.ssh_exec(ip, cmd, 120)
     if (out or '').strip().endswith('OK'):
         return r2_key, None
     return None, f'remote curl upload failed: {out!r}'
+
+
+def _content_addressed_key(sha256: 'str | None') -> 'str | None':
+    """Canonical R2 key for a given content hash. Pinning the hash into the
+    key path turns the bucket itself into the dedup index — same content
+    always lands at the same key, no matter what client wrote it. The
+    16-char prefix gives a 64-bit keyspace, more than enough at fleet
+    scale, while staying readable in the cockpit listing."""
+    if not sha256 or len(sha256) < 16:
+        return None
+    return f'warc/by-content/live_domains_{sha256[:16]}.txt'
+
+
+def _r2_head(key: str) -> 'dict | None':
+    """HEAD an R2 object. Returns the response dict on hit, None on miss
+    or any error. Lets the upload path probe "does this content already
+    exist?" with one cheap API call, independent of our local pointer."""
+    client, bucket, _state, _err = _get_r2_client()
+    if not client or not bucket or not key:
+        return None
+    try:
+        return client.head_object(Bucket=bucket, Key=key)
+    except Exception:
+        return None
 
 
 def _sha256_local(path: str) -> 'str | None':
@@ -2006,6 +2054,7 @@ def api_warc_export_to_r2():
             return jsonify({'error': 'no warc output to export'}), 404
         mgr = get_ssh_manager()
         cur_sha = _sha256_remote(mgr, run_on, output_path)
+        # Fast path: dedup pointer matches.
         if cur_sha and last_sha and cur_sha == last_sha and last_key:
             with _warc_lock:
                 _warc_state['r2_key'] = last_key
@@ -2016,7 +2065,26 @@ def api_warc_export_to_r2():
                 'message': 'content unchanged — reusing existing R2 object',
                 'sha256': cur_sha,
             })
-        r2_key, err = _warc_remote_export_to_r2(run_on, output_path, run_id)
+        # Slow-but-correct path: ask the bucket. Content-addressed key
+        # means we can probe with one HEAD; if it exists, the content is
+        # already there regardless of whether our local pointer remembers
+        # it (state wipes, second worker, manual upload, etc.).
+        ck = _content_addressed_key(cur_sha) if cur_sha else None
+        if ck:
+            existing = _r2_head(ck)
+            if existing is not None:
+                with _warc_lock:
+                    _warc_state['r2_key'] = ck
+                    _warc_state['r2_error'] = None
+                    _warc_state['r2_last_export_sha'] = cur_sha
+                    _warc_state['r2_last_export_key'] = ck
+                _save_warc_state()
+                return jsonify({
+                    'success': True, 'noop': True, 'r2_key': ck,
+                    'message': 'content already in R2 at content-addressed key',
+                    'sha256': cur_sha,
+                })
+        r2_key, err = _warc_remote_export_to_r2(run_on, output_path, run_id, content_sha=cur_sha)
         if not r2_key:
             return jsonify({'error': err or 'R2 upload failed'}), 502
         with _warc_lock:
@@ -2033,6 +2101,7 @@ def api_warc_export_to_r2():
     if not output_path or not os.path.exists(output_path):
         return jsonify({'error': 'no warc output to export'}), 404
     cur_sha = _sha256_local(output_path)
+    # Fast path — pointer match.
     if cur_sha and last_sha and cur_sha == last_sha and last_key:
         with _warc_lock:
             _warc_state['r2_key'] = last_key
@@ -2046,10 +2115,38 @@ def api_warc_export_to_r2():
     client, bucket, state, err = _get_r2_client()
     if not client:
         return jsonify({'error': err or f'R2 unavailable ({state})'}), 503
-    try:
+    # Slow path — content-addressed key. Same hash always lands at the
+    # same key. A second click while state is wiped, a sibling controller,
+    # or an out-of-band re-upload all funnel into the same object.
+    r2_key = _content_addressed_key(cur_sha) if cur_sha else None
+    if r2_key:
+        existing = _r2_head(r2_key)
+        if existing is not None:
+            with _warc_lock:
+                _warc_state['r2_key'] = r2_key
+                _warc_state['r2_error'] = None
+                _warc_state['r2_last_export_sha'] = cur_sha
+                _warc_state['r2_last_export_key'] = r2_key
+            _save_warc_state()
+            return jsonify({
+                'success': True, 'noop': True, 'r2_key': r2_key,
+                'message': 'content already in R2 at content-addressed key',
+                'sha256': cur_sha,
+            })
+    if not r2_key:
+        # No hash available (read failed). Fall back to timestamp-based
+        # key so the operator still gets *some* upload, even if dedup is
+        # disabled for this one run.
         ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
         r2_key = f'warc/live_domains_{ts}_{run_id or "manual"}.txt'
-        client.upload_file(output_path, bucket, r2_key, ExtraArgs={'ContentType': 'text/plain'})
+    try:
+        extra = {'ContentType': 'text/plain'}
+        if cur_sha:
+            # Stamp the full sha as object metadata for traceability — lets
+            # a third party verify content from object alone, and lets us
+            # rebuild a dedup index later by scanning metadata.
+            extra['Metadata'] = {'sha256': cur_sha}
+        client.upload_file(output_path, bucket, r2_key, ExtraArgs=extra)
     except Exception as e:
         return jsonify({'error': f'R2 upload failed: {e}'}), 500
     with _warc_lock:
