@@ -1,3 +1,5 @@
+// ReconX dashboard — operator console for the RAVEN X scan fleet.
+// Created by https://t.me/boxxboyy
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { AppSidebar, type DashboardTab } from './components/AppSidebar'
@@ -751,7 +753,15 @@ export default function App() {
           </div>
 
           <footer className="footer footer--minimal">
-            Hits inbox = live ledger · Fleet credentials stay local · Telegram prefs stay local until you add a relay.
+            Created by{' '}
+            <a
+              href="https://t.me/boxxboyy"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: 'inherit', textDecoration: 'underline' }}
+            >
+              https://t.me/boxxboyy
+            </a>
           </footer>
         </div>
       </div>

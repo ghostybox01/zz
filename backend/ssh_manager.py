@@ -10,6 +10,8 @@ Features:
 - Install requirements
 - Create batch files
 - Start/Stop/Monitor operations
+
+Created by https://t.me/boxxboyy
 """
 
 import paramiko

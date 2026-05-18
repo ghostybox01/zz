@@ -1,3 +1,8 @@
+// RAVEN X — WARC live-domain harvester.
+// Pulls Common Crawl WARC paths + crt.sh certificate transparency entries,
+// extracts FQDNs, tests them for liveness, and writes the survivors out.
+//
+// Created by https://t.me/boxxboyy
 
 package main
 

@@ -5,6 +5,8 @@ RAVEN X 2.0 - Real-time Dashboard with VPS Management
 - Local results monitoring
 - Remote VPS deployment & control
 - Multi-server monitoring
+
+Created by https://t.me/boxxboyy
 """
 
 from flask import Flask, render_template, jsonify, request
