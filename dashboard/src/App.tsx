@@ -540,7 +540,7 @@ export default function App() {
               hidden={warcHidden}
               className="tab-panel"
             >
-              <WarcPanel />
+              <WarcPanel notify={pushAlertToast} />
             </section>
 
             <section

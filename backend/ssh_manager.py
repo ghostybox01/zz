@@ -1420,7 +1420,17 @@ echo "PROBE_END"
                 in_log = False
                 continue
             if in_log and line.strip():
+                # warc.go writes progress with \r so a single "line" returned
+                # by `tail -20` can balloon to ~16 KB once concatenated.
+                # Cap each entry to 400 chars (keeps the human-readable
+                # tail intact) and the whole tail to 20 entries so polling
+                # the status endpoint stays under a couple of KB instead of
+                # the 195 KB we saw in the wild.
+                if len(line) > 400:
+                    line = line[:200] + ' …[truncated]… ' + line[-180:]
                 log_tail.append(line)
+        if len(log_tail) > 20:
+            log_tail = log_tail[-20:]
 
         snapshot = {
             'alive': alive,

@@ -1596,6 +1596,10 @@ def api_warc_stop():
         remote_pid = _warc_state.get('remote_pid')
 
     # ── Worker path: SIGTERM via SSH, escalate to SIGKILL after 5s ────
+    # Fire-and-forget: the kill+poll+escalate loop blocks for up to 6s.
+    # That makes the UI's "Stop" button feel broken. Kick the work into a
+    # background thread, return 202 immediately. The monitor cycle picks up
+    # the dead PID on its next pass and `/api/warc/status` reflects it.
     if run_on != 'controller':
         if not remote_pid:
             return jsonify({'success': True, 'message': 'no warc running'})
@@ -1603,25 +1607,31 @@ def api_warc_stop():
         if mgr is None:
             return jsonify({'error': 'SSH manager unavailable'}), 503
         ip = run_on
-        try:
-            mgr.ssh_exec(ip, f'kill {remote_pid}', 5)
-            # Poll for up to 5s before escalating.
-            killed = False
-            for _ in range(5):
-                time.sleep(1)
-                alive = mgr.ssh_exec(
-                    ip,
-                    f"kill -0 {remote_pid} 2>/dev/null && echo alive || echo dead",
-                    5,
-                )
-                if alive.strip() == 'dead':
-                    killed = True
-                    break
-            if not killed:
-                mgr.ssh_exec(ip, f'kill -9 {remote_pid}', 5)
-        except Exception as e:
-            return jsonify({'error': f'failed to stop remote: {e}'}), 500
-        return jsonify({'success': True, 'run_on': ip, 'remote_pid': remote_pid})
+
+        def _async_stop(_ip: str, _pid: int) -> None:
+            try:
+                mgr.ssh_exec(_ip, f'kill {_pid}', 5)
+                for _ in range(5):
+                    time.sleep(1)
+                    alive = mgr.ssh_exec(
+                        _ip,
+                        f"kill -0 {_pid} 2>/dev/null && echo alive || echo dead",
+                        5,
+                    )
+                    if alive.strip() == 'dead':
+                        return
+                mgr.ssh_exec(_ip, f'kill -9 {_pid}', 5)
+            except Exception as e:
+                print(f'[warc] async stop failed for {_ip} pid {_pid}: {e}')
+
+        threading.Thread(
+            target=_async_stop, args=(ip, remote_pid),
+            daemon=True, name=f'warc-stop-{ip}',
+        ).start()
+        return jsonify({
+            'success': True, 'run_on': ip, 'remote_pid': remote_pid,
+            'message': f'SIGTERM sent to pid {remote_pid}; will SIGKILL after 5s if it survives. Status will update on next monitor cycle.',
+        }), 202
 
     # ── Controller path ───────────────────────────────────────────────
     if proc is None or proc.poll() is not None:

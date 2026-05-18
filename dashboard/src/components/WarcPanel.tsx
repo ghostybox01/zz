@@ -3,7 +3,16 @@ import { warc, type WarcStatus } from '../lib/reconApi'
 
 const POLL_MS = 3000
 
-export function WarcPanel() {
+/** Optional toast plumbing. WarcPanel renders standalone in any context, but
+ * when the host page passes a notifier we surface Stop/Export progress and
+ * completion through it instead of repurposing the inline `error` slot. */
+export type WarcPanelToast = (title: string, message: string, kind: 'info' | 'error') => void
+
+type Props = {
+  notify?: WarcPanelToast
+}
+
+export function WarcPanel({ notify }: Props = {}) {
   const [status, setStatus] = useState<WarcStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -107,11 +116,14 @@ export function WarcPanel() {
 
   async function onStop() {
     setBusy(true); setError(null)
+    notify?.('Stopping WARC harvest', 'SIGTERM dispatched — status will update on next monitor cycle.', 'info')
     try {
       await warc.stop()
       await refresh()
     } catch (e) {
-      setError((e as Error).message)
+      const msg = (e as Error).message
+      setError(msg)
+      notify?.('Stop request failed', msg, 'error')
     } finally {
       setBusy(false)
     }
@@ -119,12 +131,16 @@ export function WarcPanel() {
 
   async function onExport() {
     setBusy(true); setError(null)
+    const count = status?.domains_found ?? 0
+    notify?.('Uploading to R2', `Shipping ${count.toLocaleString()} domains to Cloudflare R2…`, 'info')
     try {
       const r = await warc.exportToR2()
-      setError(`Exported to R2: ${r.r2_key}`)
+      notify?.('R2 upload complete', `Saved as ${r.r2_key}`, 'info')
       await refresh()
     } catch (e) {
-      setError((e as Error).message)
+      const msg = (e as Error).message
+      setError(msg)
+      notify?.('R2 upload failed', msg, 'error')
     } finally {
       setBusy(false)
     }
