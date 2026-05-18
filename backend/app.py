@@ -895,17 +895,43 @@ def api_telegram_test():
 R2_CONFIG_KEY = 'r2'
 
 def _get_r2_client():
-    """Return (boto3_client, bucket_name) or (None, None) if R2 not configured."""
+    """Return (boto3_client, bucket_name, state, error).
+
+    state ∈ {'connected', 'misconfigured', 'unreachable', 'unknown'}.
+    - 'connected'      → client + bucket usable (constructor succeeded;
+                          live reachability is verified separately by the
+                          periodic head_bucket probe)
+    - 'misconfigured'  → one or more credential fields blank/missing
+    - 'unreachable'    → boto3 missing or constructor raised
+    - 'unknown'        → reserved for the cache before the first probe
+
+    The previous shape collapsed every failure mode into (None, None)
+    which is why /api/warc/export-to-r2 reported "R2 not configured"
+    when the real cause was a missing boto3 install. Callers must now
+    unpack four values; pass `error` through to the user instead of
+    hard-coding a misleading default message.
+    """
     cfg = _load_scanner_config()
     r2 = cfg.get(R2_CONFIG_KEY, {})
     account_id  = r2.get('account_id', '').strip()
     access_key  = r2.get('access_key_id', '').strip()
     secret_key  = r2.get('secret_access_key', '').strip()
     bucket      = r2.get('bucket_name', '').strip()
-    if not all([account_id, access_key, secret_key, bucket]):
-        return None, None
+
+    missing = []
+    if not account_id: missing.append('account_id')
+    if not access_key: missing.append('access_key_id')
+    if not secret_key: missing.append('secret_access_key')
+    if not bucket:     missing.append('bucket_name')
+    if missing:
+        return None, None, 'misconfigured', f"missing fields: {', '.join(missing)}"
+
     try:
         import boto3
+    except Exception as e:
+        return None, None, 'unreachable', f'boto3 import failed: {e}'
+
+    try:
         client = boto3.client(
             's3',
             endpoint_url=f'https://{account_id}.r2.cloudflarestorage.com',
@@ -913,9 +939,25 @@ def _get_r2_client():
             aws_secret_access_key=secret_key,
             region_name='auto',
         )
-        return client, bucket
-    except Exception:
-        return None, None
+    except Exception as e:
+        return None, None, 'unreachable', str(e)
+
+    return client, bucket, 'connected', None
+
+
+def _r2_health_probe() -> dict:
+    """Run by SSHManager.monitor_thread each cycle. Calls
+    _get_r2_client() and (when connected) verifies bucket reachability
+    via head_bucket. Returns the dict shape the SSH manager cache
+    expects."""
+    client, bucket, state, err = _get_r2_client()
+    if state != 'connected' or client is None or not bucket:
+        return {'state': state, 'last_error': err}
+    try:
+        client.head_bucket(Bucket=bucket)
+    except Exception as e:
+        return {'state': 'unreachable', 'last_error': f'head_bucket failed: {e}'}
+    return {'state': 'connected', 'last_error': None}
 
 
 @app.route('/api/upload/r2-config', methods=['GET', 'POST'])
@@ -941,21 +983,37 @@ def api_r2_config():
         with open(SCANNER_CONFIG_PATH, 'w') as f:
             json.dump(cfg, f, indent=2)
     r2 = cfg.get(R2_CONFIG_KEY, {})
+    # Surface the cached health state from SSHManager so the dashboard
+    # pill can show ● connected / misconfigured / unreachable without
+    # blocking on a fresh head_bucket call per request.
+    health = {'state': 'unknown', 'last_error': None}
+    mgr = get_ssh_manager()
+    if mgr is not None:
+        try:
+            cached = mgr.get_r2_health() or {}
+            health = {
+                'state': cached.get('state', 'unknown'),
+                'last_error': cached.get('last_error'),
+            }
+        except Exception:
+            pass
     return jsonify({
         'account_id':    r2.get('account_id', ''),
         'access_key_id': r2.get('access_key_id', ''),
         'secret_access_key': '●' * 8 if r2.get('secret_access_key') else '',
         'bucket_name':   r2.get('bucket_name', ''),
         'configured':    bool(r2.get('account_id') and r2.get('access_key_id') and r2.get('secret_access_key') and r2.get('bucket_name')),
+        'state':         health['state'],
+        'last_error':    health['last_error'],
     })
 
 
 @app.route('/api/upload/presign', methods=['GET'])
 def api_upload_presign():
     """Generate a pre-signed PUT URL for direct browser → R2 upload."""
-    client, bucket = _get_r2_client()
+    client, bucket, state, err = _get_r2_client()
     if not client:
-        return jsonify({'error': 'R2 not configured'}), 503
+        return jsonify({'error': err or f'R2 unavailable ({state})'}), 503
     import uuid as _uuid
     filename   = request.args.get('filename', 'targets.txt')
     upload_id  = _uuid.uuid4().hex
@@ -974,9 +1032,9 @@ def api_upload_presign():
 @app.route('/api/upload/complete', methods=['POST'])
 def api_upload_complete():
     """Download the uploaded file from R2, save as targets.txt, return line count + preview."""
-    client, bucket = _get_r2_client()
+    client, bucket, state, err = _get_r2_client()
     if not client:
-        return jsonify({'error': 'R2 not configured'}), 503
+        return jsonify({'error': err or f'R2 unavailable ({state})'}), 503
     data     = request.get_json(force=True, silent=True) or {}
     key      = str(data.get('key', ''))
     filename = str(data.get('filename', 'targets.txt'))
@@ -1059,6 +1117,44 @@ def _save_warc_state() -> None:
         print(f'[warc] state persist failed: {e}')
 
 
+def _probe_remote_warc_pid(mgr, ip: str, pid: int) -> dict:
+    """Read /proc/{pid} on the worker to recover process start time and
+    max-domains arg. Used when adopting an orphan run (controller restart
+    happened mid-harvest) so TARGET and STARTED are real, not "now"/None.
+
+    Returns {'started_at': iso or None, 'max_domains': int or None}.
+    Both fields are best-effort — a missing /proc entry just leaves them
+    null and the cockpit shows "—" rather than misleading numbers."""
+    if mgr is None or not pid:
+        return {'started_at': None, 'max_domains': None}
+    # `stat -c %Y /proc/{pid}` returns the dir's mtime, which Linux sets to
+    # the process's wall-clock start time. `tr` collapses cmdline's nul
+    # separators to spaces for trivial regex extraction.
+    raw = mgr.ssh_exec(
+        ip,
+        f"echo STARTED=$(stat -c %Y /proc/{pid} 2>/dev/null || echo 0); "
+        f"echo CMDLINE=$(tr '\\0' ' ' < /proc/{pid}/cmdline 2>/dev/null)",
+        5,
+    ) or ''
+    started_at = None
+    max_domains = None
+    for ln in raw.splitlines():
+        if ln.startswith('STARTED='):
+            try:
+                ts = int(ln[len('STARTED='):].strip())
+                if ts > 0:
+                    started_at = datetime.fromtimestamp(ts).isoformat()
+            except ValueError:
+                pass
+        elif ln.startswith('CMDLINE='):
+            cmd = ln[len('CMDLINE='):]
+            m = re.search(r'-max-domains\s+(\d+)', cmd)
+            if m:
+                try: max_domains = int(m.group(1))
+                except ValueError: pass
+    return {'started_at': started_at, 'max_domains': max_domains}
+
+
 def _load_warc_state() -> None:
     """Hydrate _warc_state from the sidecar at import time. Only known keys
     are copied so a malformed file can't smuggle stray fields into the dict."""
@@ -1128,6 +1224,7 @@ def _ensure_warc_binary() -> 'tuple[bool, str]':
         'sudo -u reconx bash -c "WB=$(mktemp -d); cp /opt/reconx/warc.go $WB/; '
         'cd $WB && /usr/bin/go mod init reconx-warc && '
         '/usr/bin/go get github.com/schollz/progressbar/v3 && '
+        '/usr/bin/go get golang.org/x/net/publicsuffix && '
         '/usr/bin/go mod tidy && '
         'GOOS=linux GOARCH=amd64 /usr/bin/go build -o /opt/reconx/reconx-warc warc.go; '
         'rm -rf $WB"'
@@ -1150,7 +1247,7 @@ def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
     r2_key = None
     r2_error = None
     if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-        client, bucket = _get_r2_client()
+        client, bucket, r2_state, r2_err = _get_r2_client()
         if client and bucket:
             try:
                 ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
@@ -1159,6 +1256,8 @@ def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
             except Exception as e:
                 r2_error = f'R2 upload failed: {e}'
                 r2_key = None
+        else:
+            r2_error = r2_err or f'R2 unavailable ({r2_state})'
 
     with _warc_lock:
         _warc_state['finished_at'] = datetime.now().isoformat()
@@ -1203,9 +1302,56 @@ def api_warc_start():
         max_domains = max(1, int(data.get('max_domains') or 10000))
         extract_workers = max(1, int(data.get('extract_workers') or 200))
         test_workers = max(1, int(data.get('test_workers') or 100))
+        # 0 = let warc.go auto-pick by max-domains; clamp to 1..20 to avoid
+        # accidentally fanning out across the whole CC archive at once.
+        snapshots = max(0, min(20, int(data.get('snapshots') or 0)))
     except (TypeError, ValueError):
         return jsonify({'error': 'invalid numeric option'}), 400
     verbose = bool(data.get('verbose'))
+
+    # ── New flags: producer source + crt.sh pivots + subdomain filter ──
+    # Default to legacy CC-only behavior if the caller omits 'source'.
+    # Accept either a list (preferred) or a CSV string for tolerance.
+    raw_source = data.get('source')
+    if isinstance(raw_source, str):
+        source_list = [s.strip().lower() for s in raw_source.split(',') if s.strip()]
+    elif isinstance(raw_source, list):
+        source_list = [str(s).strip().lower() for s in raw_source if str(s).strip()]
+    else:
+        source_list = []
+    # Keep only known tokens; if the result is empty (or caller omitted
+    # the field), fall back to legacy 'cc' so existing clients are
+    # byte-identical to pre-change behavior.
+    source_list = [s for s in source_list if s in ('cc', 'crtsh', 'crt.sh')]
+    if not source_list:
+        source_list = ['cc']
+    crtsh_enabled = any(s in ('crtsh', 'crt.sh') for s in source_list)
+
+    def _sanitize_csv(raw):
+        if raw is None:
+            return ''
+        if isinstance(raw, list):
+            parts = [str(p).strip() for p in raw]
+        else:
+            parts = [p.strip() for p in str(raw).split(',')]
+        # Only allow conservative hostname chars — keeps shell-injection
+        # off the table because the value gets interpolated into an SSH
+        # command string downstream.
+        safe = []
+        for p in parts:
+            if not p:
+                continue
+            if all(c.isalnum() or c in '.-_' for c in p):
+                safe.append(p.lower())
+        return ','.join(safe)
+
+    crt_tld = _sanitize_csv(data.get('crt_tld'))
+    crt_domain = _sanitize_csv(data.get('crt_domain'))
+    if crtsh_enabled and not crt_tld and not crt_domain:
+        return jsonify({
+            'error': "source 'crtsh' requires at least one of crt_tld or crt_domain"
+        }), 400
+    subdomain_only = bool(data.get('subdomain_only'))
 
     run_on_raw = data.get('run_on', 'controller')
     ok_run, run_on = _validate_run_on(run_on_raw)
@@ -1242,6 +1388,10 @@ def api_warc_start():
             tok = existing.split(None, 1)
             existing_pid = int(tok[0]) if tok and tok[0].isdigit() else None
             if existing_pid:
+                # Recover real start time + max-domains from /proc/{pid}
+                # so the cockpit shows accurate TARGET and STARTED instead
+                # of "—" or a misleading "adopted just now".
+                probed = _probe_remote_warc_pid(mgr, ip, existing_pid)
                 # Adopt it into state so the cockpit reflects the truth even
                 # if the previous controller restart wiped _warc_state. Clear
                 # terminal fields too — without that, the auto-finalizer in
@@ -1254,7 +1404,12 @@ def api_warc_start():
                         'remote_pid': existing_pid,
                         'output_path': remote_output,
                         'log_path': remote_log,
-                        'started_at': _warc_state.get('started_at') or datetime.now().isoformat(),
+                        'started_at': probed['started_at']
+                                       or _warc_state.get('started_at')
+                                       or datetime.now().isoformat(),
+                        'max_domains': probed['max_domains']
+                                       or max_domains
+                                       or _warc_state.get('max_domains'),
                         'finished_at': None,
                         'last_exit_code': None,
                         'r2_key': None,
@@ -1290,6 +1445,20 @@ def api_warc_start():
         mgr.ssh_exec(ip, f'chmod +x {remote_binary}', 5)
 
         verbose_flag = ' -verbose' if verbose else ''
+        snapshots_flag = f' -snapshots {snapshots}' if snapshots > 0 else ''
+        # Source / crt.sh / subdomain flags only emitted when the caller
+        # asked for something non-default — that keeps the legacy
+        # CC-only command line byte-identical to pre-change baseline.
+        source_flag = ''
+        if source_list != ['cc']:
+            source_flag = f" -source {','.join(source_list)}"
+        crt_pivot_flag = ''
+        if crtsh_enabled:
+            if crt_tld:
+                crt_pivot_flag += f' -crt-tld {crt_tld}'
+            if crt_domain:
+                crt_pivot_flag += f' -crt-domain {crt_domain}'
+        subdomain_flag = ' -subdomain-only' if subdomain_only else ''
         # nohup + background + echo $! gets us the worker-side PID. The
         # `cd` keeps the binary's relative file lookups predictable.
         remote_cmd = (
@@ -1297,7 +1466,8 @@ def api_warc_start():
             f"nohup ./reconx-warc -max-domains {max_domains} "
             f"-output live_domains.txt "
             f"-extract-workers {extract_workers} "
-            f"-test-workers {test_workers}{verbose_flag} "
+            f"-test-workers {test_workers}{verbose_flag}{snapshots_flag}"
+            f"{source_flag}{crt_pivot_flag}{subdomain_flag} "
             f"> warc.log 2>&1 & echo $!"
         )
         out = mgr.ssh_exec(ip, remote_cmd, 15)
@@ -1364,6 +1534,19 @@ def api_warc_start():
     ]
     if verbose:
         cmd.append('-verbose')
+    if snapshots > 0:
+        cmd.extend(['-snapshots', str(snapshots)])
+    # Mirror the SSH path: only emit new flags when non-default so the
+    # CC-only invocation is byte-identical to baseline.
+    if source_list != ['cc']:
+        cmd.extend(['-source', ','.join(source_list)])
+    if crtsh_enabled:
+        if crt_tld:
+            cmd.extend(['-crt-tld', crt_tld])
+        if crt_domain:
+            cmd.extend(['-crt-domain', crt_domain])
+    if subdomain_only:
+        cmd.append('-subdomain-only')
 
     try:
         log_handle = open(log_path, 'wb')
@@ -1469,27 +1652,95 @@ def api_warc_status():
     log_tail: list = []
 
     if run_on != 'controller':
-        # ── Worker path: probe remote process + files via SSH ──────────
+        # ── Worker path: read from SSHManager cache, not inline SSH ─────
+        # The monitor thread refreshes liveness + domain count + log tail
+        # every ~30 s with one batched SSH call. Reading from RAM keeps
+        # this endpoint under 200 ms p95 even during a live harvest, so
+        # the dashboard's 6/6 startup check stops timing out.
         ip = run_on
         remote_pid = state.get('remote_pid')
         mgr = get_ssh_manager()
         running = False
         if mgr is not None and remote_pid:
-            alive = mgr.ssh_exec(
-                ip,
-                f"kill -0 {remote_pid} 2>/dev/null && echo alive || echo dead",
-                5,
-            )
-            running = (alive.strip() == 'alive')
-            if output_path:
-                wc = mgr.ssh_exec(ip, f"wc -l < {output_path} 2>/dev/null || echo 0", 5)
-                try:
-                    domains_found = int((wc or '0').strip().split()[0])
-                except (ValueError, IndexError):
-                    domains_found = 0
-            if log_path:
-                tail_out = mgr.ssh_exec(ip, f"tail -20 {log_path} 2>/dev/null", 8)
-                log_tail = [ln for ln in (tail_out or '').splitlines() if ln.strip()]
+            cached = None
+            try:
+                cached = mgr.get_warc_status_cache(ip)
+            except Exception:
+                cached = None
+
+            # First-hit fallback: monitor hasn't filled the cache for this
+            # worker yet (e.g., a fresh start just landed). Do one
+            # synchronous probe so the operator doesn't see a blank
+            # status for up to a full monitor cycle.
+            if cached is None:
+                alive_raw = mgr.ssh_exec(
+                    ip,
+                    f"kill -0 {remote_pid} 2>/dev/null && echo alive || echo dead",
+                    5,
+                )
+                running = (alive_raw.strip() == 'alive')
+                if output_path:
+                    wc = mgr.ssh_exec(ip, f"wc -l < {output_path} 2>/dev/null || echo 0", 5)
+                    try:
+                        domains_found = int((wc or '0').strip().split()[0])
+                    except (ValueError, IndexError):
+                        domains_found = 0
+                if log_path:
+                    tail_out = mgr.ssh_exec(ip, f"tail -20 {log_path} 2>/dev/null", 8)
+                    log_tail = [ln for ln in (tail_out or '').splitlines() if ln.strip()]
+            else:
+                # Cached snapshot — only trust the alive flag when the
+                # cached PID matches what we have in state (so a stale
+                # entry from a prior run doesn't claim alive after the
+                # operator already started a new harvest).
+                cached_pid = cached.get('remote_pid')
+                if cached_pid and int(cached_pid) == int(remote_pid):
+                    running = bool(cached.get('alive'))
+                    domains_found = int(cached.get('domains_found') or 0)
+                    log_tail = list(cached.get('log_tail') or [])
+                else:
+                    # PID divergence — fall back to a sync probe.
+                    alive_raw = mgr.ssh_exec(
+                        ip,
+                        f"kill -0 {remote_pid} 2>/dev/null && echo alive || echo dead",
+                        5,
+                    )
+                    running = (alive_raw.strip() == 'alive')
+                    if output_path:
+                        wc = mgr.ssh_exec(ip, f"wc -l < {output_path} 2>/dev/null || echo 0", 5)
+                        try:
+                            domains_found = int((wc or '0').strip().split()[0])
+                        except (ValueError, IndexError):
+                            domains_found = 0
+                    if log_path:
+                        tail_out = mgr.ssh_exec(ip, f"tail -20 {log_path} 2>/dev/null", 8)
+                        log_tail = [ln for ln in (tail_out or '').splitlines() if ln.strip()]
+
+            # Auto-heal: recorded PID is dead, but pgrep finds a live
+            # reconx-warc on the worker. Adopt the real one instead of
+            # flipping to finished. Covers the case where we adopted the
+            # nohup wrapper bash (now exited) while the actual binary
+            # keeps running, or where the operator launched warc manually
+            # outside the dashboard. Still done synchronously because it
+            # only runs on the cold/transitional path (not on every poll).
+            if not running:
+                hit = mgr.ssh_exec(ip, 'pgrep -ax reconx-warc | head -1', 5).strip()
+                tok = hit.split(None, 1) if hit else []
+                real_pid = int(tok[0]) if tok and tok[0].isdigit() else None
+                if real_pid and real_pid != remote_pid:
+                    probed = _probe_remote_warc_pid(mgr, ip, real_pid)
+                    with _warc_lock:
+                        _warc_state['remote_pid'] = real_pid
+                        if probed['started_at']:
+                            _warc_state['started_at'] = probed['started_at']
+                        if probed['max_domains']:
+                            _warc_state['max_domains'] = probed['max_domains']
+                        _warc_state['finished_at'] = None
+                        _warc_state['last_exit_code'] = None
+                        state = dict(_warc_state)
+                    _save_warc_state()
+                    remote_pid = real_pid
+                    running = True
 
         # Detect the running→stopped transition exactly once: stamp
         # finished_at + last_exit_code, then fire R2 export inline (the
@@ -1564,9 +1815,9 @@ def _warc_remote_export_to_r2(ip: str, remote_output_path: str,
     (r2_key, error_string). Either may be None."""
     if not remote_output_path:
         return None, 'no remote output path in state'
-    client, bucket = _get_r2_client()
+    client, bucket, state, err = _get_r2_client()
     if not client or not bucket:
-        return None, 'R2 not configured'
+        return None, err or f'R2 unavailable ({state})'
     ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
     r2_key = f'warc/live_domains_{ts}_{run_id or "manual"}.txt'
     try:
@@ -1628,9 +1879,9 @@ def api_warc_export_to_r2():
     # ── Controller path: legacy boto3 upload from local disk ──────────
     if not output_path or not os.path.exists(output_path):
         return jsonify({'error': 'no warc output to export'}), 404
-    client, bucket = _get_r2_client()
+    client, bucket, state, err = _get_r2_client()
     if not client:
-        return jsonify({'error': 'R2 not configured'}), 503
+        return jsonify({'error': err or f'R2 unavailable ({state})'}), 503
     try:
         ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
         r2_key = f'warc/live_domains_{ts}_{run_id or "manual"}.txt'
@@ -2564,6 +2815,12 @@ try:
     if SSH_AVAILABLE:
         _mgr = get_ssh_manager()
         if _mgr:
+            # Inject the R2 health probe before the monitor thread
+            # starts so the cache is hot by the first probe cycle.
+            try:
+                _mgr.set_r2_health_probe(_r2_health_probe)
+            except Exception as _e2:
+                print(f"[startup] could not register R2 health probe: {_e2}")
             _mgr.start_monitoring(vps_status_callback)
 except Exception as _e:
     print(f"[startup] could not start SSH monitoring: {_e}")

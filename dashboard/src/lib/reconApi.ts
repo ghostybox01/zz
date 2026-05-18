@@ -405,6 +405,13 @@ export type R2Config = {
   secret_access_key: string
   bucket_name: string
   configured: boolean
+  /** Cached health state from the backend's periodic head_bucket probe.
+   *  Optional so a stale frontend cache survives a backend without the
+   *  field set yet. */
+  state?: 'connected' | 'misconfigured' | 'unreachable' | 'unknown'
+  /** Real error string from the most recent probe — `null` when healthy
+   *  or before the first probe completes. */
+  last_error?: string | null
 }
 
 export const r2 = {
@@ -438,6 +445,16 @@ export type WarcStartOptions = {
   test_workers?: number
   verbose?: boolean
   run_on?: string
+  /** Number of CC-MAIN snapshots to span. 0 = auto (1/<500k, 2/<1M, 3/>1M). */
+  snapshots?: number
+  /** Producer list — any of 'cc', 'crtsh'. Omit → backend defaults to ['cc']. */
+  source?: string[]
+  /** Comma-separated TLDs for crt.sh TLD pivot (e.g. 'com,net,io'). */
+  crt_tld?: string
+  /** Comma-separated registered domains for crt.sh domain pivot. */
+  crt_domain?: string
+  /** Drop FQDNs whose eTLD+1 equals themselves (apex/registered domains). */
+  subdomain_only?: boolean
 }
 
 export const warc = {

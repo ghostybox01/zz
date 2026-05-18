@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/schollz/progressbar/v3"
+	"golang.org/x/net/publicsuffix"
 )
 
 const (
@@ -50,6 +51,12 @@ var (
 
 	// Global verbose flag
 	globalVerbose atomic.Bool
+
+	// Global subdomain-only filter flag. When true, FQDNs whose
+	// publicsuffix-derived eTLD+1 equals the FQDN itself (apex/registered
+	// domain) are dropped at the channel writer site, so the filter applies
+	// uniformly to every producer (CC extractor + crt.sh).
+	globalSubdomainOnly atomic.Bool
 
 	// Regex patterns
 	urlRegex       = regexp.MustCompile(`WARC-Target-URI:\s+(https?://[^\s]+)`)
@@ -191,7 +198,7 @@ func getAvailableSnapshots() ([]string, error) {
 	return foundSnapshots, nil
 }
 
-func selectRandomSnapshots(maxDomains int64) []string {
+func selectRandomSnapshots(maxDomains int64, snapshotsRequested int) []string {
 	allSnapshots, err := getAvailableSnapshots()
 	if err != nil {
 		fmt.Printf("%s[WARNING]%s Failed to fetch snapshots: %v\n", YELLOW, RESET, err)
@@ -208,13 +215,17 @@ func selectRandomSnapshots(maxDomains int64) []string {
 		return []string{}
 	}
 
-	// Determine number of snapshots based on max-domains
-	// More domains = more snapshots needed
-	numSnapshots := 1
-	if maxDomains > 1000000 {
-		numSnapshots = 3
-	} else if maxDomains > 500000 {
-		numSnapshots = 2
+	// Explicit operator override wins: snapshotsRequested > 0 forces that
+	// count regardless of max-domains. The size-based heuristic only kicks
+	// in when the operator hasn't expressed a preference (==0).
+	numSnapshots := snapshotsRequested
+	if numSnapshots <= 0 {
+		numSnapshots = 1
+		if maxDomains > 1000000 {
+			numSnapshots = 3
+		} else if maxDomains > 500000 {
+			numSnapshots = 2
+		}
 	}
 
 	// Limit to available snapshots
@@ -302,6 +313,79 @@ func extractDomain(urlStr string) string {
 	}
 
 	return strings.ToLower(parsedURL.Hostname())
+}
+
+// isApexDomain reports whether the given FQDN equals its own registered
+// (eTLD+1) domain, per the public suffix list. Used by the -subdomain-only
+// filter to drop apex entries and keep only real subdomains.
+//
+// Conservative on error: if publicsuffix can't classify the input (rare —
+// malformed labels), we return true so the entry is treated as apex and
+// dropped, rather than leak ambiguous output past the filter.
+func isApexDomain(fqdn string) bool {
+	if fqdn == "" {
+		return true
+	}
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(fqdn)
+	if err != nil {
+		return true
+	}
+	return strings.EqualFold(etld1, fqdn)
+}
+
+// sendDomain is the single channel-write site shared by every producer
+// (CC extractor + crt.sh). It enforces the subdomain-only filter, the
+// dedup sync.Map, the max-domains ceiling, and verbose logging in one
+// place so both producers behave identically.
+//
+// Returns false if the global max-domains ceiling has been reached, so
+// the caller can short-circuit its loop.
+func sendDomain(domain string, domainChan chan<- string) bool {
+	if domain == "" {
+		return true
+	}
+
+	// Subdomain-only filter sits BEFORE the dedup map — otherwise the apex
+	// would occupy a slot in uniqueDomains and silently mask a later real
+	// subdomain insertion attempt with the same name (can't happen for
+	// FQDN equality, but keeps the invariant clean for future producers).
+	if globalSubdomainOnly.Load() && isApexDomain(domain) {
+		if globalVerbose.Load() {
+			fmt.Printf("%s[FILTERED]%s Apex dropped (subdomain-only): %s\n", YELLOW, RESET, domain)
+		}
+		return true
+	}
+
+	// Dedup across all producers.
+	if _, loaded := uniqueDomains.LoadOrStore(domain, true); loaded {
+		return true
+	}
+
+	// Ceiling check — same pattern the CC extractor used inline before
+	// this helper existed.
+	maxDomains := globalMaxDomains.Load()
+	if maxDomains > 0 {
+		currentTotal := totalLiveDomains.Load()
+		if currentTotal >= maxDomains {
+			return false
+		}
+	}
+
+	totalExtracted.Add(1)
+
+	if globalVerbose.Load() {
+		fmt.Printf("%s[EXTRACTED]%s Domain received: %s\n", CYAN, RESET, domain)
+	}
+
+	domainChan <- domain // blocking send — ensures no domain is dropped
+
+	if maxDomains > 0 {
+		current := totalLiveDomains.Load()
+		if current >= maxDomains {
+			return false
+		}
+	}
+	return true
 }
 
 func testDomainConnection(domain string) (bool, int) {
@@ -462,49 +546,10 @@ func extractWarcFile(warcURL string, domainChan chan<- string, wg *sync.WaitGrou
 			urlStr := string(match[1])
 			domain := extractDomain(urlStr)
 
-			if domain == "" {
-				continue
-			}
-
-			// Check if already seen
-			if _, loaded := uniqueDomains.LoadOrStore(domain, true); loaded {
-				continue
-			}
-
-			// Check limit before sending to channel
-			maxDomains := globalMaxDomains.Load()
-			if maxDomains > 0 {
-				currentTotal := totalLiveDomains.Load()
-				if currentTotal >= maxDomains {
-					return
-				}
-			}
-
-			totalExtracted.Add(1)
-
-			// Verbose: log domain received/extracted
-			if globalVerbose.Load() {
-				fmt.Printf("%s[EXTRACTED]%s Domain received: %s\n", CYAN, RESET, domain)
-			}
-
-			// Send domain to channel for testing (blocking to ensure no domain is lost)
-			// Check limit again before blocking send
-			maxDomainsCheck := globalMaxDomains.Load()
-			if maxDomainsCheck > 0 {
-				currentTotal := totalLiveDomains.Load()
-				if currentTotal >= maxDomainsCheck {
-					return
-				}
-			}
-
-			domainChan <- domain // Blocking send - ensures all domains are tested
-
-			// Check limit after sending
-			if maxDomains > 0 {
-				current := totalLiveDomains.Load()
-				if current >= maxDomains {
-					return
-				}
+			// sendDomain handles dedup, subdomain-only filter, verbose
+			// logging, and the max-domains ceiling for every producer.
+			if !sendDomain(domain, domainChan) {
+				return
 			}
 		}
 	}
@@ -570,6 +615,164 @@ func testDomainWorker(domainChan <-chan string, outputFile *os.File, wg *sync.Wa
 	}
 }
 
+// crtshRecord matches a single JSON entry returned by https://crt.sh/?output=json.
+// We only need name_value; everything else (issuer, serial, dates) is discarded.
+type crtshRecord struct {
+	NameValue string `json:"name_value"`
+}
+
+// fetchCrtShPivot queries crt.sh for a single pivot ("%.<tld>" or
+// "%.<domain>"), parses the JSON response, splits multi-line name_value
+// fields (crt.sh packs multiple SANs into one record separated by '\n'),
+// and emits each unique FQDN through sendDomain. Returns when the
+// max-domains ceiling is reached or the query completes.
+//
+// crt.sh is touchy about parallel hammering — caller sleeps ~2 s between
+// pivots; per-query timeout is generous because the JSON payload for
+// popular TLDs can be tens of MB.
+func fetchCrtShPivot(pivot string, domainChan chan<- string) {
+	queryURL := fmt.Sprintf("https://crt.sh/?q=%s&output=json", url.QueryEscape(pivot))
+	if globalVerbose.Load() {
+		fmt.Printf("%s[CRTSH]%s Querying %s\n", CYAN, RESET, queryURL)
+	}
+
+	req, err := http.NewRequest("GET", queryURL, nil)
+	if err != nil {
+		fmt.Printf("%s[CRTSH]%s request build failed for %s: %v\n", YELLOW, RESET, pivot, err)
+		return
+	}
+	// crt.sh asks operators to identify themselves; an honest UA also
+	// makes it easier for them to throttle politely instead of blackholing.
+	req.Header.Set("User-Agent", "reconx-warc/1.0 (+https://crt.sh)")
+	req.Header.Set("Accept", "application/json")
+
+	client := http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("%s[CRTSH]%s fetch failed for %s: %v\n", YELLOW, RESET, pivot, err)
+		return
+	}
+	defer func() {
+		if resp.Body != nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("%s[CRTSH]%s HTTP %d for %s\n", YELLOW, RESET, resp.StatusCode, pivot)
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("%s[CRTSH]%s read failed for %s: %v\n", YELLOW, RESET, pivot, err)
+		return
+	}
+
+	var records []crtshRecord
+	if err := json.Unmarshal(body, &records); err != nil {
+		fmt.Printf("%s[CRTSH]%s JSON parse failed for %s: %v\n", YELLOW, RESET, pivot, err)
+		return
+	}
+
+	emitted := 0
+	for _, rec := range records {
+		// name_value may pack several SAN entries on separate lines.
+		for _, raw := range strings.Split(rec.NameValue, "\n") {
+			name := strings.TrimSpace(strings.ToLower(raw))
+			if name == "" {
+				continue
+			}
+			// Wildcards (*.example.com) are not directly testable — strip
+			// the leading wildcard label and let dedup catch duplicates.
+			name = strings.TrimPrefix(name, "*.")
+			// Skip anything that doesn't look like a hostname (e.g.
+			// email-name SANs include '@').
+			if strings.ContainsAny(name, " @/\\") {
+				continue
+			}
+			if !sendDomain(name, domainChan) {
+				return
+			}
+			emitted++
+		}
+	}
+	if globalVerbose.Load() {
+		fmt.Printf("%s[CRTSH]%s %s yielded %d names (%d records)\n",
+			CYAN, RESET, pivot, emitted, len(records))
+	}
+}
+
+// runCrtShProducer fans out across the configured TLD and domain pivots,
+// sleeping between queries to respect crt.sh rate limits. Closes nothing
+// (the domain channel is owned by main, which waits for both producers
+// and then closes it).
+func runCrtShProducer(tlds, domains []string, domainChan chan<- string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	type pivot struct {
+		label string
+		query string
+	}
+	var pivots []pivot
+	for _, t := range tlds {
+		t = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(t), "."))
+		if t == "" {
+			continue
+		}
+		pivots = append(pivots, pivot{label: "tld=" + t, query: "%." + t})
+	}
+	for _, d := range domains {
+		d = strings.TrimSpace(strings.ToLower(d))
+		if d == "" {
+			continue
+		}
+		pivots = append(pivots, pivot{label: "domain=" + d, query: "%." + d})
+	}
+
+	if len(pivots) == 0 {
+		return
+	}
+
+	fmt.Printf("%s[*]%s crt.sh producer starting (%d pivot(s))\n", CYAN, RESET, len(pivots))
+
+	for i, p := range pivots {
+		// Bail if the harvest has already hit its ceiling.
+		maxDomains := globalMaxDomains.Load()
+		if maxDomains > 0 && totalLiveDomains.Load() >= maxDomains {
+			fmt.Printf("%s[CRTSH]%s ceiling reached, stopping after %d pivot(s)\n",
+				CYAN, RESET, i)
+			return
+		}
+		fetchCrtShPivot(p.query, domainChan)
+		// crt.sh asks clients to space queries — ~2 s is the figure
+		// quoted in their docs/PSA forum threads. Skip the sleep on the
+		// final pivot so we don't add latency to harvest shutdown.
+		if i < len(pivots)-1 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	fmt.Printf("%s[+]%s crt.sh producer done (%d pivot(s) queried)\n", GREEN, RESET, len(pivots))
+}
+
+// parseCSVFlag splits a comma-separated -source / -crt-tld / -crt-domain
+// flag value into trimmed lowercase tokens, dropping empties.
+func parseCSVFlag(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(strings.ToLower(p))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func main() {
 	var (
 		maxDomains     = flag.Int64("max-domains", 10000, "Maximum live domains to extract (required)")
@@ -579,6 +782,11 @@ func main() {
 		limit          = flag.Int("limit", 0, "Limit number of WARC files to process (0 = auto)")
 		channelSize    = flag.Int("channel-size", 10000, "Size of domain channel buffer")
 		verbose        = flag.Bool("verbose", false, "Enable verbose mode to see extracted, live, and dead domains")
+		snapshots      = flag.Int("snapshots", 0, "Number of CC-MAIN snapshots to span (0 = auto based on max-domains: 1/<500k, 2/<1M, 3/>1M)")
+		sourceFlag     = flag.String("source", "cc", "Comma-separated list of producers: cc, crtsh (default 'cc' preserves legacy behavior)")
+		crtTLDFlag     = flag.String("crt-tld", "", "Comma-separated TLDs for crt.sh TLD pivot (e.g. 'com,net,io'); required when crtsh is in -source unless -crt-domain is set")
+		crtDomainFlag  = flag.String("crt-domain", "", "Comma-separated registered domains for crt.sh domain pivot (e.g. 'example.com,foo.io'); alternative to -crt-tld")
+		subdomainOnly  = flag.Bool("subdomain-only", false, "Drop any FQDN whose eTLD+1 equals itself (apex/registered domain), applies to every producer")
 	)
 	flag.Parse()
 
@@ -589,70 +797,128 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set global verbose flag
+	// Set global verbose + subdomain-only flags
 	globalVerbose.Store(*verbose)
+	globalSubdomainOnly.Store(*subdomainOnly)
+
+	// Resolve which producers are enabled. Default is 'cc' (legacy
+	// behavior). We allow an empty -source value too — that's just
+	// treated as 'cc' so older callers don't break.
+	sources := parseCSVFlag(*sourceFlag)
+	if len(sources) == 0 {
+		sources = []string{"cc"}
+	}
+	ccEnabled := false
+	crtshEnabled := false
+	for _, s := range sources {
+		switch s {
+		case "cc":
+			ccEnabled = true
+		case "crtsh", "crt.sh":
+			crtshEnabled = true
+		default:
+			fmt.Printf("%s[ERROR]%s unknown source %q (valid: cc, crtsh)\n", RED, RESET, s)
+			os.Exit(2)
+		}
+	}
+
+	crtTLDs := parseCSVFlag(*crtTLDFlag)
+	crtDomains := parseCSVFlag(*crtDomainFlag)
+	if crtshEnabled && len(crtTLDs) == 0 && len(crtDomains) == 0 {
+		fmt.Printf("%s[ERROR]%s -source includes crtsh but neither -crt-tld nor -crt-domain was set\n", RED, RESET)
+		os.Exit(2)
+	}
+	if !ccEnabled && !crtshEnabled {
+		fmt.Printf("%s[ERROR]%s no producers enabled (resolved sources=%v)\n", RED, RESET, sources)
+		os.Exit(2)
+	}
 
 	fmt.Printf("%s[*]%s WARC Live Domain Checker - Extract & Test Domains\n", CYAN, RESET)
 	if *verbose {
 		fmt.Printf("%s[*]%s Verbose mode enabled\n", CYAN, RESET)
 	}
-	fmt.Println()
-
-	// Select random snapshots based on max-domains
-	fmt.Printf("%s[*]%s Selecting random CC-MAIN snapshots...\n", CYAN, RESET)
-	snapshotList := selectRandomSnapshots(*maxDomains)
-
-	if len(snapshotList) == 0 {
-		fmt.Printf("%s[ERROR]%s No snapshots available\n", RED, RESET)
-		os.Exit(1)
-	}
-
-	fmt.Printf("%s[+]%s Selected %d snapshot(s): %s\n", GREEN, RESET, len(snapshotList), strings.Join(snapshotList, ", "))
-
-	// Collect all WARC URLs from selected snapshots
-	var allWarcURLs []string
-	for _, snapID := range snapshotList {
-		fmt.Printf("%s[*]%s Fetching WARC paths from %s...\n", CYAN, RESET, snapID)
-		warcURLs, err := getWarcPaths(snapID)
-		if err != nil {
-			fmt.Printf("%s[WARNING]%s Failed to get paths from %s: %v\n", YELLOW, RESET, snapID, err)
-			continue
+	{
+		var enabled []string
+		if ccEnabled {
+			enabled = append(enabled, "cc")
 		}
-		allWarcURLs = append(allWarcURLs, warcURLs...)
-		fmt.Printf("%s[+]%s Found %d WARC files from %s\n", GREEN, RESET, len(warcURLs), snapID)
-	}
-
-	if len(allWarcURLs) == 0 {
-		fmt.Printf("%s[ERROR]%s No WARC files found from any snapshot\n", RED, RESET)
-		os.Exit(1)
-	}
-
-	totalFiles := len(allWarcURLs)
-	filesToProcess := totalFiles
-
-	if *limit > 0 && *limit < totalFiles {
-		filesToProcess = *limit
-		fmt.Printf("%s[INFO]%s Limiting to %d files (out of %d)\n", YELLOW, RESET, filesToProcess, totalFiles)
-	} else {
-		// Auto-limit based on max-domains
-		// Estimate: each file might yield 10-100 live domains
-		estimatedFilesNeeded := int(*maxDomains / 50) // Conservative estimate
-		if estimatedFilesNeeded < filesToProcess {
-			filesToProcess = estimatedFilesNeeded
-			if filesToProcess < 100 {
-				filesToProcess = 100 // Minimum 100 files
+		if crtshEnabled {
+			enabled = append(enabled, "crtsh")
+		}
+		fmt.Printf("%s[*]%s Producers enabled: %s\n", CYAN, RESET, strings.Join(enabled, ", "))
+		if *subdomainOnly {
+			fmt.Printf("%s[*]%s Subdomain-only filter active (apex/eTLD+1 entries dropped)\n", CYAN, RESET)
+		}
+		if crtshEnabled {
+			if len(crtTLDs) > 0 {
+				fmt.Printf("%s[*]%s crt.sh TLD pivots: %s\n", CYAN, RESET, strings.Join(crtTLDs, ", "))
+			}
+			if len(crtDomains) > 0 {
+				fmt.Printf("%s[*]%s crt.sh domain pivots: %s\n", CYAN, RESET, strings.Join(crtDomains, ", "))
 			}
 		}
-		if filesToProcess > 10000 {
-			filesToProcess = 10000 // Maximum 10k files
-		}
-		fmt.Printf("%s[INFO]%s Auto-limiting to %d files to reach ~%d live domains\n", YELLOW, RESET, filesToProcess, *maxDomains)
 	}
+	fmt.Println()
 
-	fmt.Printf("%s[+]%s Found %d WARC files total\n", GREEN, RESET, totalFiles)
-	fmt.Printf("%s[*]%s Extraction workers (grabber): %d\n", CYAN, RESET, *extractWorkers)
+	// CC snapshot enumeration is only meaningful when the CC producer is
+	// actually enabled — skip the slow collinfo.json + warc.paths.gz
+	// round trips entirely on a crtsh-only run.
+	var allWarcURLs []string
+	filesToProcess := 0
+	if ccEnabled {
+		fmt.Printf("%s[*]%s Selecting random CC-MAIN snapshots...\n", CYAN, RESET)
+		snapshotList := selectRandomSnapshots(*maxDomains, *snapshots)
+
+		if len(snapshotList) == 0 {
+			fmt.Printf("%s[ERROR]%s No snapshots available\n", RED, RESET)
+			os.Exit(1)
+		}
+
+		fmt.Printf("%s[+]%s Selected %d snapshot(s): %s\n", GREEN, RESET, len(snapshotList), strings.Join(snapshotList, ", "))
+
+		for _, snapID := range snapshotList {
+			fmt.Printf("%s[*]%s Fetching WARC paths from %s...\n", CYAN, RESET, snapID)
+			warcURLs, err := getWarcPaths(snapID)
+			if err != nil {
+				fmt.Printf("%s[WARNING]%s Failed to get paths from %s: %v\n", YELLOW, RESET, snapID, err)
+				continue
+			}
+			allWarcURLs = append(allWarcURLs, warcURLs...)
+			fmt.Printf("%s[+]%s Found %d WARC files from %s\n", GREEN, RESET, len(warcURLs), snapID)
+		}
+
+		if len(allWarcURLs) == 0 {
+			fmt.Printf("%s[ERROR]%s No WARC files found from any snapshot\n", RED, RESET)
+			os.Exit(1)
+		}
+
+		totalFiles := len(allWarcURLs)
+		filesToProcess = totalFiles
+
+		if *limit > 0 && *limit < totalFiles {
+			filesToProcess = *limit
+			fmt.Printf("%s[INFO]%s Limiting to %d files (out of %d)\n", YELLOW, RESET, filesToProcess, totalFiles)
+		} else {
+			// Auto-limit based on max-domains
+			// Estimate: each file might yield 10-100 live domains
+			estimatedFilesNeeded := int(*maxDomains / 50) // Conservative estimate
+			if estimatedFilesNeeded < filesToProcess {
+				filesToProcess = estimatedFilesNeeded
+				if filesToProcess < 100 {
+					filesToProcess = 100 // Minimum 100 files
+				}
+			}
+			if filesToProcess > 10000 {
+				filesToProcess = 10000 // Maximum 10k files
+			}
+			fmt.Printf("%s[INFO]%s Auto-limiting to %d files to reach ~%d live domains\n", YELLOW, RESET, filesToProcess, *maxDomains)
+		}
+
+		fmt.Printf("%s[+]%s Found %d WARC files total\n", GREEN, RESET, totalFiles)
+		fmt.Printf("%s[*]%s Extraction workers (grabber): %d\n", CYAN, RESET, *extractWorkers)
+		fmt.Printf("%s[*]%s Processing %d files in parallel\n", CYAN, RESET, filesToProcess)
+	}
 	fmt.Printf("%s[*]%s Testing workers (live check): %d\n", CYAN, RESET, *testWorkers)
-	fmt.Printf("%s[*]%s Processing %d files in parallel\n", CYAN, RESET, filesToProcess)
 	fmt.Printf("%s[INFO]%s Target: %d live domains\n", YELLOW, RESET, *maxDomains)
 
 	// Create output file
@@ -665,8 +931,14 @@ func main() {
 
 	// No header - clean output with only domains
 
-	// Progress bar
-	bar := progressbar.NewOptions(filesToProcess,
+	// Progress bar — sized for whichever producers are active. A nil bar
+	// would crash extractWarcFile's bar.Add(1); when CC is disabled we
+	// give it 1 unit and never advance it (the bar is then a no-op tile).
+	progressTotal := filesToProcess
+	if progressTotal <= 0 {
+		progressTotal = 1
+	}
+	bar := progressbar.NewOptions(progressTotal,
 		progressbar.OptionSetDescription(fmt.Sprintf("%s[PROGRESS]%s Processing WARC files...", CYAN, RESET)),
 		progressbar.OptionSetTheme(progressbar.Theme{
 			Saucer:        "=",
@@ -681,15 +953,17 @@ func main() {
 	// Set global max domains
 	globalMaxDomains.Store(*maxDomains)
 
-	// Create domain channel for communication between extractor and tester
+	// Create domain channel for communication between producers and testers.
 	domainChan := make(chan string, *channelSize)
 
 	// Semaphores for controlling concurrency
 	extractSem := make(chan struct{}, *extractWorkers)
 	testSem := make(chan struct{}, *testWorkers)
 
-	// Wait groups
-	var extractWg sync.WaitGroup
+	// One producer wait group covers CC extractors AND the crt.sh
+	// goroutine — the channel can only be closed once both producers have
+	// finished so the testers see the full union.
+	var producerWg sync.WaitGroup
 	var testWg sync.WaitGroup
 
 	startTime := time.Now()
@@ -720,22 +994,33 @@ func main() {
 		}
 	}()
 
-	// Start extractor workers (grabber) - they extract domains and send to channel
-	for i := 0; i < filesToProcess; i++ {
-		if *maxDomains > 0 {
-			current := totalLiveDomains.Load()
-			if current >= *maxDomains {
-				fmt.Printf("\n%s[INFO]%s Reached max live domains limit (%d), stopping new file starts\n", GREEN, RESET, *maxDomains)
-				break
-			}
-		}
-
-		extractWg.Add(1)
-		go extractWarcFile(allWarcURLs[i], domainChan, &extractWg, bar, extractSem)
+	// Start the crt.sh producer goroutine alongside the CC extractors
+	// (when enabled). It writes into the same domainChan via sendDomain,
+	// so dedup + subdomain filter apply uniformly.
+	if crtshEnabled {
+		producerWg.Add(1)
+		go runCrtShProducer(crtTLDs, crtDomains, domainChan, &producerWg)
 	}
 
-	// Wait for all extractors to finish
-	extractWg.Wait()
+	// Start CC extractor workers (grabber) - they extract domains and send to channel
+	if ccEnabled {
+		for i := 0; i < filesToProcess; i++ {
+			if *maxDomains > 0 {
+				current := totalLiveDomains.Load()
+				if current >= *maxDomains {
+					fmt.Printf("\n%s[INFO]%s Reached max live domains limit (%d), stopping new file starts\n", GREEN, RESET, *maxDomains)
+					break
+				}
+			}
+
+			producerWg.Add(1)
+			go extractWarcFile(allWarcURLs[i], domainChan, &producerWg, bar, extractSem)
+		}
+	}
+
+	// Wait for ALL producers (CC + crt.sh) before closing the channel —
+	// otherwise a late crt.sh emit would panic on a closed channel.
+	producerWg.Wait()
 
 	// Close channel to signal testers that no more domains will come
 	// This allows testers to finish processing remaining domains in channel

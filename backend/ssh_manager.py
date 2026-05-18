@@ -113,6 +113,31 @@ class SSHManager:
         self._consecutive_misses: Dict[str, int] = {}
         self._sticky_threshold = 3
 
+        # ── WARC status cache (Effect 3) ─────────────────────────────
+        # Filled each monitor cycle from the worker that's currently
+        # running the WARC harvest. api_warc_status reads from this
+        # instead of issuing 3+ blocking SSH calls per request, which
+        # was costing 5–23 s under load and starving eventlet workers.
+        # Keyed by worker IP → {alive, domains_found, log_tail,
+        # remote_pid, cached_at}.
+        self._warc_status_cache: Dict[str, dict] = {}
+        self._warc_status_lock = threading.Lock()
+
+        # ── R2 health cache (Effect 4) ───────────────────────────────
+        # Refreshed each monitor cycle via an app-injected probe
+        # callable (set via set_r2_health_probe). The probe runs
+        # _get_r2_client() + head_bucket and reports back. The
+        # /api/upload/r2-config GET endpoint surfaces this cache so
+        # the dashboard can show a status pill without doing the
+        # round-trip inline.
+        self._r2_health_cache: dict = {
+            'state': 'unknown',
+            'last_check': None,
+            'last_error': None,
+        }
+        self._r2_health_lock = threading.Lock()
+        self._r2_health_probe: Optional[Callable[[], dict]] = None
+
         self.junk_patterns = [
             'mysqli.', 'mysql.', 'pdo_mysql.', 'pdo.', 'session.', 'mail.', 'smtp.',
             'sendmail', 'default_socket', 'default_port', 'allow_persistent',
@@ -1311,8 +1336,150 @@ echo "PROBE_END"
                 "last_update": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
     
+    # ==================== WARC STATUS CACHE (Effect 3) ====================
+
+    # File written by backend/app.py with the current WARC run snapshot.
+    # We read it directly (rather than importing app) to avoid a circular
+    # import between this module and app.py.
+    _WARC_STATE_FILE = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'warc_state.json'
+    )
+
+    def _read_warc_state(self) -> dict:
+        """Best-effort load of the WARC sidecar app.py persists. Empty dict
+        if the file is missing or malformed — callers handle 'no current
+        run' that way too."""
+        try:
+            if not os.path.exists(self._WARC_STATE_FILE):
+                return {}
+            with open(self._WARC_STATE_FILE, 'r') as f:
+                data = json.load(f) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _refresh_warc_status_cache(self) -> None:
+        """Each monitor cycle: if a remote WARC harvest is recorded as
+        active, fire a single batched SSH command that gathers PID
+        liveness, domain count, and log tail. Stash into the cache so
+        api_warc_status can return in microseconds instead of spending
+        3+ blocking round-trips per request."""
+        state = self._read_warc_state()
+        run_on = state.get('run_on')
+        if not run_on or run_on == 'controller':
+            return
+        remote_pid = state.get('remote_pid')
+        output_path = state.get('output_path')
+        log_path = state.get('log_path')
+        # Worker path must have at least a PID to probe; if missing,
+        # skip — api_warc_status's auto-heal pgrep adoption will pick it
+        # up on the next sync call.
+        if not remote_pid:
+            return
+
+        # Single batched script: one channel, one round-trip.
+        pid_int = int(remote_pid) if str(remote_pid).strip().lstrip('-').isdigit() else 0
+        out_path = output_path or ''
+        log_p = log_path or ''
+        script = (
+            f"kill -0 {pid_int} 2>/dev/null && echo ALIVE=alive || echo ALIVE=dead; "
+            f"echo COUNT=$(wc -l < {out_path} 2>/dev/null || echo 0); "
+            f"echo LOG_BEGIN; "
+            f"tail -20 {log_p} 2>/dev/null; "
+            f"echo LOG_END"
+        )
+        try:
+            raw = self.ssh_exec(run_on, script, timeout=10)
+        except Exception:
+            raw = ''
+        if not raw:
+            # Probe failed — keep the previous cache entry intact so
+            # callers don't see a transient blip flip the cockpit to
+            # "dead". The cached_at stamp will go stale and the status
+            # endpoint's sync-fallback path can re-probe if needed.
+            return
+
+        alive = False
+        count = 0
+        log_tail: list = []
+        in_log = False
+        for line in raw.split('\n'):
+            if line.startswith('ALIVE='):
+                alive = (line[len('ALIVE='):].strip() == 'alive')
+                continue
+            if line.startswith('COUNT='):
+                try:
+                    count = int((line[len('COUNT='):].strip().split() or ['0'])[0])
+                except (ValueError, IndexError):
+                    count = 0
+                continue
+            if line == 'LOG_BEGIN':
+                in_log = True
+                continue
+            if line == 'LOG_END':
+                in_log = False
+                continue
+            if in_log and line.strip():
+                log_tail.append(line)
+
+        snapshot = {
+            'alive': alive,
+            'domains_found': count,
+            'log_tail': log_tail,
+            'remote_pid': pid_int,
+            'output_path': out_path,
+            'log_path': log_p,
+            'cached_at': datetime.now().isoformat(),
+        }
+        with self._warc_status_lock:
+            self._warc_status_cache[run_on] = snapshot
+
+    def get_warc_status_cache(self, ip: str) -> Optional[dict]:
+        """Return a snapshot of the cached WARC probe for ip, or None if
+        the monitor hasn't filled the cache for this worker yet. The
+        snapshot includes a `cached_at` ISO timestamp so callers can
+        decide whether to trust it or fall back to a sync probe."""
+        with self._warc_status_lock:
+            entry = self._warc_status_cache.get(ip)
+            return dict(entry) if entry else None
+
+    # ==================== R2 HEALTH CACHE (Effect 4) ====================
+
+    def set_r2_health_probe(self, probe: Optional[Callable[[], dict]]) -> None:
+        """Inject the R2 health probe from app.py. Decoupled so this
+        module never imports the boto3/app surface. The probe must
+        return a dict with keys: state ('connected'|'misconfigured'|
+        'unreachable'|'unknown') and last_error (str|None). If the
+        probe is None (or raises), the monitor cycle just skips."""
+        self._r2_health_probe = probe
+
+    def _refresh_r2_health_cache(self) -> None:
+        probe = self._r2_health_probe
+        if probe is None:
+            return
+        try:
+            result = probe() or {}
+        except Exception as e:
+            result = {'state': 'unreachable', 'last_error': f'probe raised: {e}'}
+        state = result.get('state') if isinstance(result, dict) else 'unknown'
+        if state not in ('connected', 'misconfigured', 'unreachable', 'unknown'):
+            state = 'unknown'
+        last_error = result.get('last_error') if isinstance(result, dict) else None
+        with self._r2_health_lock:
+            self._r2_health_cache = {
+                'state': state,
+                'last_check': datetime.now().isoformat(),
+                'last_error': last_error,
+            }
+
+    def get_r2_health(self) -> dict:
+        """Snapshot of the R2 health cache. Always returns the dict
+        shape callers expect, even when the probe has never run."""
+        with self._r2_health_lock:
+            return dict(self._r2_health_cache)
+
     # ==================== CONTROL OPERATIONS ====================
-    
+
     def start_server(self, ip: str) -> dict:
         work_dir = self.config.get("work_dir", "/root/python_job")
         try:
@@ -1553,6 +1720,16 @@ echo "PROBE_END"
                         self.event_callback({"type": "status_update", "stats": stats, "servers": servers})
                 except Exception as e:
                     print(f"Monitor error: {e}")
+                # Piggyback the WARC status + R2 health refreshes onto
+                # the same cadence so we don't introduce a second thread.
+                try:
+                    self._refresh_warc_status_cache()
+                except Exception as e:
+                    print(f"WARC status cache refresh error: {e}")
+                try:
+                    self._refresh_r2_health_cache()
+                except Exception as e:
+                    print(f"R2 health cache refresh error: {e}")
                 self.stop_monitor.wait(interval)
 
         self.monitor_thread = threading.Thread(target=monitor_loop, daemon=True)

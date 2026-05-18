@@ -10,8 +10,20 @@ export function WarcPanel() {
   const [maxDomains, setMaxDomains] = useState(10000)
   const [extractWorkers, setExtractWorkers] = useState(50)
   const [testWorkers, setTestWorkers] = useState(25)
+  const [snapshots, setSnapshots] = useState(0)
   const [runOn, setRunOn] = useState<string>('controller')
   const [hosts, setHosts] = useState<string[]>(['controller'])
+  // Producer source toggles — default mirrors the legacy CC-only flow.
+  // Either may be true; both true runs them concurrently into the same
+  // dedupe map on the worker.
+  const [sourceCC, setSourceCC] = useState(true)
+  const [sourceCrtSh, setSourceCrtSh] = useState(false)
+  // crt.sh pivot inputs — comma-separated, free-text. Only meaningful
+  // when sourceCrtSh is true; the form gates them visually.
+  const [crtTld, setCrtTld] = useState('')
+  const [crtDomain, setCrtDomain] = useState('')
+  // Opt-in apex filter (drops FQDNs equal to their own eTLD+1).
+  const [subdomainOnly, setSubdomainOnly] = useState(false)
   const pollTimer = useRef<number | null>(null)
 
   async function refresh() {
@@ -55,12 +67,35 @@ export function WarcPanel() {
 
   async function onStart() {
     setBusy(true); setError(null)
+    // Build the source list from the checkboxes. If the operator
+    // unchecked both, default to ['cc'] so we never POST a no-producer
+    // request — the backend would reject it and the UX would be
+    // confusing.
+    const sources: string[] = []
+    if (sourceCC) sources.push('cc')
+    if (sourceCrtSh) sources.push('crtsh')
+    if (sources.length === 0) sources.push('cc')
+
+    // Local guard: require at least one pivot if crt.sh is checked, so
+    // the operator sees a clear inline message instead of a 400 from
+    // the backend.
+    if (sourceCrtSh && !crtTld.trim() && !crtDomain.trim()) {
+      setError('crt.sh source selected — provide at least one TLD or domain to pivot on.')
+      setBusy(false)
+      return
+    }
+
     try {
       await warc.start({
         run_on: runOn,
         max_domains: maxDomains,
         extract_workers: extractWorkers,
         test_workers: testWorkers,
+        snapshots,
+        source: sources,
+        crt_tld: sourceCrtSh ? crtTld.trim() : undefined,
+        crt_domain: sourceCrtSh ? crtDomain.trim() : undefined,
+        subdomain_only: subdomainOnly,
       })
       await refresh()
     } catch (e) {
@@ -198,6 +233,82 @@ export function WarcPanel() {
               value={testWorkers}
               onChange={(e) => setTestWorkers(Math.max(1, Number(e.target.value) || 25))}
             />
+          </div>
+          <div className="kv__row">
+            <label className="kv__label" htmlFor="warc-snapshots">CC-MAIN snapshots</label>
+            <input
+              id="warc-snapshots"
+              type="number"
+              min={0}
+              max={20}
+              className="kv__input"
+              value={snapshots}
+              onChange={(e) => setSnapshots(Math.max(0, Math.min(20, Number(e.target.value) || 0)))}
+              title="0 = auto (1 snapshot for <500k domains, 2 for <1M, 3 for >1M). Set 1–20 to override."
+            />
+          </div>
+          {/* ── Producer source selection ────────────────────────────
+              Two independent checkboxes (not a radio): the operator
+              may enable CC, crt.sh, or both in the same harvest. */}
+          <div className="kv__row">
+            <span className="kv__label">Sources</span>
+            <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '.35rem', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={sourceCC}
+                  onChange={(e) => setSourceCC(e.target.checked)}
+                />
+                <span>Common Crawl</span>
+              </label>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '.35rem', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={sourceCrtSh}
+                  onChange={(e) => setSourceCrtSh(e.target.checked)}
+                />
+                <span>crt.sh</span>
+              </label>
+            </div>
+          </div>
+          {sourceCrtSh && (
+            <>
+              <div className="kv__row">
+                <label className="kv__label" htmlFor="warc-crt-tld">crt.sh TLDs</label>
+                <input
+                  id="warc-crt-tld"
+                  type="text"
+                  className="kv__input"
+                  placeholder="com,net,io"
+                  value={crtTld}
+                  onChange={(e) => setCrtTld(e.target.value)}
+                  title="Comma-separated TLD list, e.g. com,net,io"
+                />
+              </div>
+              <div className="kv__row">
+                <label className="kv__label" htmlFor="warc-crt-domain">crt.sh domains</label>
+                <input
+                  id="warc-crt-domain"
+                  type="text"
+                  className="kv__input"
+                  placeholder="example.com,foo.io"
+                  value={crtDomain}
+                  onChange={(e) => setCrtDomain(e.target.value)}
+                  title="Comma-separated registered-domain list (e.g. example.com,foo.io)"
+                />
+              </div>
+            </>
+          )}
+          <div className="kv__row">
+            <span className="kv__label">Filter</span>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '.35rem', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={subdomainOnly}
+                onChange={(e) => setSubdomainOnly(e.target.checked)}
+              />
+              <span>Subdomain only (drop apex / eTLD+1 entries)</span>
+            </label>
           </div>
         </div>
       )}
