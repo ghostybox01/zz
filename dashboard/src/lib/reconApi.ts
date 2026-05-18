@@ -53,6 +53,16 @@ export type ReconServerStatus = {
   current_batch_progress: number
   last_update: string
   error: string | null
+  // Live machine metrics from the probe — populated when the box is
+  // reachable. Older backends without these fields will yield undefined
+  // and the UI falls back to zero.
+  cpu_percent?: number
+  ram_used_gb?: number
+  ram_total_gb?: number
+  disk_used_gb?: number
+  disk_total_gb?: number
+  sys_uptime_sec?: number
+  last_good_update?: string
 }
 
 export type ReconGlobalStats = {

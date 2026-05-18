@@ -66,7 +66,21 @@ class ServerStatus:
     current_batch_progress: int = 0
     last_update: str = ""
     error: Optional[str] = None
-    
+    # Live machine metrics — added so the dashboard cards show real CPU%,
+    # RAM used/total, disk used/total, and system uptime. Populated by the
+    # probe script from /proc/{stat,meminfo,uptime} and df -Pk. Defaults
+    # are zeros so cards in UNREACHABLE state don't crash the serializer.
+    cpu_percent: float = 0.0
+    ram_used_gb: float = 0.0
+    ram_total_gb: float = 0.0
+    disk_used_gb: float = 0.0
+    disk_total_gb: float = 0.0
+    sys_uptime_sec: int = 0
+    # Last time we got a successful probe — lets the card show "last seen
+    # 4 min ago" when the box is currently UNREACHABLE but was healthy
+    # recently. Distinct from last_update which is just the heartbeat.
+    last_good_update: str = ""
+
     def to_dict(self):
         return asdict(self)
 
@@ -1128,6 +1142,27 @@ fi
 CPU=$(nproc 2>/dev/null || echo 0)
 RAM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{{print $2}}')
 DISK_KB=$(df -Pk / 2>/dev/null | awk 'NR==2{{print $2}}')
+# Live metrics — added so the dashboard cards show real CPU%, RAM used,
+# disk used, and system uptime instead of zeros. All fast (no second
+# sampling window): we read /proc once.
+RAM_AVAIL_KB=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{{print $2}}')
+RAM_USED_KB=0
+if [ -n "$RAM_KB" ] && [ -n "$RAM_AVAIL_KB" ]; then
+  RAM_USED_KB=$((RAM_KB - RAM_AVAIL_KB))
+fi
+DISK_USED_KB=$(df -Pk / 2>/dev/null | awk 'NR==2{{print $3}}')
+# CPU% via /proc/stat one-shot: read once, sleep, read again, delta.
+# 200 ms sample keeps the probe under its 15 s budget.
+read -r _ u1 n1 s1 i1 _ < /proc/stat 2>/dev/null
+sleep 0.2
+read -r _ u2 n2 s2 i2 _ < /proc/stat 2>/dev/null
+CPU_PCT=0
+if [ -n "$u1" ] && [ -n "$u2" ]; then
+  busy=$((u2 + n2 + s2 - u1 - n1 - s1))
+  total=$((busy + i2 - i1))
+  if [ "$total" -gt 0 ] 2>/dev/null; then CPU_PCT=$(( 100 * busy / total )); fi
+fi
+SYS_UPTIME_SEC=$(awk '{{print int($1)}}' /proc/uptime 2>/dev/null)
 echo "PROBE_BEGIN"
 echo "MAIN_PID=$MAIN_PID"
 echo "BATCH_PID=$BATCH_PID"
@@ -1141,6 +1176,10 @@ echo "SCANNED=$SCANNED"
 echo "CPU=$CPU"
 echo "RAM_KB=$RAM_KB"
 echo "DISK_KB=$DISK_KB"
+echo "CPU_PCT=$CPU_PCT"
+echo "RAM_USED_KB=$RAM_USED_KB"
+echo "DISK_USED_KB=$DISK_USED_KB"
+echo "SYS_UPTIME_SEC=$SYS_UPTIME_SEC"
 echo "HITS_BEGIN"
 cat "{result_dir}"/*.txt 2>/dev/null | head -100
 echo "HITS_END"
@@ -1209,7 +1248,37 @@ echo "PROBE_END"
                 # denied" or similar so they know to re-paste creds vs.
                 # check the network.
                 real = self._last_ssh_error.get(ip)
-                status.error = f'ssh: {real}' if real else 'ssh probe returned no data'
+                # Distinguish "host is up but auth is failing" from "host is
+                # down" so the operator knows whether to re-paste creds or
+                # check the box itself. Quick non-SSH TCP-22 probe (~1s).
+                tcp_hint = ''
+                try:
+                    port = self._port_for(ip) if hasattr(self, '_port_for') else 22
+                    import socket as _s
+                    with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sk:
+                        sk.settimeout(1.5)
+                        sk.connect((ip, port))
+                    tcp_hint = ' (TCP up — host alive, auth path failing)'
+                except Exception:
+                    tcp_hint = ' (TCP down — host unreachable or firewalled)'
+                status.error = (f'ssh: {real}{tcp_hint}' if real
+                                else f'ssh probe returned no data{tcp_hint}')
+                # Carry over the last known-good metrics so the operator can
+                # still see "last known CPU was 8%, last known uptime was
+                # 4h" with a stale marker, instead of a card with zeroed
+                # fields. The status flips to UNREACHABLE so the colour
+                # is still red — only the numbers are stale.
+                prev = self.servers.get(ip)
+                if prev is not None:
+                    for fld in ('cpu_percent', 'ram_used_gb', 'ram_total_gb',
+                                'disk_used_gb', 'disk_total_gb',
+                                'sys_uptime_sec', 'uptime', 'speed',
+                                'targets', 'scanned', 'hits'):
+                        if hasattr(prev, fld) and hasattr(status, fld):
+                            setattr(status, fld, getattr(prev, fld))
+                    if getattr(prev, 'last_good_update', '') or prev.last_update:
+                        status.last_good_update = (getattr(prev, 'last_good_update', '')
+                                                   or prev.last_update)
                 status.last_update = datetime.now().strftime('%H:%M:%S')
                 self.servers[ip] = status
             return status
@@ -1265,6 +1334,34 @@ echo "PROBE_END"
             if prev_scanned > 0 and status.scanned > prev_scanned:
                 status.speed = (status.scanned - prev_scanned) / 5
             self.previous_scanned[ip] = status.scanned
+
+            # Live machine metrics from the probe — feeds the dashboard
+            # card's CPU/RAM/disk/uptime widgets. Tolerate missing or
+            # malformed fields (older workers, race conditions) by falling
+            # back to 0 / the static capacity captured in fleet_creds.
+            def _f(key: str) -> float:
+                try: return float((metrics.get(key) or '0').strip() or 0)
+                except (TypeError, ValueError): return 0.0
+            status.cpu_percent = _f('CPU_PCT')
+            ram_total_kb = _f('RAM_KB')
+            ram_used_kb = _f('RAM_USED_KB')
+            disk_total_kb = _f('DISK_KB')
+            disk_used_kb = _f('DISK_USED_KB')
+            status.ram_total_gb = round(ram_total_kb / (1024 * 1024), 2)
+            status.ram_used_gb = round(ram_used_kb / (1024 * 1024), 2)
+            status.disk_total_gb = round(disk_total_kb / (1024 * 1024), 2)
+            status.disk_used_gb = round(disk_used_kb / (1024 * 1024), 2)
+            sys_up = _f('SYS_UPTIME_SEC')
+            if sys_up > 0:
+                status.sys_uptime_sec = int(sys_up)
+                # System uptime trumps the per-process etime when the
+                # scanner isn't running — operator wants "is the box on?"
+                # not "is the scanner running?". The latter is in MAIN_PID.
+                if not status.uptime or status.uptime == '-':
+                    h = status.sys_uptime_sec // 3600
+                    m = (status.sys_uptime_sec % 3600) // 60
+                    status.uptime = f'{h}h {m:02d}m' if h else f'{m}m'
+            status.last_good_update = datetime.now().strftime('%H:%M:%S')
 
             valid_count = 0
             for line in metrics.get('HITS', '').split('\n'):

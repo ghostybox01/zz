@@ -65,18 +65,32 @@ function mapServer(s: ReconServerStatus): VpsNode {
     region: deriveRegion(s.ip),
     status,
     source: 'seed',          // backend roster only — never 'discovered'
-    cpuPercent: 0,            // ssh_manager doesn't report CPU%
+    // Live machine metrics now come from the probe (CPU% via /proc/stat
+    // delta, RAM via /proc/meminfo, disk via df, system uptime via
+    // /proc/uptime). Falls back to 0 if the backend predates the field
+    // (e.g. mid-deploy where a cached snapshot is still around).
+    cpuPercent: s.cpu_percent ?? 0,
     cpuHistory: [],
-    ramUsedGb: 0,
-    ramTotalGb: 0,
-    diskUsedGb: 0,
+    ramUsedGb: s.ram_used_gb ?? 0,
+    ramTotalGb: s.ram_total_gb ?? 0,
+    diskUsedGb: s.disk_used_gb ?? 0,
+    diskTotalGb: s.disk_total_gb,
     targetsAssigned: s.targets ?? 0,
     targetsDone: s.scanned ?? 0,
     scansPerSecond: s.speed ?? 0,
     reconnectFailCount: 0,
     findingsContributed: s.hits ?? 0,
-    uptimeMin: uptimeStringToMin(s.uptime),
-    lastEvent: s.error ? `Error: ${s.error}` : s.batch_info ?? '',
+    // Prefer the system uptime (whole-host, "is the box on?") over the
+    // per-process etime. ssh_manager sets sys_uptime_sec on every healthy
+    // probe; falls back to parsing the etime string otherwise.
+    uptimeMin: (s.sys_uptime_sec ?? 0) > 0
+      ? Math.floor((s.sys_uptime_sec ?? 0) / 60)
+      : uptimeStringToMin(s.uptime),
+    lastEvent: s.error
+      ? `Error: ${s.error}`
+      : s.last_good_update
+        ? `Last probe ${s.last_good_update}${s.batch_info && s.batch_info !== '-' ? ` · ${s.batch_info}` : ''}`
+        : s.batch_info ?? '',
     removedReason: status === 'removed' ? s.error ?? 'Removed' : undefined,
   }
 }
