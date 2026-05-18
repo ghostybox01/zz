@@ -409,6 +409,19 @@ export const updater = {
 }
 
 /* ── R2 upload ───────────────────────────────────────────────────────── */
+export type R2Usage = {
+  error: string | null
+  total_bytes: number
+  /** Bytes counted toward the cap. Hits are excluded per operator policy. */
+  counted_bytes: number
+  bytes_by: { warc: number; uploads: number; hits: number; other: number }
+  count_by: { warc: number; uploads: number; hits: number; other: number }
+  limit_bytes: number
+  percent: number
+  threshold_75_hit: boolean
+  threshold_95_hit: boolean
+}
+
 export type R2Config = {
   account_id: string
   access_key_id: string
@@ -422,6 +435,9 @@ export type R2Config = {
   /** Real error string from the most recent probe — `null` when healthy
    *  or before the first probe completes. */
   last_error?: string | null
+  /** Cached bucket-wide usage breakdown. `null` until the first probe
+   *  completes; refreshed every monitor cycle (~30 s). */
+  usage?: R2Usage | null
 }
 
 export type R2Object = {

@@ -37,7 +37,7 @@ import { loadLists, saveLists } from './lib/listsStorage'
 import { loadFleetControl, deployListViaApi, type FleetControlConfig } from './lib/fleetControl'
 import { clearFleetCredentials, getFleetCredential } from './lib/fleetCredStore'
 import { deleteListBody, getListBody, clearListBodies } from './lib/listBodyCache'
-import { stats as reconStatsApi, vps as reconVps } from './lib/reconApi'
+import { stats as reconStatsApi, vps as reconVps, r2 as reconR2 } from './lib/reconApi'
 import { pushCpuSample } from './lib/vpsHistory'
 import { allocateChunks } from './lib/splitWorkload'
 import type { Finding, Scan, ScanShard, TargetList, VpsNode } from './types'
@@ -105,6 +105,49 @@ export default function App() {
       enqueueToast(prev, { id: `alert-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, kind, title, message }),
     )
   }, [])
+
+  // Background R2 usage watcher — fires a single toast each time we cross
+  // the 75 % or 95 % threshold, so the operator gets a warning even when
+  // they're not on the Settings tab. We track the last seen tier per
+  // session via a ref-style boolean: a toast only fires on a transition
+  // *into* the warn/danger zone, not on every poll while sitting there.
+  useEffect(() => {
+    if (!backendLive) return
+    let alive = true
+    let prevTier: 'ok' | 'warn' | 'bad' | 'unknown' = 'unknown'
+    const poll = async () => {
+      try {
+        const cfg = await reconR2.getConfig()
+        const u = cfg.usage
+        if (!alive || !u || u.error) return
+        const tier: 'ok' | 'warn' | 'bad' = u.threshold_95_hit ? 'bad'
+          : u.threshold_75_hit ? 'warn'
+          : 'ok'
+        if (prevTier === 'unknown') { prevTier = tier; return }
+        if (tier !== prevTier) {
+          const gb = (u.counted_bytes / 1024 ** 3).toFixed(2)
+          const limGb = (u.limit_bytes / 1024 ** 3).toFixed(1)
+          if (tier === 'bad') {
+            pushAlertToast(
+              'R2 storage at 95% — prune now',
+              `${gb} GB of ${limGb} GB cap used. Delete old WARC exports or target lists.`,
+              'error',
+            )
+          } else if (tier === 'warn') {
+            pushAlertToast(
+              'R2 storage at 75%',
+              `${gb} GB of ${limGb} GB cap used. Consider pruning before it fills up.`,
+              'info',
+            )
+          }
+          prevTier = tier
+        }
+      } catch { /* ignore — settings panel will surface explicit errors */ }
+    }
+    void poll()
+    const t = window.setInterval(poll, 60_000)
+    return () => { alive = false; window.clearInterval(t) }
+  }, [backendLive, pushAlertToast])
 
   const toggleScanPause = useCallback((scanId: string) => {
     setScans((prev) => {

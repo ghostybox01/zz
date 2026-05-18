@@ -1028,19 +1028,83 @@ def _get_r2_client():
     return client, bucket, 'connected', None
 
 
+# Soft cap on total R2 storage. The operator-facing rule is "stay under
+# 9.5 GB" — at 75% / 95% the dashboard fires warnings; we never refuse an
+# upload here so a noisy harvest can still finish. Eviction is left to the
+# lifecycle rule + manual delete from the cockpit listing.
+R2_USAGE_LIMIT_BYTES = int(9.5 * 1024 * 1024 * 1024)
+
+
+def _r2_usage_breakdown(client, bucket: str) -> dict:
+    """List every object in the bucket and bucket-sum sizes by category.
+    Categories are determined by key prefix: `warc/` = WARC harvests,
+    `uploads/` = target lists, `hits/` = scan hits (priority — never count
+    towards the cap), everything else is `other`.
+
+    Runs once per monitor cycle (30 s) so a thousand-object bucket adds
+    one paginated list_objects_v2 round-trip every half minute — cheap.
+    Cached on SSHManager so per-request reads are free."""
+    bytes_by = {'warc': 0, 'uploads': 0, 'hits': 0, 'other': 0}
+    count_by = {'warc': 0, 'uploads': 0, 'hits': 0, 'other': 0}
+    total = 0
+    try:
+        token = None
+        while True:
+            kwargs = {'Bucket': bucket, 'MaxKeys': 1000}
+            if token:
+                kwargs['ContinuationToken'] = token
+            resp = client.list_objects_v2(**kwargs)
+            for o in resp.get('Contents', []) or []:
+                k = o.get('Key', '')
+                sz = int(o.get('Size', 0) or 0)
+                total += sz
+                if k.startswith('warc/'):
+                    bytes_by['warc'] += sz; count_by['warc'] += 1
+                elif k.startswith('uploads/'):
+                    bytes_by['uploads'] += sz; count_by['uploads'] += 1
+                elif k.startswith('hits/'):
+                    bytes_by['hits'] += sz; count_by['hits'] += 1
+                else:
+                    bytes_by['other'] += sz; count_by['other'] += 1
+            if not resp.get('IsTruncated'):
+                break
+            token = resp.get('NextContinuationToken')
+            if not token:
+                break
+    except Exception as e:
+        return {'error': str(e), 'total_bytes': 0,
+                'bytes_by': bytes_by, 'count_by': count_by}
+    # Counted-toward-cap = everything except hits, per operator policy.
+    counted = total - bytes_by['hits']
+    pct = (counted / R2_USAGE_LIMIT_BYTES * 100) if R2_USAGE_LIMIT_BYTES else 0
+    return {
+        'error': None,
+        'total_bytes': total,
+        'counted_bytes': counted,
+        'bytes_by': bytes_by,
+        'count_by': count_by,
+        'limit_bytes': R2_USAGE_LIMIT_BYTES,
+        'percent': round(pct, 2),
+        # Thresholds operators care about: 75% (info toast) and 95% (warn).
+        'threshold_75_hit': counted >= R2_USAGE_LIMIT_BYTES * 0.75,
+        'threshold_95_hit': counted >= R2_USAGE_LIMIT_BYTES * 0.95,
+    }
+
+
 def _r2_health_probe() -> dict:
     """Run by SSHManager.monitor_thread each cycle. Calls
     _get_r2_client() and (when connected) verifies bucket reachability
-    via head_bucket. Returns the dict shape the SSH manager cache
-    expects."""
+    via head_bucket plus inventories usage. Returns the dict shape the
+    SSH manager cache expects."""
     client, bucket, state, err = _get_r2_client()
     if state != 'connected' or client is None or not bucket:
-        return {'state': state, 'last_error': err}
+        return {'state': state, 'last_error': err, 'usage': None}
     try:
         client.head_bucket(Bucket=bucket)
     except Exception as e:
-        return {'state': 'unreachable', 'last_error': f'head_bucket failed: {e}'}
-    return {'state': 'connected', 'last_error': None}
+        return {'state': 'unreachable', 'last_error': f'head_bucket failed: {e}', 'usage': None}
+    usage = _r2_usage_breakdown(client, bucket)
+    return {'state': 'connected', 'last_error': None, 'usage': usage}
 
 
 @app.route('/api/upload/r2-config', methods=['GET', 'POST'])
@@ -1069,7 +1133,7 @@ def api_r2_config():
     # Surface the cached health state from SSHManager so the dashboard
     # pill can show ● connected / misconfigured / unreachable without
     # blocking on a fresh head_bucket call per request.
-    health = {'state': 'unknown', 'last_error': None}
+    health = {'state': 'unknown', 'last_error': None, 'usage': None}
     mgr = get_ssh_manager()
     if mgr is not None:
         try:
@@ -1077,6 +1141,7 @@ def api_r2_config():
             health = {
                 'state': cached.get('state', 'unknown'),
                 'last_error': cached.get('last_error'),
+                'usage': cached.get('usage'),
             }
         except Exception:
             pass
@@ -1088,6 +1153,10 @@ def api_r2_config():
         'configured':    bool(r2.get('account_id') and r2.get('access_key_id') and r2.get('secret_access_key') and r2.get('bucket_name')),
         'state':         health['state'],
         'last_error':    health['last_error'],
+        # Usage breakdown surfaced to the dashboard's R2Settings card and
+        # the WarcPanel for the 75% / 95% threshold toasts. `null` until
+        # the first successful health probe completes.
+        'usage':         health['usage'],
     })
 
 
