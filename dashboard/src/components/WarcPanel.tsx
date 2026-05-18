@@ -457,6 +457,64 @@ export function WarcPanel({ notify }: Props = {}) {
         />
       </div>
 
+      {/* Detailed harvest stats — parsed from the latest [PROGRESS] line
+          in log_tail. Hidden when no progress lines exist yet (clean Idle
+          state before the first run) so the cockpit doesn't show a row of
+          zeros to a confused operator. */}
+      {(() => {
+        const prog = parseLatestProgress(status?.log_tail ?? [])
+        if (!prog && !running && !finishedAt) return null
+        const live = prog?.live ?? status?.domains_found ?? 0
+        const target = prog?.target ?? status?.max_domains ?? maxDomains
+        const tested = prog?.tested ?? 0
+        const extracted = prog?.extracted ?? 0
+        const filesDone = prog?.filesDone ?? 0
+        const filesTotal = prog?.filesTotal ?? 0
+        const startedMs = status?.started_at ? new Date(status.started_at).getTime() : 0
+        const finishedMs = finishedAt ? new Date(finishedAt).getTime() : Date.now()
+        const elapsedSec = startedMs > 0 ? Math.max(1, (finishedMs - startedMs) / 1000) : 0
+        const rate = elapsedSec > 0 ? live / elapsedSec : 0
+        const hitRate = tested > 0 ? (live / tested) * 100 : 0
+        const remaining = Math.max(0, target - live)
+        const etaSec = rate > 0 ? remaining / rate : 0
+        return (
+          <div style={{ marginTop: '.6rem', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '.75rem' }}>
+            <Stat label="Tested" value={tested.toLocaleString()} />
+            <Stat label="Extracted" value={extracted.toLocaleString()} />
+            <Stat
+              label="WARC files"
+              value={filesTotal > 0 ? `${filesDone}/${filesTotal}` : '—'}
+            />
+            <Stat
+              label="Hit rate"
+              value={tested > 0 ? `${hitRate.toFixed(1)}%` : '—'}
+            />
+            <Stat
+              label="Rate"
+              value={rate > 0 ? `${rate.toFixed(1)} live/s` : '—'}
+            />
+            <Stat
+              label="Elapsed"
+              value={elapsedSec > 0 ? formatDuration(elapsedSec) : '—'}
+            />
+            <Stat
+              label="ETA"
+              value={
+                running && rate > 0 && remaining > 0
+                  ? formatDuration(etaSec)
+                  : !running && finishedAt
+                    ? 'done'
+                    : '—'
+              }
+            />
+            <Stat
+              label="Progress"
+              value={target > 0 ? `${Math.min(100, (live / target) * 100).toFixed(1)}%` : '—'}
+            />
+          </div>
+        )
+      })()}
+
       {(error || r2Error) && (
         <p className={`settings-hint ${r2Error ? 'tg-hint--err' : ''}`} style={{ marginTop: '.75rem' }}>
           {error || r2Error}
@@ -539,6 +597,52 @@ export function WarcPanel({ notify }: Props = {}) {
       )}
     </section>
   )
+}
+
+/** Parse the most recent `[PROGRESS] Live: 18/10000 | Tested: 76 | Extracted:
+ * 3636 | Files: 0/200` line emitted by warc.go. ANSI colour escapes are
+ * stripped so the regex stays simple. Returns null when no progress line is
+ * present (clean Idle state pre-first-run). */
+function parseLatestProgress(lines: readonly string[]): {
+  live: number; target: number; tested: number; extracted: number
+  filesDone: number; filesTotal: number
+} | null {
+  if (!lines || lines.length === 0) return null
+  const stripAnsi = (s: string) => s.replace(/\[[0-9;]*m/g, '')
+  const re = /\[PROGRESS\]\s+Live:\s+(\d+)\/(\d+)\s+\|\s+Tested:\s+(\d+)\s+\|\s+Extracted:\s+(\d+)\s+\|\s+Files:\s+(\d+)\/(\d+)/
+  // Walk lines in reverse — the most recent progress line wins. A single
+  // log entry can hold many concatenated progress chunks (\r-based progress
+  // bar in warc.go), so we also re-scan inside each entry with a global
+  // regex and take the last match.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const cleaned = stripAnsi(lines[i] ?? '')
+    let last: RegExpExecArray | null = null
+    const g = new RegExp(re, 'g')
+    let m: RegExpExecArray | null
+    while ((m = g.exec(cleaned)) !== null) last = m
+    if (last) {
+      return {
+        live: Number(last[1]) || 0,
+        target: Number(last[2]) || 0,
+        tested: Number(last[3]) || 0,
+        extracted: Number(last[4]) || 0,
+        filesDone: Number(last[5]) || 0,
+        filesTotal: Number(last[6]) || 0,
+      }
+    }
+  }
+  return null
+}
+
+/** "1h 23m 04s" / "23m 04s" / "04s" — used by Elapsed and ETA tiles. */
+function formatDuration(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m ${String(sec).padStart(2, '0')}s`
+  if (m > 0) return `${m}m ${String(sec).padStart(2, '0')}s`
+  return `${sec}s`
 }
 
 function Stat({ label, value }: { label: string; value: number | string }) {
