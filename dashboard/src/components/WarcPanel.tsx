@@ -427,7 +427,18 @@ export function WarcPanel({ notify }: Props = {}) {
 
       <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '.75rem' }}>
         <Stat label="Domains found" value={status?.domains_found ?? 0} />
-        <Stat label="Target" value={status?.max_domains ?? '—'} />
+        {/* TARGET tile — click-to-edit when idle. While a harvest is in
+            flight, max-domains is locked into the running process; editing
+            here only matters for the *next* Start. We surface this via the
+            disabled state + title attr instead of silently no-op'ing. */}
+        <EditableStat
+          label="Target"
+          value={maxDomains}
+          locked={running}
+          onCommit={(v) => setMaxDomains(Math.max(1, v))}
+          lockedHint="Locked while harvest is running — Stop to change for next run"
+          editHint="Click to set the next harvest's target"
+        />
         <Stat
           label="Started"
           value={status?.started_at ? new Date(status.started_at).toLocaleTimeString() : '—'}
@@ -535,6 +546,74 @@ function Stat({ label, value }: { label: string; value: number | string }) {
     <div style={{ background: 'rgba(255,255,255,.03)', borderRadius: '.4rem', padding: '.55rem .7rem' }}>
       <div className="muted" style={{ fontSize: '.65rem', textTransform: 'uppercase', letterSpacing: '.06em' }}>{label}</div>
       <div className="mono" style={{ fontSize: '1rem', marginTop: '.15rem' }}>{value}</div>
+    </div>
+  )
+}
+
+/** Same shape as Stat but the value cell turns into an input on click.
+ * Used for TARGET so the operator can change the next run's max-domains
+ * without scrolling back to the form. Locked while a harvest is running. */
+function EditableStat({
+  label, value, locked, lockedHint, editHint, onCommit,
+}: {
+  label: string
+  value: number
+  locked: boolean
+  lockedHint: string
+  editHint: string
+  onCommit: (next: number) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<string>(String(value))
+  // Keep the draft in sync if the parent value updates (e.g., after a Start
+  // resets it). Without this the field would silently drift.
+  useEffect(() => { if (!editing) setDraft(String(value)) }, [value, editing])
+
+  const commit = () => {
+    const n = Number(draft)
+    if (Number.isFinite(n) && n > 0) onCommit(Math.floor(n))
+    setEditing(false)
+  }
+
+  return (
+    <div
+      style={{
+        background: 'rgba(255,255,255,.03)',
+        borderRadius: '.4rem',
+        padding: '.55rem .7rem',
+        cursor: locked ? 'not-allowed' : 'pointer',
+        outline: editing ? '1px solid var(--accent, #6cc6ff)' : 'none',
+      }}
+      title={locked ? lockedHint : editHint}
+      onClick={() => { if (!locked && !editing) setEditing(true) }}
+    >
+      <div className="muted" style={{ fontSize: '.65rem', textTransform: 'uppercase', letterSpacing: '.06em' }}>
+        {label} {locked ? '🔒' : editing ? '✎' : ''}
+      </div>
+      {editing ? (
+        <input
+          autoFocus
+          type="number"
+          min={1}
+          className="mono"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit()
+            else if (e.key === 'Escape') { setDraft(String(value)); setEditing(false) }
+          }}
+          style={{
+            fontSize: '1rem', marginTop: '.15rem', width: '100%',
+            background: 'transparent', color: 'inherit',
+            border: 'none', outline: 'none', padding: 0,
+          }}
+        />
+      ) : (
+        <div className="mono" style={{ fontSize: '1rem', marginTop: '.15rem' }}>
+          {value.toLocaleString()}
+        </div>
+      )}
     </div>
   )
 }
