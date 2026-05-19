@@ -120,6 +120,35 @@ sudo -u "$SERVICE_USER" GOOS=linux GOARCH=amd64 go build -o reconx-scanner main.
 chmod +x "$INSTALL_DIR/backend/reconx-scanner"
 log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-scanner" | awk '{print $1}')"
 
+# Build the WARC harvester so the dashboard's WARC tab is wired. We isolate it
+# in its own module dir so it doesn't collide with backend/main.go (both are
+# `package main` with their own `func main()`).
+WARC_SRC=""
+if [[ -f "$INSTALL_DIR/warc.go" ]]; then WARC_SRC="$INSTALL_DIR/warc.go"; fi
+if [[ -z "$WARC_SRC" && -f "$INSTALL_DIR/backend/warc.go" ]]; then WARC_SRC="$INSTALL_DIR/backend/warc.go"; fi
+if [[ -n "$WARC_SRC" ]]; then
+  log "Building the WARC harvester (warc.go)…"
+  WARC_BUILD_DIR="$INSTALL_DIR/backend/_warc_build"
+  sudo -u "$SERVICE_USER" rm -rf "$WARC_BUILD_DIR"
+  sudo -u "$SERVICE_USER" mkdir -p "$WARC_BUILD_DIR"
+  sudo -u "$SERVICE_USER" cp "$WARC_SRC" "$WARC_BUILD_DIR/main.go"
+  (
+    cd "$WARC_BUILD_DIR"
+    sudo -u "$SERVICE_USER" go mod init warc-live-checker >/dev/null 2>&1 || true
+    sudo -u "$SERVICE_USER" go get github.com/schollz/progressbar/v3 >/dev/null 2>&1 || true
+    sudo -u "$SERVICE_USER" go mod tidy >/dev/null 2>&1 || true
+    if sudo -u "$SERVICE_USER" go build -o "$INSTALL_DIR/backend/warc_live_checker" .; then
+      chmod +x "$INSTALL_DIR/backend/warc_live_checker"
+      log "WARC harvester built: $(du -h "$INSTALL_DIR/backend/warc_live_checker" | awk '{print $1}')"
+    else
+      warn "warc.go build failed — WARC tab will show 'binary not built' until you build it manually"
+    fi
+  )
+  sudo -u "$SERVICE_USER" rm -rf "$WARC_BUILD_DIR"
+else
+  warn "warc.go not found in $INSTALL_DIR or $INSTALL_DIR/backend — WARC tab will stay offline"
+fi
+
 # ── 8. SSH key for fleet ops ──────────────────────────────────────────────
 SSH_DIR="$INSTALL_DIR/.ssh"
 sudo -u "$SERVICE_USER" mkdir -p "$SSH_DIR"

@@ -386,4 +386,51 @@ export const r2 = {
   complete: (key: string, filename: string) => postJson<{ success: boolean; targets: number; preview: string[]; filename: string }>('/upload/complete', { key, filename }),
 }
 
+/* ── WARC harvest (warc.go subprocess control plane) ─────────────────── */
+
+export type WarcStatus = {
+  running: boolean
+  binary_present: boolean
+  pid: number | null
+  started_at: string | null
+  finished_at: string | null
+  exit_code: number | null
+  max_domains: number
+  live: number
+  tested: number
+  extracted: number
+  files_processed: number
+  files_total: number
+  last_line: string
+  output_bytes: number
+  error: string | null
+}
+
+export type WarcExportResult = {
+  success: boolean
+  filename: string
+  targets: number
+  preview: string[]
+}
+
+export const warc = {
+  start:  (opts: { maxDomains?: number; verbose?: boolean } = {}) =>
+    postJson<{ success: boolean; pid: number; max_domains: number }>('/warc/start', {
+      max_domains: opts.maxDomains,
+      verbose:     opts.verbose,
+    }),
+  stop:   () => postJson<{ success: boolean; message?: string }>('/warc/stop'),
+  status: () => getJson<WarcStatus>('/warc/status'),
+  export: () => getJson<WarcExportResult>('/warc/export'),
+  /** Raw body of live_domains.txt — pulled into the listBodyCache. */
+  async exportBody(): Promise<string> {
+    const res = await fetch(`${BASE}/warc/export-body`, { headers: { Accept: 'text/plain' } })
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '')
+      throw new ReconApiError(res.status, '/warc/export-body', txt)
+    }
+    return res.text()
+  },
+}
+
 export { ReconApiError }

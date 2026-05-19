@@ -595,7 +595,45 @@ def api_vps_upload_targets():
 
 @app.route('/api/vps/upload-chunk', methods=['POST'])
 def api_vps_upload_chunk():
-    """Accept one 5 MB chunk of a large target-list upload."""
+    """Accept one chunk of a large target-list upload.
+
+    Body is the raw chunk bytes (application/octet-stream); the upload session id
+    and chunk index travel in headers so we never buffer/JSON-decode the body
+    inside the eventlet worker (a 10 MB JSON decode blocks every other greenlet
+    on the same worker, which is what produced the 502 'Server Hangup' the
+    operator hit). Legacy JSON callers are still accepted as a fallback.
+    """
+    upload_id = request.headers.get('X-Upload-Id', '')
+    chunk_index_raw = request.headers.get('X-Chunk-Index', '')
+
+    if upload_id and chunk_index_raw:
+        try:
+            chunk_index = int(chunk_index_raw)
+        except ValueError:
+            return jsonify({'error': 'Invalid X-Chunk-Index'}), 400
+
+        if not re.match(r'^[a-zA-Z0-9_-]{8,64}$', upload_id):
+            return jsonify({'error': 'Invalid upload_id'}), 400
+        if chunk_index < 0:
+            return jsonify({'error': 'Invalid chunk_index'}), 400
+
+        chunk_dir = f'/tmp/reconx_{upload_id}'
+        os.makedirs(chunk_dir, exist_ok=True)
+        chunk_path = os.path.join(chunk_dir, f'{chunk_index:08d}')
+
+        # Stream straight to disk in 256 KiB blocks — no full-body buffer.
+        stream = request.stream
+        bytes_written = 0
+        with open(chunk_path, 'wb') as f:
+            while True:
+                block = stream.read(262144)
+                if not block:
+                    break
+                f.write(block)
+                bytes_written += len(block)
+        return jsonify({'ok': True, 'chunk': chunk_index, 'bytes': bytes_written})
+
+    # ── Legacy JSON path (kept for older dashboards) ───────────────────
     data = request.get_json(force=True, silent=True) or {}
     upload_id = str(data.get('upload_id', ''))
     chunk_index = int(data.get('chunk_index', -1))
@@ -633,18 +671,35 @@ def api_vps_finalize_upload():
 
     target_path = 'targets.txt'
     count = 0
+    # The last chunk may have split a line in the middle when the browser cut
+    # the file by byte offset, so carry the trailing partial across boundaries.
+    carry = b''
     try:
-        with open(target_path, 'w', encoding='utf-8') as out:
+        with open(target_path, 'wb') as out:
             for i in range(total_chunks):
                 chunk_path = os.path.join(chunk_dir, f'{i:08d}')
                 if not os.path.exists(chunk_path):
                     return jsonify({'error': f'Missing chunk {i}'}), 400
-                with open(chunk_path, 'r', encoding='utf-8') as cf:
-                    for line in cf:
-                        stripped = line.strip()
-                        if stripped:
-                            out.write(stripped + '\n')
-                            count += 1
+                with open(chunk_path, 'rb') as cf:
+                    while True:
+                        block = cf.read(262144)
+                        if not block:
+                            break
+                        data_block = carry + block
+                        nl = data_block.rfind(b'\n')
+                        if nl == -1:
+                            carry = data_block
+                            continue
+                        head, carry = data_block[:nl], data_block[nl + 1:]
+                        for raw in head.split(b'\n'):
+                            stripped = raw.strip()
+                            if stripped:
+                                out.write(stripped + b'\n')
+                                count += 1
+            tail = carry.strip()
+            if tail:
+                out.write(tail + b'\n')
+                count += 1
     finally:
         shutil.rmtree(chunk_dir, ignore_errors=True)
 
@@ -943,6 +998,204 @@ def api_upload_complete():
         return jsonify({'success': True, 'targets': count, 'preview': preview, 'filename': filename})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ==================== WARC HARVEST ====================
+# Thin control plane around the warc.go binary. Spawns it as a subprocess,
+# tails its stdout for [PROGRESS]/[LIVE] lines and surfaces a single JSON
+# snapshot that the dashboard polls. The harvester writes live_domains.txt
+# in the working directory — /api/warc/export hands that file back to the
+# operator as a target list.
+
+WARC_BINARY_CANDIDATES = ('./warc_live_checker', './warc', '../warc_live_checker', '../warc')
+WARC_OUTPUT_FILE = 'live_domains.txt'
+
+_warc_state_lock = threading.Lock()
+_warc_state = {
+    'pid': None,
+    'started_at': None,
+    'finished_at': None,
+    'exit_code': None,
+    'max_domains': 0,
+    'live': 0,
+    'tested': 0,
+    'extracted': 0,
+    'files_processed': 0,
+    'files_total': 0,
+    'last_line': '',
+    'error': None,
+}
+_warc_proc = None
+
+
+_warc_progress_re = re.compile(
+    r'Live:\s*(\d+)\s*/\s*(\d+).*?Tested:\s*(\d+).*?Extracted:\s*(\d+).*?Files:\s*(\d+)\s*/\s*(\d+)',
+    re.IGNORECASE,
+)
+_ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _resolve_warc_binary():
+    for cand in WARC_BINARY_CANDIDATES:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def _warc_pump_stdout(proc):
+    """Background reader for the warc.go subprocess stdout."""
+    global _warc_proc
+    try:
+        for raw in iter(proc.stdout.readline, b''):
+            if not raw:
+                break
+            line = _ansi_re.sub('', raw.decode('utf-8', errors='replace')).strip()
+            if not line:
+                continue
+            m = _warc_progress_re.search(line)
+            with _warc_state_lock:
+                _warc_state['last_line'] = line[:240]
+                if m:
+                    _warc_state['live']            = int(m.group(1))
+                    _warc_state['max_domains']     = int(m.group(2))
+                    _warc_state['tested']          = int(m.group(3))
+                    _warc_state['extracted']       = int(m.group(4))
+                    _warc_state['files_processed'] = int(m.group(5))
+                    _warc_state['files_total']     = int(m.group(6))
+    except Exception as e:
+        with _warc_state_lock:
+            _warc_state['error'] = f'stdout pump: {e}'
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        with _warc_state_lock:
+            _warc_state['finished_at'] = datetime.utcnow().isoformat() + 'Z'
+            _warc_state['exit_code']   = proc.returncode
+            _warc_state['pid']         = None
+        _warc_proc = None
+
+
+@app.route('/api/warc/start', methods=['POST'])
+def api_warc_start():
+    """Spawn the warc.go harvester. Returns 409 if one is already running."""
+    global _warc_proc
+    if _warc_proc and _warc_proc.poll() is None:
+        return jsonify({'error': 'Harvester already running', 'pid': _warc_proc.pid}), 409
+
+    binary = _resolve_warc_binary()
+    if not binary:
+        return jsonify({
+            'error': 'warc.go binary not found',
+            'hint':  'Build it: `go build -o warc_live_checker ../warc.go` from the backend dir.',
+        }), 503
+
+    body = request.get_json(silent=True) or {}
+    try:
+        max_domains = int(body.get('max_domains', 10000))
+    except (TypeError, ValueError):
+        max_domains = 10000
+    max_domains = max(100, min(max_domains, 10_000_000))
+
+    args = [binary, '-max-domains', str(max_domains), '-output', WARC_OUTPUT_FILE]
+    if body.get('verbose'):
+        args.append('-verbose')
+
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+    except OSError as e:
+        return jsonify({'error': f'Failed to start: {e}'}), 500
+
+    with _warc_state_lock:
+        _warc_state.update({
+            'pid':             proc.pid,
+            'started_at':      datetime.utcnow().isoformat() + 'Z',
+            'finished_at':     None,
+            'exit_code':       None,
+            'max_domains':     max_domains,
+            'live':            0,
+            'tested':          0,
+            'extracted':       0,
+            'files_processed': 0,
+            'files_total':     0,
+            'last_line':       '',
+            'error':           None,
+        })
+    _warc_proc = proc
+    threading.Thread(target=_warc_pump_stdout, args=(proc,), daemon=True).start()
+    return jsonify({'success': True, 'pid': proc.pid, 'max_domains': max_domains})
+
+
+@app.route('/api/warc/stop', methods=['POST'])
+def api_warc_stop():
+    proc = _warc_proc
+    if not proc or proc.poll() is not None:
+        return jsonify({'success': True, 'message': 'Not running'})
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    return jsonify({'success': True})
+
+
+@app.route('/api/warc/status', methods=['GET'])
+def api_warc_status():
+    with _warc_state_lock:
+        snapshot = dict(_warc_state)
+    running = bool(_warc_proc and _warc_proc.poll() is None)
+    snapshot['running'] = running
+    snapshot['binary_present'] = _resolve_warc_binary() is not None
+    try:
+        if os.path.exists(WARC_OUTPUT_FILE):
+            with open(WARC_OUTPUT_FILE, 'rb') as f:
+                snapshot['output_bytes'] = os.fstat(f.fileno()).st_size
+        else:
+            snapshot['output_bytes'] = 0
+    except OSError:
+        snapshot['output_bytes'] = 0
+    return jsonify(snapshot)
+
+
+@app.route('/api/warc/export', methods=['GET'])
+def api_warc_export():
+    """Stream live_domains.txt back to the dashboard as a target-list payload."""
+    if not os.path.exists(WARC_OUTPUT_FILE):
+        return jsonify({'error': 'No live_domains.txt yet — start a harvest first'}), 404
+    count = 0
+    preview = []
+    with open(WARC_OUTPUT_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped:
+                count += 1
+                if len(preview) < 6:
+                    preview.append(stripped)
+    return jsonify({
+        'success':  True,
+        'filename': WARC_OUTPUT_FILE,
+        'targets':  count,
+        'preview':  preview,
+    })
+
+
+@app.route('/api/warc/export-body', methods=['GET'])
+def api_warc_export_body():
+    """Return the raw live_domains.txt content (for client-side list storage)."""
+    if not os.path.exists(WARC_OUTPUT_FILE):
+        return ('No live_domains.txt yet', 404, {'Content-Type': 'text/plain'})
+    with open(WARC_OUTPUT_FILE, 'rb') as f:
+        body = f.read()
+    return (body, 200, {'Content-Type': 'text/plain; charset=utf-8'})
 
 
 # ==================== SSH BULK CREDS ====================

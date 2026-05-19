@@ -31,12 +31,13 @@ import { useFleetEnrollment } from './hooks/useFleetEnrollment'
 import { useLiveScan, type LiveTotals } from './hooks/useLiveScan'
 import { useReconStats } from './hooks/useReconStats'
 import { useReconFleet } from './hooks/useReconFleet'
+import { useWarcStatus } from './hooks/useWarcStatus'
 import { loadLists, saveLists, hashContent, makeListId } from './lib/listsStorage'
 import { loadFleetControl, deployListViaApi, type FleetControlConfig } from './lib/fleetControl'
 import { clearFleetCredentials, getFleetCredential } from './lib/fleetCredStore'
 import { deleteListBody, getListBody, clearListBodies, setListBody } from './lib/listBodyCache'
 import { loadLiveSource, type LiveSourceConfig } from './lib/liveSource'
-import { stats as reconStatsApi, vps as reconVps } from './lib/reconApi'
+import { stats as reconStatsApi, vps as reconVps, warc as warcApi } from './lib/reconApi'
 import { pushCpuSample } from './lib/vpsHistory'
 import { allocateChunks } from './lib/splitWorkload'
 import type { Finding, Scan, ScanShard, TargetList, VpsNode } from './types'
@@ -73,7 +74,9 @@ export default function App() {
     name: null,
   })
 
-  const [warcScanning, setWarcScanning] = useState(false)
+  const { status: warcStatus, lastError: warcError, reachability: warcReachability, refresh: refreshWarcStatus } = useWarcStatus()
+  const [warcBusy, setWarcBusy] = useState(false)
+  const [warcActionError, setWarcActionError] = useState<string | null>(null)
 
   const pushFinding = useCallback((draft: Omit<Finding, 'id'>) => {
     setFindings((prev) => {
@@ -271,7 +274,7 @@ export default function App() {
     setScans([])
     setShards([])
     setActiveScanId(null)
-    setWarcScanning(false)
+    setWarcActionError(null)
   }
 
   const aggregates = useMemo(() => {
@@ -286,14 +289,6 @@ export default function App() {
     return { total: findings.length, cracks }
   }, [findings])
 
-  const warcExportHosts = useMemo(() => {
-    const hosts = new Set<string>()
-    for (const f of findings) {
-      const h = f.hostname?.trim()
-      if (h) hosts.add(h)
-    }
-    return [...hosts]
-  }, [findings])
 
   const [clock, setClock] = useState(() => new Date())
   useEffect(() => {
@@ -330,36 +325,83 @@ export default function App() {
     })
   }, [])
 
-  const exportWarcFindingsToList = useCallback(() => {
-    if (warcExportHosts.length === 0) {
-      pushAlertToast('Nothing to export', 'Harvest findings first — no hostnames in the inbox.', 'info')
-      return
+  const startWarcHarvest = useCallback(async (maxDomains: number) => {
+    setWarcBusy(true)
+    setWarcActionError(null)
+    try {
+      await warcApi.start({ maxDomains })
+      await refreshWarcStatus()
+      pushAlertToast('WARC harvest started', `Target: ${maxDomains.toLocaleString()} live domains.`, 'info')
+    } catch (e) {
+      const msg = (e as Error).message || 'Failed to start harvester'
+      setWarcActionError(msg)
+      pushAlertToast('Could not start harvest', msg, 'error')
+    } finally {
+      setWarcBusy(false)
     }
-    const body = warcExportHosts.join('\n')
-    const hash = hashContent(body)
-    const dup = lists.find((l) => l.contentHash === hash)
-    if (dup) {
-      pushAlertToast('Already exported', `Identical list exists as "${dup.name}".`, 'info')
+  }, [refreshWarcStatus, pushAlertToast])
+
+  const stopWarcHarvest = useCallback(async () => {
+    setWarcBusy(true)
+    setWarcActionError(null)
+    try {
+      await warcApi.stop()
+      await refreshWarcStatus()
+      pushAlertToast('WARC harvest stopped', 'Subprocess terminated.', 'info')
+    } catch (e) {
+      const msg = (e as Error).message || 'Failed to stop harvester'
+      setWarcActionError(msg)
+      pushAlertToast('Could not stop harvest', msg, 'error')
+    } finally {
+      setWarcBusy(false)
+    }
+  }, [refreshWarcStatus, pushAlertToast])
+
+  const exportWarcFindingsToList = useCallback(async () => {
+    setWarcBusy(true)
+    setWarcActionError(null)
+    try {
+      const body = await warcApi.exportBody()
+      const trimmed = body.split('\n').map((l) => l.trim()).filter(Boolean)
+      if (trimmed.length === 0) {
+        const msg = 'live_domains.txt is empty — let the harvester run first.'
+        setWarcActionError(msg)
+        pushAlertToast('Nothing to export', msg, 'info')
+        return
+      }
+      const normalized = trimmed.join('\n')
+      const hash = hashContent(normalized)
+      const dup = lists.find((l) => l.contentHash === hash)
+      if (dup) {
+        pushAlertToast('Already exported', `Identical list exists as "${dup.name}".`, 'info')
+        setTab('lists')
+        return
+      }
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+      const next: TargetList = {
+        id: makeListId(),
+        name: `warc-live-${stamp}.txt`,
+        uploadedAt: new Date().toISOString(),
+        lineCount: trimmed.length,
+        fileSize: normalized.length,
+        contentHash: hash,
+        preview: trimmed.slice(0, 6),
+        assignedVpsIds: [],
+        status: 'idle',
+        note: 'Exported from warc.go live_domains.txt',
+      }
+      setListBody(next.id, normalized)
+      upsertList(next)
+      pushAlertToast(`Exported ${trimmed.length.toLocaleString()} hosts`, `Created "${next.name}" on Lists tab.`, 'info')
       setTab('lists')
-      return
+    } catch (e) {
+      const msg = (e as Error).message || 'Failed to export live_domains.txt'
+      setWarcActionError(msg)
+      pushAlertToast('Export failed', msg, 'error')
+    } finally {
+      setWarcBusy(false)
     }
-    const stamp = new Date().toISOString().slice(0, 10)
-    const next: TargetList = {
-      id: makeListId(),
-      name: `warc-hits-${stamp}.txt`,
-      uploadedAt: new Date().toISOString(),
-      lineCount: warcExportHosts.length,
-      contentHash: hash,
-      preview: warcExportHosts.slice(0, 6),
-      assignedVpsIds: [],
-      status: 'idle',
-      note: 'Exported from WARC harvest findings',
-    }
-    setListBody(next.id, body)
-    upsertList(next)
-    pushAlertToast(`Exported ${warcExportHosts.length} hosts`, `Created "${next.name}" on Lists tab.`, 'info')
-    setTab('lists')
-  }, [warcExportHosts, lists, upsertList, pushAlertToast])
+  }, [lists, upsertList, pushAlertToast, refreshWarcStatus])
 
   /** When the real Raven backend is up, deploy uses /api/vps/upload-targets + /api/vps/deploy
    *  against the operator's rostered VPSes (`server_ips.txt`). The chip selection in ListsPanel
@@ -612,11 +654,13 @@ export default function App() {
               className="tab-panel"
             >
               <WarcPanel
-                liveEnabled={liveCfg.enabled}
-                scanning={warcScanning}
-                onToggleScan={() => setWarcScanning((s) => !s)}
+                status={warcStatus}
+                reachability={warcReachability}
+                lastError={warcActionError ?? warcError}
+                busy={warcBusy}
+                onStart={startWarcHarvest}
+                onStop={stopWarcHarvest}
                 onExportToList={exportWarcFindingsToList}
-                exportCount={warcExportHosts.length}
               />
             </section>
 

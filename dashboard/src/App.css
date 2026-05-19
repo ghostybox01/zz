@@ -514,6 +514,16 @@
   color: var(--muted);
 }
 
+.pill--warn {
+  border-color: color-mix(in srgb, var(--warn, #d4a72c), var(--border) 35%);
+  color: var(--warn, #d4a72c);
+}
+
+.pill--danger {
+  border-color: color-mix(in srgb, var(--danger, #e34d4d), var(--border) 30%);
+  color: var(--danger, #e34d4d);
+}
+
 .inline-code {
   font-family: var(--mono);
   font-size: 0.8em;
@@ -2849,8 +2859,84 @@
 .warc-controls {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.45rem;
   justify-content: flex-end;
+}
+
+.warc-controls__field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.warc-controls__label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.warc-controls__input {
+  width: 7.5rem;
+  padding: 0.32rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface), transparent 30%);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.warc-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+@media (max-width: 880px) {
+  .warc-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.warc-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface), transparent 35%);
+}
+
+.warc-metric__label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.66rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.warc-metric__value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.warc-metric__sub {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.warc-last-line {
+  padding: 0.6rem 0.8rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface), transparent 50%);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .warc-run-pill {

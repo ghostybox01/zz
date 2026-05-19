@@ -18,7 +18,9 @@ type UploadError = { kind: 'duplicate' | 'empty' | 'too-large' | 'read'; message
 
 // Files above this threshold are streamed to the backend in chunks instead of loaded into the browser.
 const CHUNK_THRESHOLD = 20 * 1024 * 1024   // 20 MiB
-const CHUNK_SIZE      = 10 * 1024 * 1024   // 10 MiB per chunk — 20 updates for a 200 MB file
+// 4 MiB keeps each POST well under nginx's 90 s proxy_read_timeout even on
+// slow uplinks, and gives the eventlet worker breathing room between chunks.
+const CHUNK_SIZE      = 4 * 1024 * 1024
 
 const QUOTA_LIMIT = 10 * 1024 ** 3   // 10 GB hard cap
 const QUOTA_WARN  = 9.5 * 1024 ** 3  // 9.5 GB — show warning
@@ -191,9 +193,9 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     try {
       for (let i = 0; i < totalChunks; i++) {
         const chunkStart = i * CHUNK_SIZE
-        const content = await file.slice(chunkStart, chunkStart + CHUNK_SIZE).text()
+        const blob = file.slice(chunkStart, chunkStart + CHUNK_SIZE)
         // XHR so we get byte-level progress within the chunk
-        await uploadChunkXhr(uploadId, i, totalChunks, content, (bytesDone, bytesTotal) => {
+        await uploadChunkXhr(uploadId, i, totalChunks, blob, (bytesDone, bytesTotal) => {
           const chunkBase = (i / totalChunks) * 95
           const chunkSpan = (1 / totalChunks) * 95
           setUploadProgress(Math.round(chunkBase + (bytesDone / bytesTotal) * chunkSpan))
@@ -231,21 +233,25 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     uploadId: string,
     chunkIndex: number,
     totalChunks: number,
-    content: string,
+    blob: Blob,
     onProgress: (done: number, total: number) => void,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      const body = JSON.stringify({ upload_id: uploadId, chunk_index: chunkIndex, total_chunks: totalChunks, content })
       const xhr = new XMLHttpRequest()
       xhr.open('POST', '/api/vps/upload-chunk')
-      xhr.setRequestHeader('Content-Type', 'application/json')
+      // Raw bytes — no JSON wrapping. Metadata in headers so the server can
+      // stream straight to disk instead of buffering the body for parsing.
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+      xhr.setRequestHeader('X-Upload-Id', uploadId)
+      xhr.setRequestHeader('X-Chunk-Index', String(chunkIndex))
+      xhr.setRequestHeader('X-Total-Chunks', String(totalChunks))
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded, e.total) }
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) resolve()
         else reject(new Error(`chunk ${chunkIndex} failed: HTTP ${xhr.status} — ${xhr.responseText.slice(0, 120)}`))
       }
       xhr.onerror = () => reject(new Error(`chunk ${chunkIndex} network error`))
-      xhr.send(body)
+      xhr.send(blob)
     })
   }
 
