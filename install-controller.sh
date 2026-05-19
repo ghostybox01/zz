@@ -76,6 +76,13 @@ fi
 # ── 4. Sync source ────────────────────────────────────────────────────────
 log "Syncing project into $INSTALL_DIR …"
 mkdir -p "$INSTALL_DIR"
+# --delete is needed to retire renamed/removed source files (otherwise stale
+# Python modules in $INSTALL_DIR can shadow new ones), but it would also wipe
+# runtime state files the dashboard writes at use-time. Exclude those by name
+# so server_ips.txt + the *_state.json sidecars + the SQLite DB survive every
+# upgrade. (Pure-source JSONs like config.json / ssh_config.json are NOT
+# excluded — they should track the source tree, and the installer overwrites
+# ssh_config.json below anyway.)
 rsync -a --delete \
   --exclude='node_modules' \
   --exclude='dist' \
@@ -85,6 +92,15 @@ rsync -a --delete \
   --exclude='.venv' \
   --exclude='__pycache__' \
   --exclude='ResultJS' \
+  --exclude='backend/server_ips.txt' \
+  --exclude='backend/warc_state.json' \
+  --exclude='backend/crack_sessions.json' \
+  --exclude='backend/fleet_creds.json' \
+  --exclude='backend/raven_results.db' \
+  --exclude='backend/*.db' \
+  --exclude='backend/*.db-journal' \
+  --exclude='backend/*.db-wal' \
+  --exclude='backend/*.db-shm' \
   "$SRC/" "$INSTALL_DIR/"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
