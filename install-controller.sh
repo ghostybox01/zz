@@ -121,7 +121,10 @@ sudo -u "$SERVICE_USER" "$INSTALL_DIR/venv/bin/pip" install -q \
 log "Building the React dashboard…"
 cd "$INSTALL_DIR/dashboard"
 sudo -u "$SERVICE_USER" npm ci --no-audit --no-fund --prefer-offline
-sudo -u "$SERVICE_USER" npm run build
+# RECONX_REPO is baked into the Vite bundle as __RECONX_REPO__ so the
+# Settings → Updates panel knows which GitHub repo to poll for newer
+# commits. Keep this in sync with installer/deploy.py's default.
+sudo -u "$SERVICE_USER" env "RECONX_REPO=${RECONX_REPO:-ghostybox01/zz}" npm run build
 log "Dashboard built → $INSTALL_DIR/dashboard/dist"
 
 # ── 7. Build the Go scanner binary (for upload to workers) ───────────────

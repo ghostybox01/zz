@@ -33,7 +33,7 @@ SERVICE_USER   = os.environ.get('RECONX_USER', 'reconx')
 DASH_PORT      = int(os.environ.get('RECONX_DASH_PORT', '5000'))
 FLEET_PORT     = int(os.environ.get('RECONX_FLEET_PORT', '8787'))
 HTTP_PORT      = int(os.environ.get('RECONX_HTTP_PORT', '80'))
-REPO_SLUG      = os.environ.get('RECONX_REPO', 'aidanbaker812-prog/scanscanscannn')
+REPO_SLUG      = os.environ.get('RECONX_REPO', 'ghostybox01/zz')
 SOURCE_DIR     = Path(__file__).resolve().parent.parent  # project root
 GREEN, YELLOW, RED, RESET = '\033[0;32m', '\033[0;33m', '\033[0;31m', '\033[0m'
 
