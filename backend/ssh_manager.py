@@ -770,10 +770,19 @@ class SSHManager:
             sftp.put(local_path, remote_path)
             sftp.close()
             ssh.close()
+            self._last_ssh_error.pop(ip, None)
             return True
-        except:
+        except Exception as e:
+            # Stash the paramiko/socket/SFTP error so callers can read the
+            # real cause via last_error(ip) instead of staring at a bare
+            # "returned False". Keep it short — UI rendering is width-bound.
+            kind = type(e).__name__
+            msg = str(e)
+            if len(msg) > 160:
+                msg = msg[:160] + '…'
+            self._last_ssh_error[ip] = f'scp: {kind}: {msg}' if msg else f'scp: {kind}'
             return False
-    
+
     def scp_download(self, ip: str, remote_path: str, local_path: str) -> bool:
         try:
             ssh = self._get_ssh_client(ip, 30)
@@ -781,9 +790,21 @@ class SSHManager:
             sftp.get(remote_path, local_path)
             sftp.close()
             ssh.close()
+            self._last_ssh_error.pop(ip, None)
             return True
-        except:
+        except Exception as e:
+            kind = type(e).__name__
+            msg = str(e)
+            if len(msg) > 160:
+                msg = msg[:160] + '…'
+            self._last_ssh_error[ip] = f'scp: {kind}: {msg}' if msg else f'scp: {kind}'
             return False
+
+    def last_error(self, ip: str) -> str:
+        """Most recent SSH/SFTP error captured for this host (empty if the
+        last operation succeeded). Public accessor — callers should use
+        this instead of touching _last_ssh_error directly."""
+        return self._last_ssh_error.get(ip, '') or ''
     
     # ==================== CONNECTION TESTING ====================
     

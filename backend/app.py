@@ -3218,9 +3218,11 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             tf_config.close()
 
         if not mgr.scp_upload(ip, tf_targets.name, f'{remote_dir}/targets.txt'):
-            return None, 'scp_upload(targets.txt) returned False'
+            real = mgr.last_error(ip) if hasattr(mgr, 'last_error') else ''
+            return None, f'scp_upload(targets.txt) failed — {real}' if real else 'scp_upload(targets.txt) returned False'
         if not mgr.scp_upload(ip, tf_config.name, f'{remote_dir}/config.json'):
-            return None, 'scp_upload(config.json) returned False'
+            real = mgr.last_error(ip) if hasattr(mgr, 'last_error') else ''
+            return None, f'scp_upload(config.json) failed — {real}' if real else 'scp_upload(config.json) returned False'
 
         # Re-use the already-deployed reconx-scanner binary via a symlink so
         # the scanner's relative ./reconx-scanner invocation still works while
@@ -3239,6 +3241,9 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
         out = mgr.ssh_exec(ip, remote_cmd, 30)
         pid = _extract_remote_pid(out or '')
         if pid is None:
+            real = mgr.last_error(ip) if hasattr(mgr, 'last_error') else ''
+            if real:
+                return None, f'remote spawn failed — {real}'
             return None, f'remote spawn returned no pid; ssh output: {out!r}'
         return pid, None
     except Exception as e:
