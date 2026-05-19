@@ -3186,12 +3186,139 @@ def _crack_session_view(sess: dict) -> dict:
     }
 
 
+def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
+                           work_dir: str, slice_lines: list, config_bytes: bytes) -> tuple:
+    """Ship targets + config to one worker and spawn the scanner. Returns
+    (pid_or_None, error_message_or_None). Pure helper; no shared-state
+    mutation so it's safe to fan out from the dispatcher thread."""
+    import tempfile as _tempfile
+    tf_targets = None
+    tf_config = None
+    try:
+        mgr.ssh_exec(ip, f'mkdir -p {remote_dir}', 5)
+
+        # mkstemp + explicit close before scp_upload sidesteps paramiko's
+        # habit of reading 0 bytes when the file handle's still open.
+        tf_targets = _tempfile.NamedTemporaryFile(
+            mode='w', suffix=f'_{session_id}_targets.txt', delete=False
+        )
+        try:
+            tf_targets.write('\n'.join(slice_lines))
+            if slice_lines:
+                tf_targets.write('\n')
+        finally:
+            tf_targets.close()
+
+        tf_config = _tempfile.NamedTemporaryFile(
+            mode='wb', suffix=f'_{session_id}_config.json', delete=False
+        )
+        try:
+            tf_config.write(config_bytes)
+        finally:
+            tf_config.close()
+
+        if not mgr.scp_upload(ip, tf_targets.name, f'{remote_dir}/targets.txt'):
+            return None, 'scp_upload(targets.txt) returned False'
+        if not mgr.scp_upload(ip, tf_config.name, f'{remote_dir}/config.json'):
+            return None, 'scp_upload(config.json) returned False'
+
+        # Re-use the already-deployed reconx-scanner binary via a symlink so
+        # the scanner's relative ./reconx-scanner invocation still works while
+        # the session dir stays self-contained.
+        mgr.ssh_exec(
+            ip,
+            f'ln -sf {work_dir}/reconx-scanner {remote_dir}/reconx-scanner',
+            5,
+        )
+
+        remote_cmd = (
+            f"cd {remote_dir} && "
+            f"nohup ./reconx-scanner targets.txt "
+            f"> crack.log 2>&1 & echo $!"
+        )
+        out = mgr.ssh_exec(ip, remote_cmd, 30)
+        pid = _extract_remote_pid(out or '')
+        if pid is None:
+            return None, f'remote spawn returned no pid; ssh output: {out!r}'
+        return pid, None
+    except Exception as e:
+        return None, str(e)
+    finally:
+        if tf_targets is not None:
+            try: os.unlink(tf_targets.name)
+            except Exception: pass
+        if tf_config is not None:
+            try: os.unlink(tf_config.name)
+            except Exception: pass
+
+
+def _update_crack_session(session_id: str, mutator) -> None:
+    """Lock-guarded read-modify-write on a single session; bumps the
+    sidecar mtime so other readers re-hydrate."""
+    global _crack_sessions_mtime
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sess = _crack_sessions.get(session_id)
+        if sess is None:
+            return
+        mutator(sess)
+        _crack_sessions[session_id] = sess
+        _save_crack_sessions(_crack_sessions)
+        try:
+            _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
+        except Exception:
+            pass
+
+
+def _run_crack_dispatch(session_id: str, norm_ips: list, all_targets: list,
+                        config_snapshot: dict, work_dir: str, remote_dir: str) -> None:
+    """Background dispatcher: slice the target list and ship to each worker.
+    Updates the session to `running` (any worker spawned) or `failed`
+    (all workers failed). Runs in its own thread so /api/crack/start can
+    return inside the nginx 60s window."""
+    mgr = get_ssh_manager()
+    if mgr is None:
+        _update_crack_session(session_id, lambda s: s.update({
+            'status': 'failed',
+            'last_error': 'SSH manager unavailable',
+            'finished_at': datetime.now().isoformat(),
+        }))
+        return
+
+    slices = _slice_targets(all_targets, len(norm_ips))
+    config_bytes = json.dumps(config_snapshot, indent=2).encode('utf-8')
+
+    remote_pids: dict = {}
+    dispatch_errors: list = []
+    for idx, ip in enumerate(norm_ips):
+        slice_lines = slices[idx] if idx < len(slices) else []
+        pid, err = _dispatch_crack_worker(
+            mgr, ip, session_id, remote_dir, work_dir, slice_lines, config_bytes
+        )
+        if pid is not None:
+            remote_pids[ip] = pid
+        else:
+            dispatch_errors.append(f'{ip}: {err}')
+
+    status = 'running' if remote_pids else 'failed'
+    last_error = '; '.join(dispatch_errors) if dispatch_errors else None
+    finished_at = None if remote_pids else datetime.now().isoformat()
+
+    _update_crack_session(session_id, lambda s: s.update({
+        'status': status,
+        'remote_pids': remote_pids,
+        'last_error': last_error,
+        'finished_at': finished_at,
+    }))
+
+
 @app.route('/api/crack/start', methods=['POST'])
 def api_crack_start():
-    """Mint a crack session: validate input, resolve target bytes, slice
-    across workers, ship per-session config.json + targets.txt, spawn the
-    scanner. Persists the session to crack_sessions.json and returns the
-    full session record."""
+    """Mint a crack session, persist it as `queued`, and fire off the
+    SCP + remote-spawn work in a background thread so the HTTP response
+    returns well inside the nginx 60s window. Status transitions to
+    `running` or `failed` asynchronously; the dashboard polls
+    /api/crack/sessions to watch the change."""
     data = request.get_json(force=True, silent=True) or {}
     session_name = str(data.get('session_name') or '').strip()
     list_id = str(data.get('list_id') or '').strip()
@@ -3199,7 +3326,6 @@ def api_crack_start():
     addon_ids = data.get('addon_ids') or []
     worker_ips = data.get('worker_ips') or []
 
-    # ── Validate input ─────────────────────────────────────────────────
     if not session_name:
         return jsonify({'ok': False, 'error': 'session_name is required'}), 400
     if not list_id:
@@ -3208,8 +3334,8 @@ def api_crack_start():
         return jsonify({'ok': False, 'error': 'worker_ips must be a non-empty list'}), 400
     if not isinstance(addon_ids, list):
         return jsonify({'ok': False, 'error': 'addon_ids must be a list'}), 400
-    # Coerce + dedupe IPs while preserving order so the slicing assignment
-    # is stable across retries.
+
+    # Coerce + dedupe IPs while preserving order so slicing is stable.
     seen = set()
     norm_ips: list = []
     for ip in worker_ips:
@@ -3224,7 +3350,6 @@ def api_crack_start():
     if mgr is None:
         return jsonify({'ok': False, 'error': 'SSH manager unavailable'}), 503
 
-    # ── Resolve target list bytes via the same path /api/vps/deploy uses ─
     target_path = _resolve_crack_target_path(mgr)
     if not target_path:
         return jsonify({'ok': False, 'error': 'target list not found'}), 404
@@ -3236,93 +3361,10 @@ def api_crack_start():
     if not all_targets:
         return jsonify({'ok': False, 'error': 'target list is empty'}), 400
 
-    # ── Mint session id + per-session config snapshot ──────────────────
     session_id = uuid.uuid4().hex[:12]
     config_snapshot = _build_crack_config_snapshot([str(a) for a in addon_ids])
     work_dir = mgr.config.get('work_dir', '/root/python_job') if hasattr(mgr, 'config') else '/root/python_job'
     remote_dir = f'{work_dir}/crack_{session_id}'
-
-    # ── Slice the target list and dispatch per worker ──────────────────
-    slices = _slice_targets(all_targets, len(norm_ips))
-    remote_pids: dict = {}
-    dispatch_errors: list = []
-    config_bytes = json.dumps(config_snapshot, indent=2).encode('utf-8')
-
-    import tempfile as _tempfile
-    for idx, ip in enumerate(norm_ips):
-        slice_lines = slices[idx] if idx < len(slices) else []
-        try:
-            # Ensure remote work dir exists and is empty. The session id is
-            # uuid4-derived so we can't collide with a prior crack here, but
-            # belt-and-braces removal protects against a half-finished
-            # previous attempt on the same operator workflow.
-            mgr.ssh_exec(ip, f'mkdir -p {remote_dir}', 5)
-
-            # Write slice + config to local tempfiles, then SFTP. mkstemp +
-            # explicit close before scp_upload sidesteps paramiko's habit
-            # of reading 0 bytes when the file handle's still open.
-            tf_targets = _tempfile.NamedTemporaryFile(
-                mode='w', suffix=f'_{session_id}_targets.txt', delete=False
-            )
-            try:
-                tf_targets.write('\n'.join(slice_lines))
-                if slice_lines:
-                    tf_targets.write('\n')
-            finally:
-                tf_targets.close()
-
-            tf_config = _tempfile.NamedTemporaryFile(
-                mode='wb', suffix=f'_{session_id}_config.json', delete=False
-            )
-            try:
-                tf_config.write(config_bytes)
-            finally:
-                tf_config.close()
-
-            try:
-                if not mgr.scp_upload(ip, tf_targets.name, f'{remote_dir}/targets.txt'):
-                    raise Exception('scp_upload(targets.txt) returned False')
-                if not mgr.scp_upload(ip, tf_config.name, f'{remote_dir}/config.json'):
-                    raise Exception('scp_upload(config.json) returned False')
-            finally:
-                try: os.unlink(tf_targets.name)
-                except Exception: pass
-                try: os.unlink(tf_config.name)
-                except Exception: pass
-
-            # Re-use the already-deployed reconx-scanner binary from the
-            # worker's main work_dir rather than re-uploading it per session.
-            # A symlink keeps the session dir self-contained for the scanner's
-            # relative ./reconx-scanner invocation while preserving disk space.
-            mgr.ssh_exec(
-                ip,
-                f'ln -sf {work_dir}/reconx-scanner {remote_dir}/reconx-scanner',
-                5,
-            )
-
-            # nohup + background + echo $! → recover worker-side PID, same
-            # shape as the WARC remote spawn. cwd is the session dir so the
-            # scanner reads our per-session config.json and not the
-            # controller's global one.
-            remote_cmd = (
-                f"cd {remote_dir} && "
-                f"nohup ./reconx-scanner targets.txt "
-                f"> crack.log 2>&1 & echo $!"
-            )
-            out = mgr.ssh_exec(ip, remote_cmd, 15)
-            pid = _extract_remote_pid(out or '')
-            if pid is None:
-                raise Exception(f'remote spawn returned no pid; ssh output: {out!r}')
-            remote_pids[ip] = pid
-        except Exception as e:
-            dispatch_errors.append(f'{ip}: {e}')
-
-    # If every worker failed, surface as failed status with a 502 — the
-    # operator needs to fix the fleet before retrying. Partial success
-    # (some workers up, some down) is recorded as `running` with
-    # last_error set so the cockpit can flag the partial.
-    status = 'running' if remote_pids else 'failed'
-    last_error = '; '.join(dispatch_errors) if dispatch_errors else None
 
     session = {
         'id':           session_id,
@@ -3332,29 +3374,33 @@ def api_crack_start():
         'addon_ids':    [str(a) for a in addon_ids if isinstance(a, (str, int))],
         'worker_ips':   norm_ips,
         'created_at':   datetime.now().isoformat(),
-        'status':       status,
-        'remote_pids':  remote_pids,
+        'status':       'queued',
+        'remote_pids':  {},
         'finished_at':  None,
-        'last_error':   last_error,
+        'last_error':   None,
         'remote_dir':   remote_dir,  # bookkeeping; not in wire view
     }
 
+    global _crack_sessions_mtime
     with _crack_lock:
         _reload_crack_state_if_changed()
         _crack_sessions[session_id] = session
         _save_crack_sessions(_crack_sessions)
-    try:
-        global _crack_sessions_mtime
-        _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
-    except Exception:
-        pass
+        try:
+            _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
+        except Exception:
+            pass
 
-    if not remote_pids:
-        return jsonify({
-            'ok': False,
-            'error': f'all workers failed to spawn: {last_error}',
-            'session': _crack_session_view(session),
-        }), 502
+    # Hand the heavy lifting (SCP + remote spawn — easily 30–60s for big
+    # target lists across multiple workers) to a daemon thread so we
+    # respond inside nginx's proxy_read_timeout. The dashboard polls
+    # /api/crack/sessions to observe the queued → running/failed transition.
+    threading.Thread(
+        target=_run_crack_dispatch,
+        args=(session_id, norm_ips, all_targets, config_snapshot, work_dir, remote_dir),
+        name=f'crack-dispatch-{session_id}',
+        daemon=True,
+    ).start()
 
     return jsonify({'ok': True, 'session': _crack_session_view(session)})
 
