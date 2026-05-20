@@ -52,7 +52,17 @@ def die(msg: str) -> None:
 
 
 def run(cmd: list[str], *, user: str | None = None, cwd: Path | None = None, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
-    full = ['sudo', '-u', user] + cmd if user else cmd
+    # When we drop to a service user via sudo, sudo strips environment by
+    # default — even vars we explicitly set in subprocess.run(env=…). Wrap
+    # any caller-supplied env into a `sudo VAR=val` prefix so they actually
+    # reach the inner command. (The dashboard rebuild needs RECONX_REPO to
+    # bake __RECONX_REPO__ into the Vite bundle; without this, Settings →
+    # Updates renders "(repo not set)".)
+    if user:
+        env_prefix = [f'{k}={v}' for k, v in (env or {}).items()]
+        full = ['sudo', '-u', user] + env_prefix + cmd
+    else:
+        full = cmd
     return subprocess.run(full, cwd=str(cwd) if cwd else None, check=check, env={**os.environ, **(env or {})})
 
 
