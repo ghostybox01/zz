@@ -3621,13 +3621,21 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.MandrillAppAPIKeyPattern, a.Config.Features.Mandrill, "Mandrill", a.CheckMandrill},
 		{a.MailerSendAPIKeyPattern, a.Config.Features.MailerSend, "MailerSend", a.CheckMailerSend},
 		{a.NewMailgunAPIKeyPattern, a.Config.Features.NewMailgun, "NewMailgun", a.CheckMailgun},
-		{postmarkPattern, a.Config.APIValidation.Postmark, "Postmark", a.CheckPostmark},
-		{sparkpostPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
-		{mailtrapPattern, a.Config.APIValidation.Mailtrap, "Mailtrap", a.CheckMailtrap},
-		{mailjetPattern, a.Config.APIValidation.Mailjet, "Mailjet", a.CheckMailjet},
-		{herokuPattern, a.Config.APIValidation.Heroku, "Heroku", a.CheckHeroku},
-		{datadogPattern, a.Config.APIValidation.Datadog, "Datadog", a.CheckDatadog},
-		{plivoPattern, a.Config.APIValidation.Plivo, "Plivo", a.CheckPlivo},
+		// TODO(detector-stubs): commit 77abad7 wired UI dispatch for these 7
+		// detectors but never landed the matching {fooPattern} regex constants
+		// or a.CheckFoo methods. Result: `go build` fails with "undefined: X"
+		// for each line, which aborts the installer entirely (and therefore
+		// blocks the dashboard rebuild that wires RECONX_REPO into the bundle).
+		// Commenting out the dispatch so the binary compiles. Picking them in
+		// the Cracker UI will still be a no-op — to actually validate these
+		// providers, add the patterns + Check* methods, then re-enable here.
+		// {postmarkPattern,  a.Config.APIValidation.Postmark,  "Postmark",  a.CheckPostmark},
+		// {sparkpostPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
+		// {mailtrapPattern,  a.Config.APIValidation.Mailtrap,  "Mailtrap",  a.CheckMailtrap},
+		// {mailjetPattern,   a.Config.APIValidation.Mailjet,   "Mailjet",   a.CheckMailjet},
+		// {herokuPattern,    a.Config.APIValidation.Heroku,    "Heroku",    a.CheckHeroku},
+		// {datadogPattern,   a.Config.APIValidation.Datadog,   "Datadog",   a.CheckDatadog},
+		// {plivoPattern,     a.Config.APIValidation.Plivo,     "Plivo",     a.CheckPlivo},
 	}
 
 	var wg sync.WaitGroup
