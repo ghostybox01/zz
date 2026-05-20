@@ -858,6 +858,12 @@ SCANNER_CONFIG_SCHEMA = {
         'openai', 'anthropic', 'ai_all', 'stripe', 'gcp_api_key', 'sendgrid', 'mailgun',
         'twilio', 'nexmo', 'telnyx', 'messagebird', 'github',
         'postmark', 'sparkpost', 'mailtrap', 'mailjet', 'heroku', 'datadog', 'plivo',
+        # Aliases consumed by the dashboard's addon catalog. main.go may not
+        # yet implement check methods for all of them, but persisting the
+        # toggle prevents the UI from silently reverting (see AddonsStrip:
+        # frontend uses POST-response as source-of-truth, so any key the
+        # whitelist drops looks like a failed click).
+        'aws_access', 'tencent', 'socketlabs', 'zeptomail', 'elasticemail',
     ],
     'features': ['brevo', 'xsmtp', 'mandrill', 'mailersend', 'new_mailgun'],
     'exploit_methods': ['react2shell', 'bypass_waf', 'bypass_middleware', 'lfi', 'xxe', 'ssrf'],
