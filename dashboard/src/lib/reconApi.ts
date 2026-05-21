@@ -90,7 +90,24 @@ export type ReconUploadResult = {
   success: boolean
   filename: string
   targets: number
+  /** Backend-assigned id under the per-list store (`lists/<id>.txt`).
+   * Sent back to /api/crack/start so the resolver knows which file to
+   * ship. null only on legacy backends that haven't been upgraded. */
+  list_id?: string | null
   error?: string
+}
+
+/** A list as the controller actually has it on disk — the source of
+ *  truth that supersedes the dashboard's localStorage cache. */
+export type ReconServerList = {
+  id: string
+  name: string
+  lines: number
+  size: number
+  uploaded_at: string
+  /** False when the sidecar metadata survives but the data file is gone
+   *  (rsync wipe, manual rm, etc.). UI should treat as unusable. */
+  present: boolean
 }
 
 export type ReconDeployResult = {
@@ -260,6 +277,21 @@ export const vps = {
 
   finalizeUpload: (uploadId: string, totalChunks: number, filename: string) =>
     postJson<ReconUploadResult>('/vps/finalize-upload', { upload_id: uploadId, total_chunks: totalChunks, filename }),
+}
+
+/* ── Per-list server inventory (sidesteps the localStorage lie) ──── */
+/*  Returns what the controller can actually resolve via list_id when
+ *  /api/crack/start runs. Use this on dashboard mount to reconcile the
+ *  composer dropdown with disk truth instead of trusting localStorage. */
+
+export const lists = {
+  list:   () => getJson<{ lists: ReconServerList[] }>('/lists'),
+  remove: async (id: string): Promise<{ ok: boolean; error?: string }> => {
+    const res = await fetch(`${BASE}/lists/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    let body: unknown
+    try { body = await res.json() } catch { body = {} }
+    return body as { ok: boolean; error?: string }
+  },
 }
 
 /* ── Scanner config (live flags consumed by main.go) ─────────────── */
@@ -534,7 +566,7 @@ export const r2 = {
       `/upload/presign?filename=${encodeURIComponent(filename)}`,
     ),
   complete: (key: string, filename: string, accountId?: string) =>
-    postJson<{ success: boolean; targets: number; preview: string[]; filename: string }>(
+    postJson<{ success: boolean; targets: number; preview: string[]; filename: string; list_id?: string | null }>(
       '/upload/complete', { key, filename, account_id: accountId },
     ),
   /** List objects across one or all accounts. Optional prefix filter.

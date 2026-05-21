@@ -668,23 +668,43 @@ def api_vps_deploy():
 
 @app.route('/api/vps/upload-targets', methods=['POST'])
 def api_vps_upload_targets():
-    """Upload target file"""
+    """Upload target file. Writes the bytes to both the legacy
+    `targets.txt` (back-compat for any older code that hardcodes that
+    path) AND `lists/<list_id>.txt` so the dashboard can address the
+    file by id. Response carries the assigned `list_id` — the frontend
+    stores it and sends it back in /api/crack/start so the resolver
+    knows which file to ship."""
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
-    
+
     file = request.files['file']
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
-    
-    # Save to targets.txt
+
     target_path = 'targets.txt'
     file.save(target_path)
-    
-    # Count lines
-    with open(target_path, 'r') as f:
+
+    # Promote into the per-list store. Failure here doesn't abort the
+    # upload — the legacy targets.txt is still good — but the operator
+    # loses the addressable-id benefit, so we surface it via `list_id: null`.
+    try:
+        record = _store_uploaded_list(target_path, file.filename)
+    except Exception as e:
+        print(f'[upload-targets] per-list store failed: {e}')
+        record = None
+
+    # Count lines from the canonical legacy path (single source of truth
+    # for the response so the operator's seen line count matches what
+    # any downstream code that reads targets.txt will see).
+    with open(target_path, 'r', errors='ignore') as f:
         count = sum(1 for line in f if line.strip())
-    
-    return jsonify({'success': True, 'filename': file.filename, 'targets': count})
+
+    return jsonify({
+        'success':  True,
+        'filename': file.filename,
+        'targets':  count,
+        'list_id':  record['id'] if record else None,
+    })
 
 @app.route('/api/vps/upload-chunk', methods=['POST'])
 def api_vps_upload_chunk():
@@ -783,7 +803,51 @@ def api_vps_finalize_upload():
     finally:
         shutil.rmtree(chunk_dir, ignore_errors=True)
 
-    return jsonify({'success': True, 'filename': filename, 'targets': count})
+    # Same per-list promotion as the single-shot upload path. The legacy
+    # targets.txt has been freshly rewritten above; copy it into lists/.
+    try:
+        record = _store_uploaded_list(target_path, filename)
+    except Exception as e:
+        print(f'[finalize-upload] per-list store failed: {e}')
+        record = None
+
+    return jsonify({
+        'success':  True,
+        'filename': filename,
+        'targets':  count,
+        'list_id':  record['id'] if record else None,
+    })
+
+
+@app.route('/api/lists', methods=['GET'])
+def api_lists_list():
+    """Return the controller's actual list inventory (NOT the dashboard's
+    localStorage cache). The dashboard should call this on mount so its
+    composer dropdown reflects what /api/crack/start can actually
+    resolve — fixing the desync where the UI remembered uploaded lists
+    that had been wiped from disk."""
+    return jsonify({'lists': _list_all_lists()})
+
+
+@app.route('/api/lists/<list_id>', methods=['DELETE'])
+def api_lists_delete(list_id):
+    """Remove a list's data + sidecar. 404 if neither file exists so the
+    operator knows the delete was a no-op."""
+    safe = _safe_list_id(list_id)
+    if not safe:
+        return jsonify({'ok': False, 'error': 'invalid list_id'}), 400
+    data_path, meta_path = _list_paths(safe)
+    removed = False
+    for p in (data_path, meta_path):
+        if os.path.exists(p):
+            try:
+                os.unlink(p)
+                removed = True
+            except OSError as e:
+                return jsonify({'ok': False, 'error': f'unlink failed: {e}'}), 500
+    if not removed:
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    return jsonify({'ok': True, 'id': safe})
 
 
 @app.route('/api/vps/test-ssh', methods=['POST'])
@@ -1651,7 +1715,20 @@ def api_upload_complete():
             client.delete_object(Bucket=bucket, Key=key)
         except Exception:
             pass
-        return jsonify({'success': True, 'targets': count, 'preview': preview, 'filename': filename})
+        # Promote into the per-list store (same path as the chunked +
+        # multipart uploaders) so this file is addressable by list_id.
+        try:
+            record = _store_uploaded_list('targets.txt', filename)
+        except Exception as e:
+            print(f'[upload/complete] per-list store failed: {e}')
+            record = None
+        return jsonify({
+            'success':  True,
+            'targets':  count,
+            'preview':  preview,
+            'filename': filename,
+            'list_id':  record['id'] if record else None,
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3156,12 +3233,161 @@ def _extract_remote_pid(out: str) -> 'int | None':
     return None
 
 
-def _resolve_crack_target_path(mgr) -> 'str | None':
-    """Resolve the controller's active target list bytes — the file the
-    dashboard last uploaded via /api/vps/upload-targets or selected via
-    /api/vps/select-file. Mirrors /api/vps/deploy's resolution path so the
-    operator's Composer pick and a follow-up `Deploy` button see the same
-    bytes. Returns the path or None if the file is missing on disk."""
+# ─────────────────────────────────────────────────────────────────────
+# Per-list target storage
+# ─────────────────────────────────────────────────────────────────────
+# The original model overwrote a single `targets.txt` per upload, which
+# made the dashboard's "I have N saved lists" UX a lie — the backend only
+# ever remembered the most recent file. Now each upload is stored under
+# `lists/<id>.txt` with a sidecar `<id>.json` for metadata, addressable
+# by id. The legacy `targets.txt` is still written on each upload so
+# anything else on the box that depends on that filename keeps working,
+# and a one-time bootstrap migrates an existing `targets.txt` into the
+# new dir as `list_id='legacy'` on first boot.
+
+LISTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lists')
+
+
+def _ensure_lists_dir() -> None:
+    os.makedirs(LISTS_DIR, exist_ok=True)
+
+
+def _safe_list_id(list_id: str) -> str:
+    """Reject anything that could escape LISTS_DIR. Only [A-Za-z0-9_-]
+    survives — same alphabet used when minting fresh ids."""
+    return re.sub(r'[^a-zA-Z0-9_-]', '', list_id or '')
+
+
+def _mint_list_id(filename: str) -> str:
+    """Slug the filename so `ls lists/` is debuggable, then append a uuid
+    suffix so re-uploads of the same name don't collide."""
+    base = os.path.splitext(filename or 'list')[0]
+    slug = re.sub(r'[^a-zA-Z0-9_-]+', '-', base).strip('-').lower()
+    if not slug:
+        slug = 'list'
+    return f'{slug[:40]}-{uuid.uuid4().hex[:8]}'
+
+
+def _list_paths(list_id: str) -> tuple:
+    """Return (data_path, meta_path). Caller is responsible for passing a
+    safe id (use _safe_list_id at the API boundary)."""
+    safe = _safe_list_id(list_id)
+    return (os.path.join(LISTS_DIR, f'{safe}.txt'),
+            os.path.join(LISTS_DIR, f'{safe}.json'))
+
+
+def _write_list_meta(list_id: str, name: str, lines: int, size: int) -> None:
+    """Persist sidecar metadata next to the data file."""
+    _, meta_path = _list_paths(list_id)
+    with open(meta_path, 'w') as f:
+        json.dump({
+            'id':          list_id,
+            'name':        name,
+            'lines':       int(lines),
+            'size':        int(size),
+            'uploaded_at': datetime.now().isoformat(),
+        }, f, indent=2)
+
+
+def _read_list_meta(list_id: str) -> 'dict | None':
+    _, meta_path = _list_paths(list_id)
+    if not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _list_all_lists() -> list:
+    """Inventory of every list on disk. Sorted newest-first by mtime so
+    the dashboard's freshest uploads bubble to the top."""
+    _ensure_lists_dir()
+    out = []
+    try:
+        entries = os.listdir(LISTS_DIR)
+    except OSError:
+        return out
+    for fn in entries:
+        if not fn.endswith('.json'):
+            continue
+        list_id = fn[:-5]
+        meta = _read_list_meta(list_id)
+        if not meta:
+            continue
+        # Annotate with whether the data file still exists — `lists/` could
+        # have an orphaned sidecar if a delete partially failed.
+        data_path, _ = _list_paths(list_id)
+        meta['present'] = os.path.exists(data_path)
+        out.append(meta)
+    out.sort(key=lambda m: m.get('uploaded_at') or '', reverse=True)
+    return out
+
+
+def _store_uploaded_list(src_path: str, original_filename: str) -> dict:
+    """Promote a freshly-written target file at `src_path` into the
+    per-list store. Mints an id, copies bytes, writes meta, returns the
+    record. Caller keeps src_path (we don't delete it — it's typically
+    `targets.txt` which other code still expects to exist)."""
+    _ensure_lists_dir()
+    list_id = _mint_list_id(original_filename)
+    data_path, _ = _list_paths(list_id)
+    shutil.copyfile(src_path, data_path)
+    # Count non-empty lines (one streaming pass; cheap for tens of MB).
+    lines = 0
+    with open(data_path, 'r', errors='ignore') as f:
+        for line in f:
+            if line.strip():
+                lines += 1
+    size = os.path.getsize(data_path)
+    _write_list_meta(list_id, original_filename, lines, size)
+    return {'id': list_id, 'name': original_filename, 'lines': lines, 'size': size}
+
+
+def _bootstrap_legacy_list() -> None:
+    """One-time migration: if an existing `targets.txt` predates the
+    lists/ layout, register it as id='legacy' so the dashboard sees the
+    bytes you already have. Idempotent — safe to call on every boot."""
+    _ensure_lists_dir()
+    legacy_data, legacy_meta = _list_paths('legacy')
+    if os.path.exists(legacy_meta):
+        return  # already migrated
+    if not os.path.exists('targets.txt'):
+        return  # nothing to migrate
+    try:
+        shutil.copyfile('targets.txt', legacy_data)
+        lines = 0
+        with open(legacy_data, 'r', errors='ignore') as f:
+            for line in f:
+                if line.strip():
+                    lines += 1
+        _write_list_meta('legacy', 'targets.txt', lines, os.path.getsize(legacy_data))
+    except Exception as e:
+        print(f'[bootstrap] legacy list migration failed: {e}')
+
+
+# Run the migration once at import time — installer/deploy.py restart hits this.
+_bootstrap_legacy_list()
+
+
+def _resolve_crack_target_path(mgr, list_id: str = '') -> 'str | None':
+    """Resolve the bytes a crack session should ship to workers.
+
+    Lookup order:
+      1. If `list_id` is provided AND `lists/<id>.txt` exists → use it.
+         This is the new per-list path and the operator's actual choice
+         from the composer dropdown.
+      2. Fall back to the controller's globally-configured `target_file`
+         (set via /api/vps/select-file).
+      3. Fall back to `targets.txt` in CWD.
+
+    Returns the path or None if nothing usable was found."""
+    if list_id:
+        data_path, _ = _list_paths(list_id)
+        if os.path.exists(data_path):
+            return data_path
+    # Legacy fallback path — preserved so a non-list-aware deploy still works.
     target_path = None
     if mgr is not None:
         try:
@@ -3361,9 +3587,17 @@ def api_crack_start():
     if mgr is None:
         return jsonify({'ok': False, 'error': 'SSH manager unavailable'}), 503
 
-    target_path = _resolve_crack_target_path(mgr)
+    target_path = _resolve_crack_target_path(mgr, list_id)
     if not target_path:
-        return jsonify({'ok': False, 'error': 'target list not found'}), 404
+        # Distinguish "you picked a list_id that doesn't exist on the
+        # controller" from "no list at all" — both still 404 but the
+        # message tells the operator what to do.
+        if list_id:
+            err = (f"target list '{list_id}' not found on controller "
+                   f"— re-upload it via the Lists tab")
+        else:
+            err = 'target list not found — upload one via the Lists tab'
+        return jsonify({'ok': False, 'error': err}), 404
     try:
         with open(target_path, 'r', errors='ignore') as f:
             all_targets = [ln.strip() for ln in f if ln.strip()]

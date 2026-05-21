@@ -38,7 +38,7 @@ import { loadLists, saveLists } from './lib/listsStorage'
 import { loadFleetControl, deployListViaApi, type FleetControlConfig } from './lib/fleetControl'
 import { clearFleetCredentials, getFleetCredential } from './lib/fleetCredStore'
 import { deleteListBody, getListBody, clearListBodies } from './lib/listBodyCache'
-import { stats as reconStatsApi, vps as reconVps, r2 as reconR2 } from './lib/reconApi'
+import { stats as reconStatsApi, vps as reconVps, r2 as reconR2, lists as reconLists } from './lib/reconApi'
 import { pushCpuSample } from './lib/vpsHistory'
 import { allocateChunks } from './lib/splitWorkload'
 import type { Finding, Scan, ScanShard, TargetList, VpsNode } from './types'
@@ -170,6 +170,57 @@ export default function App() {
     const t = window.setInterval(poll, 60_000)
     return () => { alive = false; window.clearInterval(t) }
   }, [backendLive, pushAlertToast])
+
+  // ── Reconcile localStorage list cache with the controller's actual
+  //    `lists/` directory whenever the backend comes online. The cache
+  //    is a UX nicety — it remembers preview lines + names across
+  //    reloads — but it cannot know when an rsync wipe or `rm` has
+  //    removed the data file on the server. Without this pass the
+  //    composer dropdown shows lists that 404 on /api/crack/start.
+  //
+  //    Strategy: server is the source of truth for "does the data
+  //    exist?". We DROP any localStorage entry whose id isn't in the
+  //    server inventory (or whose `present: false`), and ADD any
+  //    server list the cache hasn't seen yet (e.g. uploaded from
+  //    another browser/session).
+  useEffect(() => {
+    if (!backendLive) return
+    let alive = true
+    void (async () => {
+      try {
+        const r = await reconLists.list()
+        if (!alive) return
+        const serverById = new Map(r.lists.filter((l) => l.present).map((l) => [l.id, l]))
+        setLists((prev) => {
+          // Keep cached lists that the server still has the bytes for.
+          const kept = prev.filter((l) => serverById.has(l.id))
+          // Inject server-only lists as lightweight TargetList records.
+          // No preview (we never read the file in this browser) but the
+          // composer just needs id/name/lineCount to dispatch a crack.
+          const knownIds = new Set(kept.map((l) => l.id))
+          for (const s of serverById.values()) {
+            if (knownIds.has(s.id)) continue
+            kept.push({
+              id:             s.id,
+              name:           s.name,
+              uploadedAt:     s.uploaded_at,
+              lineCount:      s.lines,
+              fileSize:       s.size,
+              contentHash:    `server-${s.id}`,
+              preview:        [],
+              assignedVpsIds: [],
+              status:         'idle',
+              note:           'On controller — preview unavailable in this session',
+            })
+          }
+          return kept
+        })
+      } catch {
+        // Network/transient — leave the cache as-is; next poll retries.
+      }
+    })()
+    return () => { alive = false }
+  }, [backendLive])
 
   const toggleScanPause = useCallback((scanId: string) => {
     setScans((prev) => {

@@ -208,8 +208,11 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
           // up. Reads as e.g. "Uploaded via Cloudflare R2 (overflow) —
           // list body saved on server as targets.txt".
           const accountSuffix = r2AccountLabel ? ` (${r2AccountLabel})` : ''
+          // Prefer the backend's assigned list_id so /api/crack/start can
+          // resolve `lists/<id>.txt`. Fall back to a local id only if the
+          // backend predates the per-list store (older deploys).
           const next: TargetList = {
-            id: makeListId(),
+            id: result.list_id || makeListId(),
             name: file.name,
             uploadedAt: new Date().toISOString(),
             lineCount: result.targets,
@@ -254,8 +257,11 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
       const result = await reconVps.finalizeUpload(uploadId, totalChunks, file.name)
       setUploadProgress(100)
 
+      // Backend's per-list id (`lists/<id>.txt`) takes priority over a
+      // locally-minted one so the composer's pick lines up with what
+      // /api/crack/start can actually resolve on disk.
       const next: TargetList = {
-        id: makeListId(),
+        id: result.list_id || makeListId(),
         name: file.name,
         uploadedAt: new Date().toISOString(),
         lineCount: result.targets,
