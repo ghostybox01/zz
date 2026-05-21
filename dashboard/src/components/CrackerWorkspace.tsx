@@ -304,187 +304,6 @@ export function CrackerWorkspace({
         />
 
         <div className="cw__main">
-          {composerOpen && (
-            <section className="card-block card-block--tight" style={{ marginBottom: '0.75rem' }}>
-              <div className="card-block__head">
-                <h3 style={{ margin: 0 }}>Compose new crack</h3>
-                <p className="card-block__lede card-block__lede--short">
-                  Pick a target list, choose addons, name the session, and select the workers to split it across.
-                </p>
-              </div>
-              <form onSubmit={submitComposer} className="cw-composer">
-                <label className="cw-composer__field">
-                  <span className="cw-composer__label">Session name</span>
-                  <input
-                    className="tg-input"
-                    type="text"
-                    value={sessionName}
-                    onChange={(e) => setSessionName(e.target.value)}
-                    placeholder="e.g. nightly-aws-sweep"
-                    spellCheck={false}
-                  />
-                </label>
-                <label className="cw-composer__field">
-                  <span className="cw-composer__label">Target list</span>
-                  {lists.length === 0 ? (
-                    <span className="muted">No lists uploaded — add one on the Lists tab.</span>
-                  ) : (
-                    <select
-                      className="tg-input"
-                      value={pickedListId}
-                      onChange={(e) => setPickedListId(e.target.value)}
-                    >
-                      {lists.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.name} ({l.lineCount.toLocaleString()} lines)
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </label>
-                <fieldset className="cw-composer__field">
-                  <legend className="cw-composer__label">Addons ({pickedAddons.size} selected)</legend>
-                  {/* Reuse the cockpit's `.cw-addons__row` grid so the composer
-                      tiles match the main panel's look (4-col grid w/ logos)
-                      instead of stacking vertically. --cw-addon-cols mirrors
-                      the AddonsStrip auto-balance: ceil(N/2) columns. */}
-                  <div
-                    className="cw-addons__row"
-                    style={{ ['--cw-addon-cols' as string]: Math.max(1, Math.ceil(composerAddons.length / 2)) }}
-                  >
-                    {composerAddons.map((a) => {
-                      const on = pickedAddons.has(a.id)
-                      const { domain, Glyph } = brandFor(a)
-                      return (
-                        <button
-                          key={a.id}
-                          type="button"
-                          className={`cw-addon${on ? ' cw-addon--on' : ''}`}
-                          onClick={() => toggleAddon(a.id)}
-                          aria-pressed={on}
-                        >
-                          <span className="cw-addon__logo" aria-hidden>
-                            {domain ? (
-                              <BrandLogo domain={domain} Fallback={Glyph} alt={a.label} size={42} />
-                            ) : (
-                              <Glyph width={42} height={42} />
-                            )}
-                          </span>
-                          <span className="cw-addon__label">{a.label}</span>
-                          <span className={`cw-addon__state cw-addon__state--${on ? 'on' : 'off'}`}>
-                            {on ? 'ON' : 'OFF'}
-                          </span>
-                        </button>
-                      )
-                    })}
-                    {composerAddons.length === 0 && (
-                      <span className="muted">No addons enabled. Toggle some on in Settings → Cracker addons.</span>
-                    )}
-                  </div>
-                </fieldset>
-
-                <fieldset className="cw-composer__field">
-                  <legend className="cw-composer__label">
-                    Workers ({pickedVpsIds.size} of {deployableFleet.length} selected)
-                  </legend>
-                  <div className="tlist__chips">
-                    {deployableFleet.length === 0 ? (
-                      <span className="muted-callout">No healthy workers — add nodes via Fleet first.</span>
-                    ) : (
-                      deployableFleet.map((node) => {
-                        const on = pickedVpsIds.has(node.id)
-                        return (
-                          <button
-                            key={node.id}
-                            type="button"
-                            className={`tlist-chip${on ? ' tlist-chip--on' : ''}`}
-                            onClick={() => toggleVps(node.id)}
-                            title={`${node.region} · ${node.host}${node.source === 'discovered' ? ' · discovered' : ''}`}
-                          >
-                            <span className={`tlist-chip__dot tlist-chip__dot--${node.status}`} aria-hidden />
-                            {node.label}
-                            {node.source === 'discovered' && <span className="tlist-chip__disc">disc</span>}
-                          </button>
-                        )
-                      })
-                    )}
-                  </div>
-                </fieldset>
-
-                {composerError && (
-                  <p className="settings-hint" style={{ color: 'var(--danger)', marginTop: '.5rem' }}>{composerError}</p>
-                )}
-
-                <div className="settings-btn-row" style={{ marginTop: '0.75rem' }}>
-                  <button type="submit" className="btn-primary" disabled={!canSubmit}>
-                    {submitting ? 'Queueing…' : 'Queue crack'}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-glass btn-glass--xs"
-                    onClick={() => setComposerOpen(false)}
-                    disabled={submitting}
-                  >
-                    Close
-                  </button>
-                </div>
-              </form>
-
-              {sessions.length > 0 && (
-                <div className="muted-callout" style={{ marginTop: '0.75rem' }}>
-                  <strong>Active crack sessions</strong>
-                  <ul style={{ marginTop: '0.5rem', paddingLeft: '1.2rem' }}>
-                    {sessions.map((s) => {
-                      const addonLabels = s.addon_ids.map((id) =>
-                        ADDON_CATALOG.find((a) => a.id === id)?.label ?? id,
-                      )
-                      return (
-                        <li key={s.id} style={{ marginBottom: '0.25rem' }}>
-                          <strong>{s.name}</strong>
-                          {' · '}<code>{s.status}</code>
-                          {' · list '}<code>{s.list_name}</code>
-                          {' · '}<code>{s.worker_ips.length} worker(s)</code>
-                          {addonLabels.length > 0
-                            ? <> · addons: <code>{addonLabels.join(', ')}</code></>
-                            : null}
-                          {(s.status === 'running' || s.status === 'queued') && (
-                            <button
-                              type="button"
-                              className="btn-glass btn-glass--xs"
-                              onClick={() => {
-                                crack.stop(s.id)
-                                  .then(() => crack.list())
-                                  .then((rr) => { if (Array.isArray(rr?.sessions)) setSessions(rr.sessions) })
-                                  .catch(() => { /* swallow */ })
-                              }}
-                              style={{ marginLeft: '0.4rem' }}
-                            >
-                              Stop
-                            </button>
-                          )}
-                          {(s.status === 'completed' || s.status === 'stopped' || s.status === 'failed') && (
-                            <button
-                              type="button"
-                              className="btn-glass btn-glass--xs"
-                              onClick={() => {
-                                crack.remove(s.id)
-                                  .then(() => setSessions((prev) => prev.filter((x) => x.id !== s.id)))
-                                  .catch(() => { /* swallow */ })
-                              }}
-                              style={{ marginLeft: '0.4rem' }}
-                            >
-                              Dismiss
-                            </button>
-                          )}
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </div>
-              )}
-            </section>
-          )}
-
           {activeScan ? (
             <CrackerSessionPanel
               scan={activeScan}
@@ -515,6 +334,190 @@ export function CrackerWorkspace({
           </section>
         )}
       </div>
+
+      {composerOpen && (
+        <div
+          className="cw-hub-modal__backdrop"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!submitting) setComposerOpen(false) }}
+        >
+          <div className="cw-hub-modal" style={{ width: 'min(680px, 92vw)' }} onClick={(e) => e.stopPropagation()}>
+            <header className="cw-hub-modal__head">
+              <div>
+                <h3 style={{ margin: 0 }}>Compose new crack</h3>
+                <p className="muted" style={{ margin: '.25rem 0 0', fontSize: '.82rem' }}>
+                  Pick a target list, choose addons, name the session, and select the workers to split it across.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-glass btn-glass--xs"
+                onClick={() => setComposerOpen(false)}
+                disabled={submitting}
+              >
+                Close
+              </button>
+            </header>
+
+            <form onSubmit={submitComposer} className="cw-composer">
+              <label className="cw-composer__field">
+                <span className="cw-composer__label">Session name</span>
+                <input
+                  className="tg-input"
+                  type="text"
+                  value={sessionName}
+                  onChange={(e) => setSessionName(e.target.value)}
+                  placeholder="e.g. nightly-aws-sweep"
+                  spellCheck={false}
+                />
+              </label>
+              <label className="cw-composer__field">
+                <span className="cw-composer__label">Target list</span>
+                {lists.length === 0 ? (
+                  <span className="muted">No lists uploaded — add one on the Lists tab.</span>
+                ) : (
+                  <select
+                    className="tg-input"
+                    value={pickedListId}
+                    onChange={(e) => setPickedListId(e.target.value)}
+                  >
+                    {lists.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name} ({l.lineCount.toLocaleString()} lines)
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </label>
+              <fieldset className="cw-composer__field">
+                <legend className="cw-composer__label">Addons ({pickedAddons.size} selected)</legend>
+                <div className="cw-composer__addons">
+                  {composerAddons.map((a) => {
+                    const on = pickedAddons.has(a.id)
+                    const { domain, Glyph } = brandFor(a)
+                    return (
+                      <button
+                        key={a.id}
+                        type="button"
+                        className={`cw-addon${on ? ' cw-addon--on' : ''}`}
+                        onClick={() => toggleAddon(a.id)}
+                        aria-pressed={on}
+                      >
+                        <span className="cw-addon__logo" aria-hidden>
+                          {domain ? (
+                            <BrandLogo domain={domain} Fallback={Glyph} alt={a.label} size={42} />
+                          ) : (
+                            <Glyph width={42} height={42} />
+                          )}
+                        </span>
+                        <span className="cw-addon__label">{a.label}</span>
+                        <span className={`cw-addon__state cw-addon__state--${on ? 'on' : 'off'}`}>
+                          {on ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+                    )
+                  })}
+                  {composerAddons.length === 0 && (
+                    <span className="muted">No addons enabled. Toggle some on in Settings → Cracker addons.</span>
+                  )}
+                </div>
+              </fieldset>
+
+              <fieldset className="cw-composer__field">
+                <legend className="cw-composer__label">
+                  Workers ({pickedVpsIds.size} of {deployableFleet.length} selected)
+                </legend>
+                <div className="tlist__chips">
+                  {deployableFleet.length === 0 ? (
+                    <span className="muted-callout">No healthy workers — add nodes via Fleet first.</span>
+                  ) : (
+                    deployableFleet.map((node) => {
+                      const on = pickedVpsIds.has(node.id)
+                      return (
+                        <button
+                          key={node.id}
+                          type="button"
+                          className={`tlist-chip${on ? ' tlist-chip--on' : ''}`}
+                          onClick={() => toggleVps(node.id)}
+                          title={`${node.region} · ${node.host}${node.source === 'discovered' ? ' · discovered' : ''}`}
+                        >
+                          <span className={`tlist-chip__dot tlist-chip__dot--${node.status}`} aria-hidden />
+                          {node.label}
+                          {node.source === 'discovered' && <span className="tlist-chip__disc">disc</span>}
+                        </button>
+                      )
+                    })
+                  )}
+                </div>
+              </fieldset>
+
+              {composerError && (
+                <p className="settings-hint" style={{ color: 'var(--danger)', marginTop: '.5rem' }}>{composerError}</p>
+              )}
+
+              <div className="settings-btn-row" style={{ marginTop: '0.75rem' }}>
+                <button type="submit" className="btn-primary" disabled={!canSubmit}>
+                  {submitting ? 'Queueing…' : 'Queue crack'}
+                </button>
+              </div>
+            </form>
+
+            {sessions.length > 0 && (
+              <div className="muted-callout" style={{ marginTop: '0.75rem' }}>
+                <strong>Active crack sessions</strong>
+                <ul style={{ marginTop: '0.5rem', paddingLeft: '1.2rem' }}>
+                  {sessions.map((s) => {
+                    const addonLabels = s.addon_ids.map((id) =>
+                      ADDON_CATALOG.find((a) => a.id === id)?.label ?? id,
+                    )
+                    return (
+                      <li key={s.id} style={{ marginBottom: '0.25rem' }}>
+                        <strong>{s.name}</strong>
+                        {' · '}<code>{s.status}</code>
+                        {' · list '}<code>{s.list_name}</code>
+                        {' · '}<code>{s.worker_ips.length} worker(s)</code>
+                        {addonLabels.length > 0
+                          ? <> · addons: <code>{addonLabels.join(', ')}</code></>
+                          : null}
+                        {(s.status === 'running' || s.status === 'queued') && (
+                          <button
+                            type="button"
+                            className="btn-glass btn-glass--xs"
+                            onClick={() => {
+                              crack.stop(s.id)
+                                .then(() => crack.list())
+                                .then((rr) => { if (Array.isArray(rr?.sessions)) setSessions(rr.sessions) })
+                                .catch(() => { /* swallow */ })
+                            }}
+                            style={{ marginLeft: '0.4rem' }}
+                          >
+                            Stop
+                          </button>
+                        )}
+                        {(s.status === 'completed' || s.status === 'stopped' || s.status === 'failed') && (
+                          <button
+                            type="button"
+                            className="btn-glass btn-glass--xs"
+                            onClick={() => {
+                              crack.remove(s.id)
+                                .then(() => setSessions((prev) => prev.filter((x) => x.id !== s.id)))
+                                .catch(() => { /* swallow */ })
+                            }}
+                            style={{ marginLeft: '0.4rem' }}
+                          >
+                            Dismiss
+                          </button>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
