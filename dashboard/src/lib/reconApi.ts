@@ -119,10 +119,26 @@ class ReconApiError extends Error {
   path: string
   payload: unknown
   constructor(status: number, path: string, payload: unknown) {
-    super(`Recon API ${status} ${path}`)
+    // Surface the backend's own error message when present (e.g. the
+    // /api/crack/start "target list not found" 404). The old format
+    // showed only "Recon API 404 /crack/start", which hid the actual
+    // reason and looked like a missing route.
+    const detail = ReconApiError.extractDetail(payload)
+    super(detail ? `${detail} (${status} ${path})` : `Recon API ${status} ${path}`)
     this.status = status
     this.path = path
     this.payload = payload
+  }
+
+  private static extractDetail(payload: unknown): string {
+    if (!payload) return ''
+    if (typeof payload === 'string') return payload.slice(0, 200)
+    if (typeof payload === 'object') {
+      const p = payload as { error?: unknown; message?: unknown; detail?: unknown }
+      const msg = p.error ?? p.message ?? p.detail
+      if (typeof msg === 'string' && msg.length > 0) return msg.slice(0, 200)
+    }
+    return ''
   }
 }
 

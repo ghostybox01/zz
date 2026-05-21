@@ -101,6 +101,8 @@ rsync -a --delete \
   --exclude='backend/*.db-journal' \
   --exclude='backend/*.db-wal' \
   --exclude='backend/*.db-shm' \
+  --exclude='backend/targets.txt' \
+  --exclude='backend/uploads/' \
   "$SRC/" "$INSTALL_DIR/"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
