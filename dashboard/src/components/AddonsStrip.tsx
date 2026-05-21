@@ -73,7 +73,7 @@ function fallbackGlyphForCategory(category: AddonCategory): Glyph {
   }
 }
 
-function brandFor(entry: AddonEntry): { domain: string; Glyph: Glyph } {
+export function brandFor(entry: AddonEntry): { domain: string; Glyph: Glyph } {
   return BRAND_BY_ID[entry.id] ?? { domain: '', Glyph: fallbackGlyphForCategory(entry.category) }
 }
 

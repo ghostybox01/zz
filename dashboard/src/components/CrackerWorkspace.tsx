@@ -13,7 +13,8 @@ import {
   getEnabledAddons,
   type CrackerAddonEnabledMap,
 } from '../data/addonCatalog'
-import { AddonsStrip } from './AddonsStrip'
+import { AddonsStrip, brandFor } from './AddonsStrip'
+import { BrandLogo } from './BrandGlyph'
 import { CrackerListTile } from './CrackerListTile'
 import { CrackerSessionPanel } from './CrackerSessionPanel'
 import { CrackerSessionRail } from './CrackerSessionRail'
@@ -336,9 +337,17 @@ export function CrackerWorkspace({
                 </label>
                 <fieldset className="cw-composer__field">
                   <legend className="cw-composer__label">Addons ({pickedAddons.size} selected)</legend>
-                  <div className="cw-composer__addons">
+                  {/* Reuse the cockpit's `.cw-addons__row` grid so the composer
+                      tiles match the main panel's look (4-col grid w/ logos)
+                      instead of stacking vertically. --cw-addon-cols mirrors
+                      the AddonsStrip auto-balance: ceil(N/2) columns. */}
+                  <div
+                    className="cw-addons__row"
+                    style={{ ['--cw-addon-cols' as string]: Math.max(1, Math.ceil(composerAddons.length / 2)) }}
+                  >
                     {composerAddons.map((a) => {
                       const on = pickedAddons.has(a.id)
+                      const { domain, Glyph } = brandFor(a)
                       return (
                         <button
                           key={a.id}
@@ -346,8 +355,14 @@ export function CrackerWorkspace({
                           className={`cw-addon${on ? ' cw-addon--on' : ''}`}
                           onClick={() => toggleAddon(a.id)}
                           aria-pressed={on}
-                          style={{ minWidth: '7rem' }}
                         >
+                          <span className="cw-addon__logo" aria-hidden>
+                            {domain ? (
+                              <BrandLogo domain={domain} Fallback={Glyph} alt={a.label} size={42} />
+                            ) : (
+                              <Glyph width={42} height={42} />
+                            )}
+                          </span>
                           <span className="cw-addon__label">{a.label}</span>
                           <span className={`cw-addon__state cw-addon__state--${on ? 'on' : 'off'}`}>
                             {on ? 'ON' : 'OFF'}
