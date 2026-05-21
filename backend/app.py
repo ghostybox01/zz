@@ -4174,7 +4174,18 @@ def api_fleet_bulk_creds():
                 else:
                     kwargs['key_filename'] = key_path
             cli.connect(**kwargs)
+            # ── Sanity probe BEFORE we commit the host to the roster.
+            # Catches honeypot/jailed/restricted shells where
+            # paramiko.connect() succeeds but everything you actually
+            # exec is silently dropped. Without this, the host gets
+            # added to server_ips.txt and the dispatcher burns minutes
+            # later trying to SCP into a black hole.
+            sane, reason = _shell_sanity_probe(cli)
             cli.close()
+            if not sane:
+                result['message'] = f'rejected: {reason}'
+                results.append(result)
+                continue
             result['ok'] = True
             result['message'] = 'connected'
             accepted_ips.append(r['host'])
@@ -4323,6 +4334,134 @@ def api_fleet_enroll():
 # ──────────────────────────────────────────────────────────────────────────
 # Fleet — install controller pubkey on password-auth workers
 # ──────────────────────────────────────────────────────────────────────────
+
+
+def _shell_sanity_probe(cli) -> tuple:
+    """Catch restricted / jailed / honeypot shells that look fine to
+    paramiko.connect() but silently swallow real commands.
+
+    Triggered by the admin:admin pattern that some shared sandboxes and
+    SSH-honeypots use — connect succeeds, `exec_command('echo $HOME')`
+    returns the literal string `$HOME`, redirects don't work, and any
+    install/touch/append silently no-ops while reporting exit_status 0.
+
+    Three checks, each catches a distinct shell-trap:
+      1. `echo SENTINEL` round-trips a unique token — proves the
+         channel actually executes commands
+      2. `echo "HOME=$HOME"` expands the var — proves it's a Bourne
+         shell, not rbash / busybox-ash / a captive logging wrapper
+      3. `touch && rm` in /tmp confirms writable filesystem
+
+    Returns (ok, reason). Callers should refuse to enroll the host on
+    ok=False — adding it to server_ips.txt would only burn dispatch
+    time later trying to SCP into a black hole."""
+    import uuid as _uuid
+    sentinel = f'RECONX_OK_{_uuid.uuid4().hex[:8]}'
+    try:
+        _, stdout, _ = cli.exec_command(f'echo {sentinel}', timeout=5)
+        out = stdout.read().decode('utf-8', errors='replace').strip()
+        if sentinel not in out:
+            return False, f'shell did not echo sentinel cleanly (got {out[:120]!r})'
+    except Exception as e:
+        return False, f'echo probe failed: {e}'
+
+    try:
+        _, stdout, _ = cli.exec_command('echo "HOME=$HOME"', timeout=5)
+        out = stdout.read().decode('utf-8', errors='replace').strip()
+        # Variable expansion check: any literal '$HOME' in the output
+        # means the shell isn't expanding — classic restricted-shell tell.
+        if '$HOME' in out or not out.startswith('HOME=') or out == 'HOME=':
+            return False, (f'shell did not expand $HOME (got {out[:120]!r}) '
+                           f'— likely jailed/restricted shell (honeypot pattern)')
+    except Exception as e:
+        return False, f'$HOME probe failed: {e}'
+
+    try:
+        marker = f'/tmp/.reconx_sanity_{_uuid.uuid4().hex[:10]}'
+        _, stdout, stderr = cli.exec_command(
+            f'touch {marker} && rm -f {marker} && echo WRITE_OK', timeout=5
+        )
+        out = stdout.read().decode('utf-8', errors='replace').strip()
+        if 'WRITE_OK' not in out:
+            err = stderr.read().decode('utf-8', errors='replace').strip()
+            return False, (f'cannot create+remove /tmp file (stdout={out[:80]!r} '
+                           f'stderr={err[:80]!r}) — read-only or restricted fs')
+    except Exception as e:
+        return False, f'/tmp write probe failed: {e}'
+
+    return True, 'ok'
+
+
+def _resolve_controller_privkey() -> str:
+    """Sibling to _resolve_controller_pubkey — returns the private key
+    path so the post-install verify can attempt a fresh key-auth
+    connection. Same lookup order, just without the .pub suffix."""
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ssh_config.json')
+    try:
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r') as f:
+                cfg = json.load(f)
+            kp = cfg.get('ssh_key_path')
+            if kp and os.path.exists(kp):
+                return kp
+    except Exception:
+        pass
+    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', '.ssh', 'id_ed25519')
+    if os.path.exists(fallback):
+        return fallback
+    home = os.path.expanduser('~/.ssh/id_ed25519')
+    if os.path.exists(home):
+        return home
+    raise FileNotFoundError('no controller private key found (looked in ssh_config.json, ../.ssh, ~/.ssh)')
+
+
+def _verify_pubkey_install_took(host: str, port: int, user: str,
+                                key_path: str, timeout: float = 6.0) -> tuple:
+    """Open a fresh paramiko connection with key-only auth — if it
+    succeeds, the install actually wrote to authorized_keys. If it
+    rejects, the host silently dropped the install (the failure mode
+    that prompted this whole filter). Returns (ok, reason)."""
+    try:
+        import paramiko
+    except ImportError:
+        return False, 'paramiko unavailable'
+    try:
+        cli = paramiko.SSHClient()
+        cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        cli.connect(hostname=host, port=port, username=user,
+                    key_filename=key_path, timeout=timeout,
+                    auth_timeout=timeout, banner_timeout=timeout,
+                    allow_agent=False, look_for_keys=False)
+        try:
+            _, stdout, _ = cli.exec_command('echo VERIFY_OK', timeout=4)
+            out = stdout.read().decode('utf-8', errors='replace').strip()
+            if 'VERIFY_OK' not in out:
+                return False, f'key auth succeeded but post-auth echo failed (got {out[:80]!r})'
+        finally:
+            cli.close()
+        return True, 'key auth verified end-to-end'
+    except Exception as e:
+        # paramiko.AuthenticationException is the common case; keep the
+        # message broad so the operator sees the actual cause.
+        return False, (f'key auth still rejected after install ({type(e).__name__}: {e}) '
+                       f'— host silently dropped the pubkey (restricted shell or honeypot)')
+
+
+def _remove_from_server_ips(host: str) -> None:
+    """Yank a host from server_ips.txt — used after a sanity-probe or
+    install-verify failure so the rejected box doesn't poison the
+    fleet roster. No-op if the file or line doesn't exist."""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'server_ips.txt')
+    if not os.path.exists(src):
+        return
+    try:
+        with open(src, 'r') as f:
+            lines = [ln for ln in f if ln.strip() and ln.strip() != host]
+        with open(src, 'w') as f:
+            f.write('\n'.join(lines) + ('\n' if lines else ''))
+    except Exception as e:
+        print(f'[remove_from_server_ips] {host}: {e}')
 
 
 def _resolve_controller_pubkey() -> str:
@@ -4490,16 +4629,57 @@ def api_fleet_install_keys():
             cli.connect(hostname=r['host'], port=r['port'], username=r['user'],
                         password=r['secret'], timeout=8, allow_agent=False,
                         look_for_keys=False)
+            # Track whether we still want to verify after closing the
+            # password-auth channel. Flipped to False if the sanity
+            # probe rejects or the install command fails.
+            attempt_verify = True
             try:
-                stdin, stdout, stderr = cli.exec_command(install_cmd, timeout=10)
-                stdin.write(pubkey + '\n')
-                stdin.channel.shutdown_write()
-                exit_status = stdout.channel.recv_exit_status()
-                err = stderr.read().decode('utf-8', errors='replace').strip()
-                if exit_status == 0:
+                # Sanity probe FIRST. A restricted/honeypot shell will
+                # accept the install command and return exit_status 0
+                # while quietly discarding every byte we wrote — this
+                # was the exact failure mode that prompted the filter:
+                # endpoint reported `installed: true` but the file
+                # didn't exist on the worker afterwards.
+                sane, reason = _shell_sanity_probe(cli)
+                if not sane:
+                    out['message'] = f'rejected: {reason}'
+                    _remove_from_server_ips(r['host'])
+                    attempt_verify = False
+                else:
+                    stdin, stdout, stderr = cli.exec_command(install_cmd, timeout=10)
+                    stdin.write(pubkey + '\n')
+                    stdin.channel.shutdown_write()
+                    exit_status = stdout.channel.recv_exit_status()
+                    err = stderr.read().decode('utf-8', errors='replace').strip()
+                    if exit_status != 0:
+                        out['message'] = f'install failed (exit {exit_status}): {err or "no stderr"}'
+                        attempt_verify = False
+            finally:
+                cli.close()
+
+            if attempt_verify:
+                # ── Post-install verify: open a fresh key-only connection.
+                # If the install actually wrote to authorized_keys, this
+                # auths. If the install was a no-op (silent drop), we get
+                # paramiko.AuthenticationException here and reject the
+                # host. Belt + braces with the sanity probe: shells that
+                # pass the probe but still discard file writes (rare,
+                # but it happens) still get caught here.
+                try:
+                    priv = _resolve_controller_privkey()
+                    v_ok, v_reason = _verify_pubkey_install_took(
+                        r['host'], r['port'], r['user'], priv
+                    )
+                except FileNotFoundError as e:
+                    v_ok, v_reason = False, f'no controller privkey to verify with: {e}'
+
+                if not v_ok:
+                    out['message'] = f'install verify failed: {v_reason}'
+                    _remove_from_server_ips(r['host'])
+                else:
                     out['ok'] = True
                     out['installed'] = True
-                    out['message'] = 'controller key installed'
+                    out['message'] = 'controller key installed + verified'
                     installed += 1
                     # Now that the controller's pubkey is in this user's
                     # authorized_keys, ssh_manager should connect as them
@@ -4513,10 +4693,6 @@ def api_fleet_install_keys():
                             args=(r['host'],),
                             daemon=True,
                         ).start()
-                else:
-                    out['message'] = f'install failed (exit {exit_status}): {err or "no stderr"}'
-            finally:
-                cli.close()
         except Exception as e:
             out['message'] = f'connect failed: {e}'
         results.append(out)
