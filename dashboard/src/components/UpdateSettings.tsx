@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { BUILD_SHA, BUILD_AT, REPO_SLUG, fetchLatestUpstreamSha } from '../lib/buildInfo'
 
+// REPO_SLUG is intentionally NOT rendered anywhere user-visible — it
+// still drives fetchLatestUpstreamSha under the hood (the build needs
+// to know which GitHub repo to poll), but the operator UI stays
+// vendor-neutral. No links out to github.com, no SHA-vs-repo prose,
+// no "open install instructions" button that opens a browser tab.
+
 const SEEN_KEY = 'reconx.update.seenSha.v1'
 
 type State =
@@ -8,6 +14,8 @@ type State =
   | { kind: 'checking' }
   | { kind: 'up-to-date'; sha: string }
   | { kind: 'update'; sha: string }
+  | { kind: 'installing' }
+  | { kind: 'installed' }
   | { kind: 'error'; message: string }
 
 export function UpdateSettings() {
@@ -16,14 +24,16 @@ export function UpdateSettings() {
 
   async function check() {
     if (!REPO_SLUG) {
-      setState({ kind: 'error', message: 'No repo configured. Set VITE/RECONX_REPO at build time (e.g. RECONX_REPO=myuser/reconx npm run build).' })
+      // Build-time misconfig — surfaced generically so we don't leak
+      // the configured slug into the operator UI.
+      setState({ kind: 'error', message: 'Update source not configured at build time.' })
       return
     }
     setState({ kind: 'checking' })
     try {
       const upstream = await fetchLatestUpstreamSha()
       if (!upstream) {
-        setState({ kind: 'error', message: 'GitHub returned no commit SHA.' })
+        setState({ kind: 'error', message: 'No commit SHA returned from upstream.' })
         return
       }
       const short = upstream.slice(0, 12)
@@ -37,9 +47,29 @@ export function UpdateSettings() {
     }
   }
 
+  // One-click install: POSTs /api/update on the controller, which
+  // shells out to /usr/local/bin/reconx-update (sudoers-allowlisted)
+  // detached. The helper does git fetch + reset + deploy.py and
+  // restarts services — the dashboard typically comes back in ~30–90s.
+  async function install() {
+    setState({ kind: 'installing' })
+    try {
+      const res = await fetch('/api/update', { method: 'POST', headers: { Accept: 'application/json' } })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({} as { error?: string }))
+        setState({ kind: 'error', message: body.error || `Install failed (HTTP ${res.status}).` })
+        return
+      }
+      setState({ kind: 'installed' })
+    } catch (e) {
+      setState({ kind: 'error', message: (e as Error).message })
+    }
+  }
+
   useEffect(() => {
-    // Auto-check on mount when repo is configured. Modal shows only if a new SHA
-    // is found AND the user hasn't dismissed THAT specific SHA yet.
+    // Auto-check on mount when the build knows where to look. Modal
+    // only opens if a newer SHA is found AND the user hasn't already
+    // dismissed THAT specific SHA.
     if (REPO_SLUG) void check()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -58,7 +88,7 @@ export function UpdateSettings() {
       <div className="card-block__head">
         <h2>Updates</h2>
         <p className="card-block__lede card-block__lede--short">
-          Checks <code>{REPO_SLUG || '(repo not set)'}</code> on GitHub for newer commits than this build.
+          Checks for a newer build than what's running here.
         </p>
       </div>
 
@@ -75,12 +105,18 @@ export function UpdateSettings() {
           <span>Status</span>
           <span style={{ fontSize: '.92rem' }}>
             {state.kind === 'idle' && 'Not checked'}
-            {state.kind === 'checking' && 'Checking GitHub…'}
+            {state.kind === 'checking' && 'Checking for updates…'}
             {state.kind === 'up-to-date' && (
               <span style={{ color: 'var(--ok)' }}>Up to date ({state.sha})</span>
             )}
             {state.kind === 'update' && (
-              <span style={{ color: 'var(--gold)' }}>Update available → {state.sha}</span>
+              <span style={{ color: 'var(--gold)' }}>Newer build available → {state.sha}</span>
+            )}
+            {state.kind === 'installing' && (
+              <span style={{ color: 'var(--gold)' }}>Installing — services will restart in 30–90s…</span>
+            )}
+            {state.kind === 'installed' && (
+              <span style={{ color: 'var(--ok)' }}>Install started — refresh in ~60s to pick up the new build</span>
             )}
             {state.kind === 'error' && (
               <span style={{ color: 'var(--danger)' }}>{state.message}</span>
@@ -90,9 +126,24 @@ export function UpdateSettings() {
       </dl>
 
       <div className="settings-btn-row" style={{ marginTop: '.75rem' }}>
-        <button type="button" className="btn-primary" onClick={() => void check()} disabled={state.kind === 'checking'}>
+        <button type="button" className="btn-primary" onClick={() => void check()}
+                disabled={state.kind === 'checking' || state.kind === 'installing'}>
           {state.kind === 'checking' ? 'Checking…' : 'Check for updates'}
         </button>
+        {/* Inline install affordance for the common case where the
+            operator has just clicked "Check" and got a newer SHA but
+            dismissed (or never opened) the modal. Keeps a one-click
+            path visible at all times when there's something to install. */}
+        {state.kind === 'update' && (
+          <button type="button" className="btn-primary" onClick={() => void install()}>
+            Install now
+          </button>
+        )}
+        {state.kind === 'installing' && (
+          <button type="button" className="btn-primary" disabled>
+            Installing…
+          </button>
+        )}
       </div>
 
       {showModal && state.kind === 'update' && (
@@ -102,24 +153,20 @@ export function UpdateSettings() {
               <div>
                 <h3 style={{ margin: 0 }}>Update available</h3>
                 <p className="muted" style={{ margin: '.25rem 0 0', fontSize: '.82rem' }}>
-                  GitHub <code>{REPO_SLUG}</code> has commit <code>{state.sha}</code> — your build is at <code>{BUILD_SHA}</code>.
+                  A newer build (<code>{state.sha}</code>) is available — your current build is <code>{BUILD_SHA}</code>.
                 </p>
               </div>
             </header>
             <p style={{ margin: '.5rem 0', fontSize: '.85rem', color: 'var(--muted)' }}>
-              To install, rerun <code>installer/deploy.py</code> on the controller VPS (or click "Open install
-              instructions" below). The installer re-pulls, rebuilds the dashboard and Go scanner, and restarts services.
+              Click <strong>Install now</strong> to apply it. The controller will pull the new build,
+              rebuild the dashboard and Go scanner, and restart services. Expect ~30–90s of downtime.
             </p>
             <div className="settings-btn-row">
               <button type="button" className="btn-primary" onClick={() => {
-                window.open(`https://github.com/${REPO_SLUG}/compare/${BUILD_SHA}...${state.sha}`, '_blank')
+                dismiss()
+                void install()
               }}>
-                View diff on GitHub
-              </button>
-              <button type="button" className="btn-secondary" onClick={() => {
-                window.open(`https://github.com/${REPO_SLUG}#install`, '_blank')
-              }}>
-                Open install instructions
+                Install now
               </button>
               <button type="button" className="btn-glass" onClick={dismiss}>
                 Skip for now

@@ -65,7 +65,7 @@ export function UpdateBanner() {
         <div className="update-banner" role="alert">
           <span className="update-banner__dot" aria-hidden />
           <span className="update-banner__text">
-            New ReconX build available — <strong>{sha}</strong> on GitHub. Your build is at <code>{BUILD_SHA}</code>.
+            New build available — <strong>{sha}</strong>. Your build is at <code>{BUILD_SHA}</code>.
           </span>
           <div className="update-banner__actions">
             <button type="button" className="btn-primary update-banner__cta" onClick={() => setStatus({ kind: 'modal', sha })}>
@@ -85,22 +85,18 @@ export function UpdateBanner() {
               <div>
                 <h3 style={{ margin: 0 }}>Install update {sha}?</h3>
                 <p className="muted" style={{ margin: '.3rem 0 0', fontSize: '.82rem' }}>
-                  GitHub <code>{REPO_SLUG}</code> has a newer commit. Your current build is <code>{BUILD_SHA}</code>.
+                  A newer build is available — your current build is <code>{BUILD_SHA}</code>.
                 </p>
               </div>
             </header>
             <p style={{ margin: '.5rem 0', fontSize: '.85rem', color: 'var(--muted)', lineHeight: 1.5 }}>
-              The controller will <code>git pull</code> and re-run the installer.
-              Services restart in ~30–90s; the dashboard will briefly disconnect.
+              The controller will pull the new build, rebuild the dashboard and Go scanner,
+              and restart services. Expect ~30–90s of downtime; the dashboard will briefly
+              disconnect.
             </p>
             <div className="settings-btn-row" style={{ marginTop: '.85rem' }}>
               <button type="button" className="btn-primary" onClick={installNow}>
                 Install update now
-              </button>
-              <button type="button" className="btn-secondary" onClick={() => {
-                window.open(`https://github.com/${REPO_SLUG}/compare/${BUILD_SHA}...${sha}`, '_blank')
-              }}>
-                View diff
               </button>
               <button type="button" className="btn-glass" onClick={dismiss}>
                 Skip this version
@@ -129,7 +125,7 @@ export function UpdateBanner() {
               {status.message} The dashboard will reload when it's back.
             </p>
             <p className="muted" style={{ fontSize: '.78rem', margin: '.25rem 0' }}>
-              Target SHA: <code>{sha}</code>
+              Target build: <code>{sha}</code>
             </p>
             <div className="settings-btn-row" style={{ marginTop: '.75rem' }}>
               <button type="button" className="btn-primary" onClick={() => window.location.reload()}>
