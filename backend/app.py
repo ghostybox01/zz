@@ -3427,6 +3427,25 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
     tf_targets = None
     tf_config = None
     try:
+        # Auth pre-flight. paramiko's SFTP reports auth failures as
+        # `OSError: open failed` once the SCP wrapper tries to upload,
+        # which masks the real cause ("controller pubkey isn't in the
+        # worker's authorized_keys"). A cheap ssh_exec probe before the
+        # heavy work surfaces auth/network problems with an actionable
+        # message — operators were burning hours guessing whether the
+        # worker had a full disk, a missing dir, etc.
+        probe = mgr.ssh_exec(ip, 'echo ok', 6)
+        if (probe or '').strip() != 'ok':
+            real = mgr.last_error(ip) if hasattr(mgr, 'last_error') else ''
+            msg = real or 'SSH probe returned no data'
+            lower = msg.lower()
+            if 'authentication' in lower or 'permission denied' in lower or 'publickey' in lower:
+                return None, (f'SSH auth to {ip} failed — install the controller pubkey '
+                              f'(Settings → Fleet bootstrap → paste creds, or copy '
+                              f'/opt/reconx/.ssh/id_ed25519.pub into the worker\'s '
+                              f'~/.ssh/authorized_keys). Detail: {msg}')
+            return None, f'SSH unreachable on {ip}: {msg}'
+
         mgr.ssh_exec(ip, f'mkdir -p {remote_dir}', 5)
 
         # mkstemp + explicit close before scp_upload sidesteps paramiko's

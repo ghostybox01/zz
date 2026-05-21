@@ -143,7 +143,14 @@ export function CrackerWorkspace({
 
   const activeShards = activeScan ? shards.filter((sh) => sh.scanId === activeScan.id) : []
 
-  const activeCracks = scans.filter((s) => s.status === 'running' || s.status === 'paused').length
+  // `queued` is in-flight too — the fire-and-forget dispatcher creates
+  // a session in queued state and flips it to running once the SCP +
+  // remote spawn complete. Excluding queued made the "Active cracks"
+  // tile read 0 during the seconds-to-minutes window a session is
+  // actually being dispatched.
+  const activeCracks = scans.filter(
+    (s) => s.status === 'running' || s.status === 'paused' || s.status === 'queued',
+  ).length
   const addonCount = useMemo(() => {
     if (!config) return 0
     return (
