@@ -156,7 +156,7 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
       return next
     })
 
-  const handleSelectAll = () => setSelected(new Set(rows.map((r) => r.id)))
+  const handleSelectAll = () => setSelected(new Set(sortedFiltered.map((r) => r.id)))
   const handleClearSelection = () => setSelected(new Set())
   const handleDeleteSelected = () => {
     const ids = [...selected]

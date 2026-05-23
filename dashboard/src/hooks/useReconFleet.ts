@@ -138,12 +138,16 @@ export function useReconFleet(): UseReconFleetResult {
     socket.on('vps_update', onVpsUpdate)
     // Ask backend to start its 5s monitor for socket pushes.
     socket.emit('vps_start_monitoring')
+    // Re-subscribe after any reconnect — the backend drops monitoring state on disconnect.
+    const onReconnect = () => { socket.emit('vps_start_monitoring') }
+    socket.on('connect', onReconnect)
 
     pollIdRef.current = window.setInterval(() => { void refresh() }, POLL_MS)
 
     return () => {
       mountedRef.current = false
       socket.off('vps_update', onVpsUpdate)
+      socket.off('connect', onReconnect)
       socket.emit('vps_stop_monitoring')
       if (pollIdRef.current !== null) {
         window.clearInterval(pollIdRef.current)

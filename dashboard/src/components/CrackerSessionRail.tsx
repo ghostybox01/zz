@@ -34,8 +34,7 @@ function StopIcon() {
 }
 
 export function CrackerSessionRail({ scans, activeId, onSelect, onNew, onTogglePause, onStop }: Props) {
-  const running = scans.filter((s) => s.status === 'running' || s.status === 'paused')
-  const multi = running.length > 1
+  const running = scans.filter((s) => s.status === 'running' || s.status === 'paused' || s.status === 'queued')
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
   return (
@@ -55,17 +54,15 @@ export function CrackerSessionRail({ scans, activeId, onSelect, onNew, onToggleP
                 className={`cw-rail__item${active ? ' cw-rail__item--active' : ''}${expanded ? ' cw-rail__item--expanded' : ''}`}
                 onClick={() => {
                   onSelect(scan.id)
-                  if (multi) setExpandedId(expanded ? null : scan.id)
+                  setExpandedId(expanded ? null : scan.id)
                 }}
               >
                 <span className={`cw-rail__pulse cw-rail__pulse--${scan.status}`} aria-hidden />
                 <span className="cw-rail__name">{short.toUpperCase()}</span>
                 <span className="cw-rail__sub mono">#{scan.id.replace(/\D/g, '').slice(-4)}</span>
-                {multi && (
-                  <span className="cw-rail__chev" aria-hidden style={{ transform: expanded ? 'rotate(180deg)' : undefined }}>▾</span>
-                )}
+                <span className="cw-rail__chev" aria-hidden style={{ transform: expanded ? 'rotate(180deg)' : undefined }}>▾</span>
               </button>
-              {multi && expanded && (
+              {expanded && (
                 <div className="cw-rail__controls">
                   {onTogglePause && (
                     <button
