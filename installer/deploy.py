@@ -388,8 +388,12 @@ def start_services(args: argparse.Namespace) -> None:
         warn('  (dry run, skipping systemctl)')
         return
     run(['systemctl', 'daemon-reload'])
-    for svc in ('redis-server', 'reconx-dashboard', 'reconx-fleet-api'):
-        run(['systemctl', 'enable', '--now', svc])
+    run(['systemctl', 'enable', '--now', 'redis-server'])
+    # Explicit restart for our services so Python code changes are picked up
+    # (enable --now does not restart an already-running service).
+    for svc in ('reconx-dashboard', 'reconx-fleet-api'):
+        run(['systemctl', 'enable', svc])
+        run(['systemctl', 'restart', svc])
     run(['systemctl', 'reload', 'nginx'])
 
     for svc in ('reconx-dashboard', 'reconx-fleet-api', 'nginx'):
