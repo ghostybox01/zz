@@ -65,7 +65,7 @@ export const ADDON_CATALOG: readonly AddonEntry[] = [
   { id: 'github',       label: 'GitHub PAT',         category: 'vcs',       scannerKey: 'api_validation.github',   defaultOn: false },
   { id: 'heroku',       label: 'Heroku',             category: 'dev',       scannerKey: 'api_validation.heroku',   defaultOn: false },
   { id: 'datadog',      label: 'Datadog',            category: 'dev',       scannerKey: 'api_validation.datadog',  defaultOn: false },
-  { id: 'crypto-wallet', label: 'Crypto Wallets',    category: 'crypto',    scannerKey: 'api_validation.crypto_wallet', defaultOn: false,
+  { id: 'crypto-wallet', label: 'Crypto Wallets',    category: 'crypto',    scannerKey: 'api_validation.crypto_wallet', defaultOn: true,
     note: 'Detect ETH/BTC private keys + mnemonics, derive addresses, check on-chain balance' },
 ]
 

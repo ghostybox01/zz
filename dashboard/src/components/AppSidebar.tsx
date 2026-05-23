@@ -126,6 +126,16 @@ function IcoTerminal(props: SVGProps<SVGSVGElement>) {
   )
 }
 
+function IcoCrypto(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <path d="M12 2L2 7l10 5 10-5-10-5z" strokeLinejoin="round" />
+      <path d="M2 17l10 5 10-5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M2 12l10 5 10-5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 function IcoHelp(props: SVGProps<SVGSVGElement>) {
   return (
     <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
@@ -148,7 +158,7 @@ const ITEMS: Item[] = [
   { id: 'fleet', label: 'Fleet', Ico: IcoServers },
   { id: 'findings', label: 'Hits', Ico: IcoTrophy },
   { id: 'stripe', label: 'Stripe', Ico: IcoTrophy },
-  { id: 'crypto', label: 'Crypto', Ico: IcoTrophy },
+  { id: 'crypto', label: 'Crypto', Ico: IcoCrypto },
   { id: 'dorks', label: 'Dorks', Ico: IcoSearch },
   { id: 'logs', label: 'Logs', Ico: IcoTerminal },
   { id: 'settings', label: 'Settings', Ico: IcoGear },

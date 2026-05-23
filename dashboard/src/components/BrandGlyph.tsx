@@ -195,6 +195,17 @@ export function GlyphLfi(props: Common) {
   )
 }
 
+/** Crypto — stacked diamond layers (generic blockchain/wallet icon). */
+export function GlyphCrypto(props: Common) {
+  return (
+    <svg {...box24} {...props} fill="none" stroke="currentColor" strokeWidth="1.6">
+      <path d="M12 2L2 7l10 5 10-5-10-5z" fill="#f59e0b" stroke="#f59e0b" strokeLinejoin="round"/>
+      <path d="M2 17l10 5 10-5" stroke="#f59e0b" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M2 12l10 5 10-5" stroke="#fbbf24" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
 /* ─────────────────────────────────────────────────────────────────
  * Brandfetch override hook
  *
