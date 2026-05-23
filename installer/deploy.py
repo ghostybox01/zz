@@ -199,6 +199,16 @@ def build_dashboard(args: argparse.Namespace) -> None:
         warn('  (dry run, skipping npm)')
         return
     dash = INSTALL_DIR / 'dashboard'
+    # Remove stale untracked source files that survive git reset --hard
+    # and would cause TypeScript compilation errors.
+    _stale = [
+        dash / 'src' / 'components' / 'DataImport.tsx',
+        dash / 'src' / 'data' / 'demoSnapshot.ts',
+    ]
+    for _f in _stale:
+        if _f.exists():
+            _f.unlink()
+            log(f'  removed stale file: {_f.relative_to(INSTALL_DIR)}')
     run(['npm', 'ci', '--no-audit', '--no-fund', '--prefer-offline'], user=SERVICE_USER, cwd=dash)
     run(['npm', 'run', 'build'], user=SERVICE_USER, cwd=dash,
         env={'RECONX_REPO': REPO_SLUG})
