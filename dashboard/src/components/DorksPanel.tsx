@@ -431,7 +431,6 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     setBulkOpen(false)
   }
 
-  const bulkRunning_idx = bulkItems.findIndex((it) => it.status === 'running')
   const bulkDone = bulkItems.filter((it) => it.status === 'done').length
 
   const isGoogle = platform === 'google'
