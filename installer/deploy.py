@@ -365,12 +365,25 @@ def write_nginx_site() -> None:
 
 def install_update_helper() -> None:
     log('installing /usr/local/bin/reconx-update + sudoers rule…')
+    # Capture the branch that is currently checked out so the update helper
+    # stays pinned to it. Falls back to 'main' if HEAD is detached.
+    try:
+        import subprocess as _sp
+        _branch = _sp.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            cwd=str(INSTALL_DIR), text=True,
+        ).strip()
+        if _branch == 'HEAD':  # detached HEAD
+            _branch = 'main'
+    except Exception:
+        _branch = 'main'
+
     script = textwrap.dedent(f'''\
         #!/bin/bash
         set -euo pipefail
         cd {INSTALL_DIR}
-        git fetch --quiet origin main
-        git reset --hard origin/main
+        git fetch --quiet origin {_branch}
+        git reset --hard origin/{_branch}
         exec /usr/bin/python3 {INSTALL_DIR}/installer/deploy.py --skip-system
     ''')
     target = Path('/usr/local/bin/reconx-update')
@@ -380,6 +393,7 @@ def install_update_helper() -> None:
     sudoers = f'{SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/reconx-update\n'
     Path('/etc/sudoers.d/reconx-update').write_text(sudoers)
     Path('/etc/sudoers.d/reconx-update').chmod(0o440)
+
 
 
 def start_services(args: argparse.Namespace) -> None:
