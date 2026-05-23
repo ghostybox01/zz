@@ -232,7 +232,7 @@ def build_scanner(args: argparse.Namespace) -> None:
         'HOME': str(INSTALL_DIR),
     }
     run([go, 'mod', 'tidy'], user=SERVICE_USER, cwd=backend, check=False, env=go_env)
-    run([go, 'build', '-o', 'reconx-scanner', 'main.go'],
+    run([go, 'build', '-o', 'reconx-scanner', '.'],
         user=SERVICE_USER, cwd=backend, env=go_env)
 
 
