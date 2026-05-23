@@ -172,7 +172,6 @@ def sync_source(args: argparse.Namespace) -> None:
         '--exclude=__pycache__', '--exclude=ResultJS', '--exclude=installer/cache',
         # Runtime data — never overwrite with rsync
         '--exclude=backend/lists/',
-        '--exclude=backend/config.json',
         '--exclude=backend/crack_sessions.json',
         '--exclude=backend/warc_state.json',
         '--exclude=backend/ssh_config.json',
