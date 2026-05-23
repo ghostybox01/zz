@@ -1,14 +1,23 @@
 import { useCallback, useEffect, useState } from 'react'
 import { dorks as dorksApi, type DorkResult, type GeneratedDork, type SavedDork } from '../lib/reconApi'
 
+type Platform = 'shodan' | 'fofa' | 'google'
+
 const CATEGORIES = [
-  { id: 'aws',  label: 'AWS / Cloud' },
-  { id: 'smtp', label: 'SMTP / Mail' },
-  { id: 'api',  label: 'API Keys' },
-  { id: 'env',  label: '.env / Config' },
-  { id: 'git',  label: 'Git / Source' },
-  { id: 'custom', label: 'Custom' },
+  { id: 'file_exposure', label: 'File Exposure' },
+  { id: 'aws',          label: 'AWS / Cloud' },
+  { id: 'smtp',         label: 'SMTP / Mail' },
+  { id: 'api',          label: 'API Keys' },
+  { id: 'env',          label: '.env / Config' },
+  { id: 'git',          label: 'Git / Source' },
+  { id: 'custom',       label: 'Custom' },
 ]
+
+const PLATFORM_HINT: Record<Platform, string> = {
+  shodan: 'e.g. http.html:"aws_secret_access_key" http.status:200',
+  fofa:   'e.g. body="aws_secret_access_key" && status_code=200',
+  google: 'e.g. filetype:tfstate "AKIA" -site:stackoverflow.com -site:medium.com',
+}
 
 type Props = {
   onImportTargets: (hosts: string[], label: string) => void
@@ -19,30 +28,30 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   const [savedDorks, setSavedDorks] = useState<SavedDork[]>([])
   const [catFilter, setCatFilter] = useState('all')
 
-  const [query, setQuery]     = useState('')
-  const [platform, setPlatform] = useState<'shodan' | 'fofa'>('shodan')
-  const [limit, setLimit]     = useState(100)
-  const [results, setResults] = useState<DorkResult[]>([])
+  const [query, setQuery]       = useState('')
+  const [platform, setPlatform] = useState<Platform>('shodan')
+  const [limit, setLimit]       = useState(100)
+  const [results, setResults]   = useState<DorkResult[]>([])
   const [searchTotal, setSearchTotal] = useState<number | null>(null)
-  const [searching, setSearching] = useState(false)
+  const [searching, setSearching]     = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [selected, setSelected]       = useState<Set<string>>(new Set())
 
-  const [genOpen, setGenOpen]       = useState(false)
+  const [genOpen, setGenOpen]           = useState(false)
   const [genObjective, setGenObjective] = useState('')
-  const [genCategory, setGenCategory] = useState('aws')
-  const [genPlatform, setGenPlatform] = useState<'shodan' | 'fofa'>('shodan')
-  const [genCount, setGenCount]     = useState(10)
-  const [generating, setGenerating] = useState(false)
-  const [generated, setGenerated]   = useState<GeneratedDork[]>([])
-  const [genSource, setGenSource]   = useState<'ai' | 'template' | null>(null)
+  const [genCategory, setGenCategory]   = useState('file_exposure')
+  const [genPlatform, setGenPlatform]   = useState<Platform>('google')
+  const [genCount, setGenCount]         = useState(10)
+  const [generating, setGenerating]     = useState(false)
+  const [generated, setGenerated]       = useState<GeneratedDork[]>([])
+  const [genSource, setGenSource]       = useState<'ai' | 'template' | null>(null)
 
-  const [keysOpen, setKeysOpen]     = useState(false)
-  const [shodanKey, setShodanKey]   = useState('')
-  const [fofaEmail, setFofaEmail]   = useState('')
-  const [fofaKey, setFofaKey]       = useState('')
-  const [anthropicKey, setAnthropicKey] = useState('')
-  const [savingKeys, setSavingKeys] = useState(false)
+  const [keysOpen, setKeysOpen]           = useState(false)
+  const [shodanKey, setShodanKey]         = useState('')
+  const [fofaEmail, setFofaEmail]         = useState('')
+  const [fofaKey, setFofaKey]             = useState('')
+  const [anthropicKey, setAnthropicKey]   = useState('')
+  const [savingKeys, setSavingKeys]       = useState(false)
 
   const [savingDork, setSavingDork] = useState(false)
 
@@ -60,8 +69,14 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     }).catch(() => {})
   }, [keysOpen])
 
+  const openInGoogle = useCallback(() => {
+    if (!query.trim()) return
+    window.open(`https://www.google.com/search?q=${encodeURIComponent(query.trim())}`, '_blank', 'noopener')
+  }, [query])
+
   const runSearch = useCallback(async () => {
     if (!query.trim()) return
+    if (platform === 'google') { openInGoogle(); return }
     setSearching(true)
     setSearchError(null)
     setResults([])
@@ -76,7 +91,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     } finally {
       setSearching(false)
     }
-  }, [query, platform, limit])
+  }, [query, platform, limit, openInGoogle])
 
   const saveDork = useCallback(async () => {
     if (!query.trim()) return
@@ -93,9 +108,13 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   }, [query, platform, onToast])
 
   const deleteSaved = useCallback(async (id: string) => {
-    await dorksApi.deleteSaved(id).catch(() => {})
-    setSavedDorks((prev) => prev.filter((d) => d.id !== id))
-  }, [])
+    try {
+      await dorksApi.deleteSaved(id)
+      setSavedDorks((prev) => prev.filter((d) => d.id !== id))
+    } catch (e) {
+      onToast('Delete failed', (e as Error).message, 'error')
+    }
+  }, [onToast])
 
   const runGenerate = useCallback(async () => {
     setGenerating(true)
@@ -114,10 +133,14 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   const adoptGenerated = useCallback(async (d: GeneratedDork) => {
     setQuery(d.query)
     setPlatform(genPlatform)
-    const r = await dorksApi.save({ query: d.query, category: genCategory, platform: genPlatform, notes: d.notes }).catch(() => null)
-    if (r?.dork) setSavedDorks((prev) => [r.dork, ...prev])
     setGenOpen(false)
-  }, [genPlatform, genCategory])
+    try {
+      const r = await dorksApi.save({ query: d.query, category: genCategory, platform: genPlatform, notes: d.notes })
+      setSavedDorks((prev) => [r.dork, ...prev])
+    } catch (e) {
+      onToast('Could not save dork', (e as Error).message, 'error')
+    }
+  }, [genPlatform, genCategory, onToast])
 
   const saveKeys = useCallback(async () => {
     setSavingKeys(true)
@@ -131,6 +154,12 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
       setSavingKeys(false)
     }
   }, [shodanKey, fofaEmail, fofaKey, anthropicKey, onToast])
+
+  const loadSaved = (d: SavedDork) => {
+    setQuery(d.query)
+    if (d.platform !== 'both') setPlatform(d.platform as Platform)
+    else onToast('Platform not set', `This dork is tagged "both" — select Shodan, FOFA, or Google manually.`)
+  }
 
   const toggleResult = (id: string) => {
     setSelected((prev) => {
@@ -158,13 +187,15 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     ? savedDorks
     : savedDorks.filter((d) => d.category === catFilter)
 
+  const isGoogle = platform === 'google'
+
   return (
     <div className="dorks-panel">
       <header className="dorks-panel__head">
         <div>
           <h2 className="dorks-panel__title">Dork Hunter</h2>
           <p className="dorks-panel__lede muted">
-            AI-generated dorks · Shodan + FOFA search · pipe results straight into the cracker
+            AI-generated dorks · Shodan + FOFA search · Google file exposure · pipe results into the cracker
           </p>
         </div>
         <div className="dorks-panel__actions">
@@ -210,18 +241,20 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                 <button
                   type="button"
                   className="dorks-rail__load"
-                  onClick={() => { setQuery(d.query); if (d.platform !== 'both') setPlatform(d.platform as 'shodan' | 'fofa') }}
+                  onClick={() => loadSaved(d)}
                   title={d.notes || d.query}
                 >
-                  <span className="dorks-rail__badge dorks-rail__badge--cat">{d.category}</span>
-                  <span className="dorks-rail__badge dorks-rail__badge--plat">{d.platform}</span>
+                  <div className="dorks-rail__badges">
+                    <span className="dorks-rail__badge dorks-rail__badge--cat">{d.category.replace('_', ' ')}</span>
+                    <span className="dorks-rail__badge dorks-rail__badge--plat">{d.platform}</span>
+                  </div>
                   <span className="dorks-rail__query mono">{d.query}</span>
                   {d.notes && <span className="dorks-rail__notes muted">{d.notes}</span>}
                 </button>
                 <button
                   type="button"
                   className="dorks-rail__del"
-                  onClick={() => deleteSaved(d.id)}
+                  onClick={() => void deleteSaved(d.id)}
                   aria-label="Delete dork"
                 >×</button>
               </li>
@@ -234,16 +267,14 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
           <div className="dorks-search">
             <div className="dorks-search__row">
               <div className="dorks-plat-toggle">
-                <button
-                  type="button"
-                  className={`dorks-plat-btn${platform === 'shodan' ? ' dorks-plat-btn--on' : ''}`}
-                  onClick={() => setPlatform('shodan')}
-                >Shodan</button>
-                <button
-                  type="button"
-                  className={`dorks-plat-btn${platform === 'fofa' ? ' dorks-plat-btn--on' : ''}`}
-                  onClick={() => setPlatform('fofa')}
-                >FOFA</button>
+                {(['shodan', 'fofa', 'google'] as Platform[]).map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className={`dorks-plat-btn${platform === p ? ' dorks-plat-btn--on' : ''}`}
+                    onClick={() => { setPlatform(p); setResults([]); setSearchError(null) }}
+                  >{p.charAt(0).toUpperCase() + p.slice(1)}</button>
+                ))}
               </div>
               <input
                 className="tg-input dorks-search__input"
@@ -251,28 +282,26 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') void runSearch() }}
-                placeholder={platform === 'shodan'
-                  ? 'e.g. http.html:"aws_secret_access_key" http.status:200'
-                  : 'e.g. body="aws_secret_access_key" && status_code=200'}
+                placeholder={PLATFORM_HINT[platform]}
                 spellCheck={false}
               />
-              <select
-                className="tg-input dorks-search__limit"
-                value={limit}
-                onChange={(e) => setLimit(Number(e.target.value))}
-              >
-                <option value={25}>25</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={200}>200</option>
-                <option value={500}>500</option>
-              </select>
+              {!isGoogle && (
+                <select
+                  className="tg-input dorks-search__limit"
+                  value={limit}
+                  onChange={(e) => setLimit(Number(e.target.value))}
+                >
+                  {[25, 50, 100, 200, 500].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              )}
               <button
                 type="button"
                 className="btn-primary"
                 onClick={() => void runSearch()}
                 disabled={searching || !query.trim()}
-              >{searching ? 'Searching…' : 'Search'}</button>
+              >
+                {isGoogle ? '↗ Open in Google' : searching ? 'Searching…' : 'Search'}
+              </button>
               <button
                 type="button"
                 className="btn-glass"
@@ -281,12 +310,22 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                 title="Save this query to the library"
               >{savingDork ? '…' : '＋ Save'}</button>
             </div>
+
+            {isGoogle && query.trim() && (
+              <div className="dorks-google-hint">
+                <span className="muted" style={{ fontSize: '.78rem' }}>Google dork — opens in browser. Copy to search manually or use a SERP API for automation.</span>
+                <code className="mono" style={{ fontSize: '.72rem', wordBreak: 'break-all', color: 'var(--accent)' }}>
+                  https://www.google.com/search?q={encodeURIComponent(query.trim())}
+                </code>
+              </div>
+            )}
+
             {searchError && (
               <p className="settings-hint" style={{ color: 'var(--danger)', marginTop: '.4rem' }}>{searchError}</p>
             )}
           </div>
 
-          {/* Results */}
+          {/* Shodan/FOFA Results */}
           {results.length > 0 && (
             <div className="dorks-results">
               <div className="dorks-results__bar">
@@ -294,21 +333,13 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                   Showing <strong>{results.length}</strong>
                   {searchTotal != null && searchTotal > results.length ? ` of ${searchTotal.toLocaleString()} total` : ''} results
                 </span>
-                <div style={{ display: 'flex', gap: '.5rem', alignItems: 'center' }}>
-                  <button
-                    type="button"
-                    className="btn-glass btn-glass--xs"
-                    onClick={() => setSelected(new Set(results.map((r) => r.id)))}
-                  >Select all</button>
-                  <button
-                    type="button"
-                    className="btn-glass btn-glass--xs"
-                    onClick={() => setSelected(new Set())}
-                  >Clear</button>
+                <div style={{ display: 'flex', gap: '.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button type="button" className="btn-glass btn-glass--xs"
+                    onClick={() => setSelected(new Set(results.map((r) => r.id)))}>Select all</button>
+                  <button type="button" className="btn-glass btn-glass--xs"
+                    onClick={() => setSelected(new Set())}>Clear</button>
                   {selected.size > 0 && (
-                    <button
-                      type="button"
-                      className="btn-primary"
+                    <button type="button" className="btn-primary"
                       style={{ fontSize: '.75rem', padding: '.3rem .8rem' }}
                       onClick={importSelected}
                     >⬆ Import {selected.size} to cracker</button>
@@ -319,14 +350,16 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                 <table className="dorks-table">
                   <thead>
                     <tr>
-                      <th style={{ width: '2rem' }}><input type="checkbox"
-                        checked={selected.size === results.length}
-                        onChange={(e) => setSelected(e.target.checked ? new Set(results.map((r) => r.id)) : new Set())}
-                      /></th>
+                      <th style={{ width: '2rem' }}>
+                        <input type="checkbox"
+                          checked={selected.size === results.length && results.length > 0}
+                          onChange={(e) => setSelected(e.target.checked ? new Set(results.map((r) => r.id)) : new Set())}
+                        />
+                      </th>
                       <th>Host</th>
                       <th>IP</th>
                       <th>Port</th>
-                      <th>Protocol</th>
+                      <th>Proto</th>
                       <th>Title</th>
                       <th>Banner</th>
                     </tr>
@@ -361,7 +394,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
             </div>
           )}
 
-          {!searching && results.length === 0 && !searchError && (
+          {!searching && results.length === 0 && !searchError && !isGoogle && (
             <div className="muted-callout" style={{ marginTop: '1.5rem' }}>
               <p style={{ margin: 0, fontWeight: 600 }}>No results yet</p>
               <p className="muted" style={{ margin: '.35rem 0 0', fontSize: '.82rem' }}>
@@ -380,7 +413,8 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
               <div>
                 <h3 style={{ margin: 0 }}>AI Dork Generator</h3>
                 <p className="muted" style={{ margin: '.25rem 0 0', fontSize: '.82rem' }}>
-                  Describe what you're hunting and Claude generates optimised dorks. Requires Anthropic key in API Keys; falls back to curated templates.
+                  Describe what you're hunting — Claude writes syntax-perfect dorks for the selected platform.
+                  Falls back to curated templates if no Anthropic key is configured.
                 </p>
               </div>
               <button type="button" className="btn-glass btn-glass--xs" onClick={() => setGenOpen(false)} disabled={generating}>Close</button>
@@ -388,12 +422,10 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
 
             <div className="dorks-gen-form">
               <label className="cw-composer__field">
-                <span className="cw-composer__label">Target category</span>
+                <span className="cw-composer__label">Category</span>
                 <div style={{ display: 'flex', gap: '.4rem', flexWrap: 'wrap' }}>
                   {CATEGORIES.map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
+                    <button key={c.id} type="button"
                       className={`dorks-cat${genCategory === c.id ? ' dorks-cat--on' : ''}`}
                       onClick={() => setGenCategory(c.id)}
                     >{c.label}</button>
@@ -404,19 +436,20 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
               <label className="cw-composer__field">
                 <span className="cw-composer__label">Platform</span>
                 <div className="dorks-plat-toggle">
-                  <button type="button" className={`dorks-plat-btn${genPlatform === 'shodan' ? ' dorks-plat-btn--on' : ''}`} onClick={() => setGenPlatform('shodan')}>Shodan</button>
-                  <button type="button" className={`dorks-plat-btn${genPlatform === 'fofa' ? ' dorks-plat-btn--on' : ''}`} onClick={() => setGenPlatform('fofa')}>FOFA</button>
+                  {(['shodan', 'fofa', 'google'] as Platform[]).map((p) => (
+                    <button key={p} type="button"
+                      className={`dorks-plat-btn${genPlatform === p ? ' dorks-plat-btn--on' : ''}`}
+                      onClick={() => setGenPlatform(p)}
+                    >{p.charAt(0).toUpperCase() + p.slice(1)}</button>
+                  ))}
                 </div>
               </label>
 
               <label className="cw-composer__field">
-                <span className="cw-composer__label">Objective (optional — AI uses this)</span>
-                <input
-                  className="tg-input"
-                  type="text"
-                  value={genObjective}
+                <span className="cw-composer__label">Objective (optional — used by AI)</span>
+                <input className="tg-input" type="text" value={genObjective}
                   onChange={(e) => setGenObjective(e.target.value)}
-                  placeholder={`e.g. find exposed ${CATEGORIES.find((c) => c.id === genCategory)?.label ?? ''} credentials on small hosting providers`}
+                  placeholder={`e.g. find exposed ${CATEGORIES.find((c) => c.id === genCategory)?.label ?? 'credentials'} on small hosting providers`}
                   spellCheck={false}
                 />
               </label>
@@ -438,8 +471,8 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
             {generated.length > 0 && (
               <div className="dorks-gen-results">
                 <p className="muted" style={{ fontSize: '.78rem', margin: '0 0 .6rem' }}>
-                  {generated.length} dorks generated {genSource === 'ai' ? '(Claude AI)' : '(curated templates)'}
-                  {' — '}click one to load it into the search bar and save it to your library.
+                  {generated.length} dorks — {genSource === 'ai' ? 'Claude AI' : 'curated templates'}
+                  {' · '}click to load into the search bar and save to library.
                 </p>
                 <ul className="dorks-gen-list">
                   {generated.map((d, i) => (
@@ -464,7 +497,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
             <header className="cw-hub-modal__head">
               <div>
                 <h3 style={{ margin: 0 }}>API Keys</h3>
-                <p className="muted" style={{ margin: '.25rem 0 0', fontSize: '.82rem' }}>Stored on the controller — never sent to the browser after save.</p>
+                <p className="muted" style={{ margin: '.25rem 0 0', fontSize: '.82rem' }}>Stored on the controller — Anthropic key is write-only after first save.</p>
               </div>
               <button type="button" className="btn-glass btn-glass--xs" onClick={() => setKeysOpen(false)}>Close</button>
             </header>
@@ -482,8 +515,9 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                 <input className="tg-input" type="password" value={fofaKey} onChange={(e) => setFofaKey(e.target.value)} placeholder="your-fofa-api-key" spellCheck={false} autoComplete="off" />
               </label>
               <label className="cw-composer__field">
-                <span className="cw-composer__label">Anthropic API key (for AI dork generation)</span>
-                <input className="tg-input" type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} placeholder={anthropicKey === '***' ? '(saved — enter new to replace)' : 'sk-ant-...'} spellCheck={false} autoComplete="off" />
+                <span className="cw-composer__label">Anthropic API key (AI dork generation)</span>
+                <input className="tg-input" type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)}
+                  placeholder={anthropicKey === '***' ? '(saved — enter new to replace)' : 'sk-ant-...'} spellCheck={false} autoComplete="off" />
               </label>
               <div className="settings-btn-row">
                 <button type="button" className="btn-primary" onClick={() => void saveKeys()} disabled={savingKeys}>

@@ -5050,6 +5050,9 @@ def _ai_generate_dorks(objective: str, platform: str, count: int, category: str,
             "Shodan query syntax: use fields like ssl, http.title, http.html, hostname, port, org, product, version, before/after."
             if platform == 'shodan' else
             "FOFA query syntax: use title=, body=, host=, domain=, port=, protocol=, country=, app= with && || != operators."
+            if platform == 'fofa' else
+            "Google dork syntax: use filetype:, inurl:, intext:, intitle:, site:, -site: operators. "
+            "Always add -site:stackoverflow.com -site:medium.com -site:github.com to filter noise."
         )
         prompt = (
             f"Generate {count} {platform} search dorks to find exposed {category} targets.\n"
@@ -5073,26 +5076,90 @@ def _ai_generate_dorks(objective: str, platform: str, count: int, category: str,
 
 
 def _template_dorks(category: str, platform: str, count: int) -> list:
+    _NOISE = '-site:stackoverflow.com -site:medium.com -site:w3schools.com -site:github.com'
+    _NOISE_NO_GH = '-site:stackoverflow.com -site:medium.com -site:w3schools.com'
     templates = {
+        # ── FILE EXPOSURE (Google dork focus — from ORACLE_HUNTER logic) ──────
+        'file_exposure': {
+            'google': [
+                {'query': f'filetype:tfstate "AKIA" {_NOISE}', 'notes': 'Terraform state with AKIA key IDs'},
+                {'query': f'filetype:tfstate "aws_access_key_id" {_NOISE}', 'notes': 'Terraform state with access key field'},
+                {'query': f'filetype:tfstate "aws_secret_access_key" {_NOISE_NO_GH}', 'notes': 'Terraform state with secret key field'},
+                {'query': f'"terraform.tfstate" intext:"AKIA" {_NOISE}', 'notes': 'Terraform state containing AKIA string'},
+                {'query': f'inurl:".terraform/terraform.tfstate" {_NOISE}', 'notes': 'Terraform state in .terraform dir'},
+                {'query': f'filetype:json "serverless-state" "AKIA" {_NOISE}', 'notes': 'Serverless Framework state with AWS keys'},
+                {'query': f'inurl:".serverless/" filetype:json {_NOISE}', 'notes': 'Serverless deployment state files'},
+                {'query': f'inurl:"cdk.out" filetype:json {_NOISE}', 'notes': 'AWS CDK output artifacts'},
+                {'query': f'"cdk.context.json" "AKIA" {_NOISE}', 'notes': 'CDK context with embedded AWS keys'},
+                {'query': f'inurl:"aws-exports.js" {_NOISE_NO_GH}', 'notes': 'Amplify aws-exports.js (contains identity pool, region, etc.)'},
+                {'query': f'intext:"awsmobile" "AKIA" {_NOISE}', 'notes': 'awsmobile projects with key exposure'},
+                {'query': f'filetype:env "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" {_NOISE_NO_GH}', 'notes': '.env files with both AWS key fields'},
+                {'query': f'filetype:json "client_secret" "client_id" {_NOISE}', 'notes': 'OAuth client secrets in JSON'},
+                {'query': f'filetype:yaml "aws_secret_access_key" {_NOISE_NO_GH}', 'notes': 'YAML configs with AWS secrets'},
+                {'query': f'filetype:pem "RSA PRIVATE KEY" {_NOISE}', 'notes': 'Exposed RSA private key files'},
+            ],
+            'shodan': [
+                {'query': '"terraform.tfstate" http.status:200', 'notes': 'Publicly served Terraform state'},
+                {'query': 'http.html:"AKIA" http.html:"aws_secret_access_key" http.status:200', 'notes': 'Pages leaking AWS key pair'},
+                {'query': 'http.html:"aws-exports.js" http.status:200', 'notes': 'Amplify exports exposed'},
+                {'query': 'http.html:"cdk.context.json" http.status:200', 'notes': 'CDK context files served'},
+                {'query': 'http.title:"Index of" http.html:".env" http.status:200', 'notes': 'Directory listing exposing .env'},
+                {'query': 'http.html:"serverless-state.json" http.status:200', 'notes': 'Serverless state files indexed'},
+            ],
+            'fofa': [
+                {'query': 'body="terraform.tfstate" && status_code=200', 'notes': 'Terraform state indexed'},
+                {'query': 'body="AKIA" && body="aws_secret_access_key" && status_code=200', 'notes': 'AWS key pair visible'},
+                {'query': 'body="aws-exports.js" && status_code=200', 'notes': 'Amplify exports reachable'},
+                {'query': 'title="Index of" && body=".env" && status_code=200', 'notes': 'Open directory with .env'},
+                {'query': 'body="serverless-state.json" && status_code=200', 'notes': 'Serverless state exposed'},
+            ],
+        },
+        # ── AWS / CLOUD ────────────────────────────────────────────────────────
         'aws': {
+            'google': [
+                {'query': f'filetype:tfstate "AKIA" {_NOISE}', 'notes': 'Terraform state with access key'},
+                {'query': f'"terraform.tfstate" intext:"AKIA" {_NOISE}', 'notes': 'Terraform state leaking AKIA'},
+                {'query': f'inurl:"aws-exports.js" {_NOISE_NO_GH}', 'notes': 'Amplify project config'},
+                {'query': f'filetype:yaml "aws_secret_access_key" {_NOISE_NO_GH}', 'notes': 'YAML with secret key'},
+                {'query': f'filetype:json "serverless-state" "AKIA" {_NOISE}', 'notes': 'Serverless + AKIA'},
+                {'query': f'"cdk.context.json" "AKIA" {_NOISE}', 'notes': 'CDK context with keys'},
+                {'query': f'filetype:env "AWS_ACCESS_KEY_ID" {_NOISE_NO_GH}', 'notes': '.env with AWS key'},
+                {'query': f'inurl:"credentials" filetype:csv "AKIA" {_NOISE}', 'notes': 'AWS credentials CSV download'},
+                {'query': f'intext:"aws_access_key_id" intext:"aws_secret_access_key" filetype:ini {_NOISE}', 'notes': 'AWS CLI credentials file'},
+                {'query': f'inurl:"s3.amazonaws.com" intitle:"index of" {_NOISE}', 'notes': 'Open S3 bucket indexes'},
+            ],
             'shodan': [
                 {'query': 'http.title:"AWS Management Console" port:443', 'notes': 'AWS console login pages'},
-                {'query': '"AKIA" http.html:"aws_access_key_id"', 'notes': 'Exposed AWS keys in HTML'},
-                {'query': 'http.html:".aws/credentials" -github', 'notes': 'AWS credentials files'},
+                {'query': '"AKIA" http.html:"aws_access_key_id" http.status:200', 'notes': 'Exposed AWS keys in HTML'},
+                {'query': 'http.html:".aws/credentials" http.status:200', 'notes': 'AWS credentials files'},
                 {'query': 'ssl:"amazonaws.com" http.status:200 http.title:"Index of"', 'notes': 'Open S3-like directories'},
                 {'query': 'http.html:"aws_secret_access_key" http.status:200', 'notes': 'Secret keys in page source'},
                 {'query': '"terraform.tfstate" http.status:200', 'notes': 'Exposed Terraform state'},
+                {'query': 'http.html:"aws-exports.js" http.status:200', 'notes': 'Amplify config exposed'},
+                {'query': 'product:"Amazon" http.html:"AKIA" http.status:200', 'notes': 'Amazon-hosted pages with keys'},
             ],
             'fofa': [
                 {'query': 'title="AWS Management Console"', 'notes': 'AWS console login pages'},
-                {'query': 'body="aws_access_key_id" && body="aws_secret_access_key"', 'notes': 'Both key fields exposed'},
-                {'query': 'body="AKIA" && (body=".env" || body="config")', 'notes': 'AWS keys in config files'},
-                {'query': 'title="Index of" && body=".aws"', 'notes': 'Open directories with .aws'},
-                {'query': 'body="terraform.tfstate" && protocol="http"', 'notes': 'Terraform state exposed'},
+                {'query': 'body="aws_access_key_id" && body="aws_secret_access_key" && status_code=200', 'notes': 'Both key fields exposed'},
+                {'query': 'body="AKIA" && (body=".env" || body="config") && status_code=200', 'notes': 'AWS keys in config files'},
+                {'query': 'title="Index of" && body=".aws" && status_code=200', 'notes': 'Open directories with .aws'},
+                {'query': 'body="terraform.tfstate" && status_code=200', 'notes': 'Terraform state exposed'},
                 {'query': 'body="aws_secret_access_key" && status_code=200', 'notes': 'Secret keys visible'},
+                {'query': 'body="aws-exports.js" && status_code=200', 'notes': 'Amplify config reachable'},
+                {'query': 'body="cdk.context.json" && body="AKIA" && status_code=200', 'notes': 'CDK context with keys'},
             ],
         },
+        # ── SMTP / MAIL ────────────────────────────────────────────────────────
         'smtp': {
+            'google': [
+                {'query': f'filetype:env "SMTP_PASSWORD" {_NOISE_NO_GH}', 'notes': '.env with SMTP password'},
+                {'query': f'filetype:env "MAIL_PASSWORD" {_NOISE_NO_GH}', 'notes': '.env with mail password'},
+                {'query': f'filetype:php "smtp_pass" inurl:config {_NOISE}', 'notes': 'PHP config with smtp_pass'},
+                {'query': f'filetype:xml "password" inurl:mail {_NOISE}', 'notes': 'XML mail configs with password'},
+                {'query': f'inurl:config "smtp_password" filetype:json {_NOISE}', 'notes': 'JSON config with smtp_password'},
+                {'query': f'"MAIL_HOST" "MAIL_USERNAME" "MAIL_PASSWORD" filetype:env {_NOISE_NO_GH}', 'notes': 'Laravel mail .env with creds'},
+                {'query': f'filetype:yaml "smtp" "password" {_NOISE_NO_GH}', 'notes': 'YAML with SMTP password'},
+            ],
             'shodan': [
                 {'query': 'port:25 "220" product:"Postfix"', 'notes': 'Open Postfix servers'},
                 {'query': 'port:587 "250-AUTH" "PLAIN LOGIN"', 'notes': 'SMTP with plaintext auth'},
@@ -5100,6 +5167,8 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': '"530 5.7.0 Must issue" port:25', 'notes': 'SMTP auth required banners'},
                 {'query': 'http.html:"smtp_pass" http.status:200', 'notes': 'SMTP passwords in pages'},
                 {'query': 'port:25 country:"US" "250-PIPELINING"', 'notes': 'US pipelining-capable SMTP'},
+                {'query': 'port:587 "250-AUTH LOGIN PLAIN" -org:"Google"', 'notes': 'Non-Google submission port'},
+                {'query': 'port:25 "250 RELAYING" -org:"Cloudflare"', 'notes': 'Open relay indicators'},
             ],
             'fofa': [
                 {'query': 'protocol="smtp" && port=25 && country="US"', 'notes': 'US SMTP servers'},
@@ -5108,16 +5177,31 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': 'title="Roundcube" && body="login"', 'notes': 'Roundcube webmail'},
                 {'query': 'app="Exim" && port=25', 'notes': 'Exim SMTP instances'},
                 {'query': 'body="MAIL FROM:" && protocol="smtp"', 'notes': 'Open relay indicators'},
+                {'query': 'app="Postfix" && port=587', 'notes': 'Postfix submission servers'},
             ],
         },
+        # ── API KEYS ───────────────────────────────────────────────────────────
         'api': {
+            'google': [
+                {'query': f'filetype:env "STRIPE_SECRET_KEY" {_NOISE_NO_GH}', 'notes': '.env with Stripe secret'},
+                {'query': f'filetype:js "SENDGRID_API_KEY" {_NOISE_NO_GH}', 'notes': 'JS file with SendGrid key'},
+                {'query': f'filetype:env "MAILGUN_API_KEY" {_NOISE_NO_GH}', 'notes': '.env with Mailgun key'},
+                {'query': f'filetype:env "TWILIO_AUTH_TOKEN" {_NOISE_NO_GH}', 'notes': '.env with Twilio token'},
+                {'query': f'"SG." "api_key" filetype:json {_NOISE}', 'notes': 'JSON with SendGrid key format'},
+                {'query': f'filetype:env "OPENAI_API_KEY" {_NOISE_NO_GH}', 'notes': '.env with OpenAI key'},
+                {'query': f'filetype:env "ANTHROPIC_API_KEY" {_NOISE_NO_GH}', 'notes': '.env with Anthropic key'},
+                {'query': f'inurl:config "api_key" "secret" filetype:json {_NOISE}', 'notes': 'JSON config with key+secret'},
+                {'query': f'filetype:env "BREVO_API_KEY" OR "SENDINBLUE_API_KEY" {_NOISE_NO_GH}', 'notes': '.env with Brevo/Sendinblue key'},
+                {'query': f'filetype:env "POSTMARK_API_TOKEN" {_NOISE_NO_GH}', 'notes': '.env with Postmark token'},
+            ],
             'shodan': [
                 {'query': 'http.html:"api_key" http.html:"sendgrid" http.status:200', 'notes': 'SendGrid keys'},
                 {'query': 'http.html:"mailgun_api_key" http.status:200', 'notes': 'Mailgun keys in pages'},
                 {'query': 'http.html:"stripe_secret_key" http.status:200', 'notes': 'Stripe keys'},
                 {'query': 'http.html:"SG." http.status:200', 'notes': 'SendGrid API key format'},
-                {'query': '"api_key" "secret" http.status:200 -github', 'notes': 'Generic API keys'},
                 {'query': 'http.html:"TWILIO_AUTH_TOKEN" http.status:200', 'notes': 'Twilio tokens'},
+                {'query': 'http.html:"OPENAI_API_KEY" http.status:200', 'notes': 'OpenAI keys'},
+                {'query': 'http.html:"sk-" http.html:"api" http.status:200', 'notes': 'sk- prefix keys (OpenAI, Stripe, etc.)'},
             ],
             'fofa': [
                 {'query': 'body="api_key" && body="sendgrid" && status_code=200', 'notes': 'SendGrid keys'},
@@ -5125,14 +5209,28 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': 'body="stripe_secret_key" && status_code=200', 'notes': 'Stripe keys'},
                 {'query': 'body="SG." && body="api" && status_code=200', 'notes': 'SendGrid format'},
                 {'query': 'body="TWILIO_AUTH_TOKEN" && status_code=200', 'notes': 'Twilio tokens'},
+                {'query': 'body="OPENAI_API_KEY" && status_code=200', 'notes': 'OpenAI keys'},
                 {'query': 'body="api_secret" && body="api_key" && status_code=200', 'notes': 'API key pairs'},
             ],
         },
+        # ── .ENV / CONFIG FILES ────────────────────────────────────────────────
         'env': {
+            'google': [
+                {'query': f'filetype:env "DB_PASSWORD" {_NOISE_NO_GH}', 'notes': '.env with DB password'},
+                {'query': f'filetype:env "DATABASE_URL" "postgres://" {_NOISE_NO_GH}', 'notes': '.env with Postgres URL'},
+                {'query': f'filetype:env "SECRET_KEY" "DEBUG" {_NOISE_NO_GH}', 'notes': 'Django-style .env'},
+                {'query': f'filetype:env "JWT_SECRET" {_NOISE_NO_GH}', 'notes': '.env with JWT secret'},
+                {'query': f'filetype:env "REDIS_PASSWORD" {_NOISE_NO_GH}', 'notes': '.env with Redis password'},
+                {'query': f'filetype:env "APP_KEY" "APP_ENV=production" {_NOISE_NO_GH}', 'notes': 'Laravel prod .env'},
+                {'query': f'filetype:env "GITHUB_CLIENT_SECRET" {_NOISE_NO_GH}', 'notes': '.env with GitHub OAuth secret'},
+                {'query': f'filetype:env "CLOUDINARY_SECRET" {_NOISE_NO_GH}', 'notes': '.env with Cloudinary secret'},
+                {'query': f'filetype:env "PRIVATE_KEY" {_NOISE_NO_GH}', 'notes': '.env with private key'},
+                {'query': f'intitle:"index of" ".env" {_NOISE}', 'notes': 'Directory listing containing .env'},
+            ],
             'shodan': [
-                {'query': 'http.html:".env" "DB_PASSWORD" http.status:200', 'notes': '.env with DB creds'},
+                {'query': 'http.html:".env" http.html:"DB_PASSWORD" http.status:200', 'notes': '.env with DB creds'},
                 {'query': '"APP_KEY=" "APP_SECRET=" http.status:200', 'notes': 'App key/secret pairs'},
-                {'query': 'http.html:"DATABASE_URL" http.status:200 -github', 'notes': 'Database URLs'},
+                {'query': 'http.html:"DATABASE_URL" http.status:200', 'notes': 'Database URLs'},
                 {'query': 'http.title:"Laravel" http.html:".env" http.status:200', 'notes': 'Laravel env exposed'},
                 {'query': '"JWT_SECRET" http.html:"NODE_ENV" http.status:200', 'notes': 'Node.js env files'},
                 {'query': 'http.html:"REDIS_PASSWORD" http.status:200', 'notes': 'Redis auth in env'},
@@ -5146,7 +5244,18 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': 'title=".env" && status_code=200', 'notes': 'Literal .env files served'},
             ],
         },
+        # ── GIT / SOURCE CODE ──────────────────────────────────────────────────
         'git': {
+            'google': [
+                {'query': f'inurl:"/.git/config" {_NOISE}', 'notes': 'Exposed .git/config on web server'},
+                {'query': f'filetype:pem "RSA PRIVATE KEY" {_NOISE}', 'notes': 'PEM private keys indexed'},
+                {'query': f'filetype:ppk "RSA" {_NOISE}', 'notes': 'PuTTY private keys indexed'},
+                {'query': f'"ghp_" filetype:env {_NOISE_NO_GH}', 'notes': 'GitHub PAT in .env file'},
+                {'query': f'"GITHUB_TOKEN" filetype:yaml {_NOISE_NO_GH}', 'notes': 'GitHub token in YAML CI'},
+                {'query': f'inurl:".git" intitle:"index of" {_NOISE}', 'notes': 'Open directory with .git'},
+                {'query': f'"gitlab_token" OR "gl_token" filetype:env {_NOISE_NO_GH}', 'notes': 'GitLab tokens in env files'},
+                {'query': f'filetype:json ".git-credentials" {_NOISE}', 'notes': 'Git credentials file exposed'},
+            ],
             'shodan': [
                 {'query': 'http.title:"GitLab" http.html:"Sign in" port:443', 'notes': 'GitLab instances'},
                 {'query': '"/.git/config" http.status:200', 'notes': 'Exposed .git/config'},
@@ -5154,6 +5263,7 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': 'http.html:"ghp_" http.status:200', 'notes': 'GitHub PAT format'},
                 {'query': 'http.html:"GITHUB_TOKEN" http.status:200', 'notes': 'GitHub CI tokens'},
                 {'query': '"/.git/" http.status:200 http.html:"HEAD"', 'notes': 'Exposed git repos'},
+                {'query': 'http.title:"Gitea" http.html:"explore"', 'notes': 'Public Gitea instances'},
             ],
             'fofa': [
                 {'query': 'body="/.git/config" && status_code=200', 'notes': 'Git config exposed'},
@@ -5165,8 +5275,8 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
             ],
         },
     }
-    cat = templates.get(category, templates['api'])
-    pool = cat.get(platform, list(cat.values())[0])
+    cat = templates.get(category, templates.get('file_exposure', templates['aws']))
+    pool = cat.get(platform, cat.get('google', list(cat.values())[0]))
     return pool[:count]
 
 
