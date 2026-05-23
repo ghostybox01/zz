@@ -64,6 +64,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   const [savingKeys, setSavingKeys]       = useState(false)
 
   const [savingDork, setSavingDork] = useState(false)
+  const [seedingLib, setSeedingLib] = useState(false)
 
   const [autoHunting, setAutoHunting]       = useState(false)
   const [huntStatus, setHuntStatus]         = useState<string | null>(null)
@@ -264,6 +265,20 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     autoStopRef.current = true
   }, [])
 
+  const seedLibrary = useCallback(async () => {
+    if (seedingLib) return
+    setSeedingLib(true)
+    try {
+      const r = await dorksApi.seedLibrary()
+      setSavedDorks(r.dorks)
+      onToast('Library seeded', `${r.added} base dorks loaded (${r.total} total)`)
+    } catch (e) {
+      onToast('Seed failed', (e as Error).message, 'error')
+    } finally {
+      setSeedingLib(false)
+    }
+  }, [seedingLib, onToast])
+
   const loadSaved = (d: SavedDork) => {
     setQuery(d.query)
     if (d.platform !== 'both') setPlatform(d.platform as Platform)
@@ -318,6 +333,9 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
               ◎ Auto Hunt
             </button>
           )}
+          <button type="button" className="btn-glass btn-with-ico" onClick={() => void seedLibrary()} disabled={seedingLib} title="Load the ORACLE_HUNTER base dorks and expansions into the library">
+            {seedingLib ? '…seeding' : '⊕ Seed Library'}
+          </button>
           <button type="button" className="btn-primary btn-with-ico" onClick={() => setGenOpen(true)}>
             ✦ AI Generate
           </button>
@@ -362,7 +380,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
           <ul className="dorks-rail__list">
             {visibleSaved.length === 0 && (
               <li className="dorks-rail__empty muted">
-                No saved dorks yet — generate some or run a search and save it.
+                No saved dorks yet — hit <strong>⊕ Seed Library</strong> to load the ORACLE_HUNTER base set, or generate some with AI.
               </li>
             )}
             {visibleSaved.map((d) => (

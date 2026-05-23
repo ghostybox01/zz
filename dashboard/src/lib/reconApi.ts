@@ -776,6 +776,7 @@ export const dorks = {
   run: (body: { query: string; platform: string; limit: number }) =>
     postJson<{ ok: boolean; results: DorkResult[]; total: number }>('/dorks/run', body),
   listSaved: () => getJson<{ dorks: SavedDork[] }>('/dorks/saved'),
+  seedLibrary: () => postJson<{ ok: boolean; added: number; total: number; dorks: SavedDork[] }>('/dorks/seed-library'),
   save: (body: { query: string; category: string; platform: string; notes: string }) =>
     postJson<{ ok: boolean; dork: SavedDork }>('/dorks/saved', body),
   deleteSaved: async (id: string): Promise<{ ok: boolean }> => {
