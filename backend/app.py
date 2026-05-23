@@ -944,6 +944,7 @@ SCANNER_CONFIG_SCHEMA = {
         # frontend uses POST-response as source-of-truth, so any key the
         # whitelist drops looks like a failed click).
         'aws_access', 'tencent', 'socketlabs', 'zeptomail', 'elasticemail',
+        'crypto_wallet',
     ],
     'features': ['brevo', 'xsmtp', 'mandrill', 'mailersend', 'new_mailgun'],
     'exploit_methods': ['react2shell', 'bypass_waf', 'bypass_middleware', 'lfi', 'xxe', 'ssrf'],
@@ -3104,6 +3105,7 @@ _CRACK_ADDON_SCANNER_KEY = {
     'github':        'api_validation.github',
     'heroku':        'api_validation.heroku',
     'datadog':       'api_validation.datadog',
+    'crypto-wallet': 'api_validation.crypto_wallet',
 }
 
 

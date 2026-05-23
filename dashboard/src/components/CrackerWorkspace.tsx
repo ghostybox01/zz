@@ -11,6 +11,7 @@ import {
 import {
   ADDON_CATALOG,
   getEnabledAddons,
+  parseScannerKey,
   type CrackerAddonEnabledMap,
 } from '../data/addonCatalog'
 import { AddonsStrip, brandFor } from './AddonsStrip'
@@ -154,6 +155,23 @@ export function CrackerWorkspace({
   // ── Catalog-driven composer addon list ─────────────────────────────
   const composerAddons = useMemo(() => getEnabledAddons(enabledMap), [enabledMap])
 
+  // Count addons whose scanner config flag is currently ON. Mirrors
+  // AddonsStrip's `selected` so the tile and the strip's "X / Y ACTIVE"
+  // badge always agree. Updates live as the operator toggles tiles via
+  // patchConfig (which optimistically updates `config` before the POST).
+  const activeAddonCount = useMemo(() => {
+    if (!config) return 0
+    let n = 0
+    for (const a of composerAddons) {
+      const parsed = parseScannerKey(a.scannerKey)
+      if (!parsed) continue
+      const [section, key] = parsed
+      const block = (config as unknown as Record<string, Record<string, boolean> | undefined>)[section]
+      if (block && block[key]) n++
+    }
+    return n
+  }, [composerAddons, config])
+
   // ── Fleet filter for the worker-chip block ─────────────────────────
   const activeFleet = useMemo(() => fleet.filter((n) => n.status !== 'removed'), [fleet])
   const deployableFleet = useMemo(
@@ -276,8 +294,8 @@ export function CrackerWorkspace({
             <strong>{lists.length}</strong>
           </div>
           <div className="cw__summary-card">
-            <span className="cw__summary-k">Owned Addons</span>
-            <strong>{composerAddons.length}</strong>
+            <span className="cw__summary-k">Active Addons</span>
+            <strong>{activeAddonCount}</strong>
           </div>
         </div>
       </header>

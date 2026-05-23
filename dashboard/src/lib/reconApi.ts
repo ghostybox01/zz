@@ -320,6 +320,7 @@ export type ReconScannerConfig = {
     telnyx: boolean
     messagebird: boolean
     github: boolean
+    crypto_wallet: boolean
   }
   features: {
     brevo: boolean
