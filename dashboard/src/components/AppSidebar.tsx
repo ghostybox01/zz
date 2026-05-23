@@ -107,6 +107,16 @@ function IcoGear(props: SVGProps<SVGSVGElement>) {
   )
 }
 
+function IcoSearch(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="M21 21l-4.35-4.35" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 11h6M11 8v6" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 function IcoTerminal(props: SVGProps<SVGSVGElement>) {
   return (
     <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
@@ -116,7 +126,7 @@ function IcoTerminal(props: SVGProps<SVGSVGElement>) {
   )
 }
 
-export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'logs' | 'settings'
+export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'dorks' | 'logs' | 'settings'
 
 type Item = { id: DashboardTab; label: string; Ico: typeof IcoDash; goldWhenActive?: boolean }
 
@@ -127,6 +137,7 @@ const ITEMS: Item[] = [
   { id: 'lists', label: 'Lists', Ico: IcoList },
   { id: 'fleet', label: 'Fleet', Ico: IcoServers },
   { id: 'findings', label: 'Hits', Ico: IcoTrophy },
+  { id: 'dorks', label: 'Dorks', Ico: IcoSearch },
   { id: 'logs', label: 'Logs', Ico: IcoTerminal },
   { id: 'settings', label: 'Settings', Ico: IcoGear },
 ]
@@ -143,6 +154,7 @@ const TAB_TITLE: Record<DashboardTab, string> = {
   lists: 'Target lists',
   fleet: 'Fleet & shards',
   findings: 'Hits ledger',
+  dorks: 'Dork hunter',
   logs: 'Logs',
   settings: 'Integrations',
 }

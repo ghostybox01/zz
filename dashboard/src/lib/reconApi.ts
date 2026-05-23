@@ -734,3 +734,48 @@ export const crack = {
 }
 
 export { ReconApiError }
+
+/* ── Dorks — AI generator + Shodan/FOFA search ───────────────────── */
+
+export type DorkResult = {
+  id: string
+  host: string
+  ip: string
+  port: number
+  protocol: string
+  hostname: string
+  title: string
+  data: string
+  platform: 'shodan' | 'fofa'
+}
+
+export type SavedDork = {
+  id: string
+  query: string
+  category: string
+  platform: 'shodan' | 'fofa' | 'both'
+  notes: string
+  createdAt: string
+}
+
+export type GeneratedDork = {
+  query: string
+  notes: string
+}
+
+export const dorks = {
+  getKeys: () => getJson<{ shodan_key: string; fofa_email: string; fofa_key: string; anthropic_key: string }>('/dorks/keys'),
+  saveKeys: (body: { shodan_key?: string; fofa_email?: string; fofa_key?: string; anthropic_key?: string }) =>
+    postJson<{ ok: boolean }>('/dorks/keys', body),
+  generate: (body: { objective: string; platform: string; count: number; category: string }) =>
+    postJson<{ ok: boolean; dorks: GeneratedDork[]; source: 'ai' | 'template' }>('/dorks/generate', body),
+  run: (body: { query: string; platform: string; limit: number }) =>
+    postJson<{ ok: boolean; results: DorkResult[]; total: number }>('/dorks/run', body),
+  listSaved: () => getJson<{ dorks: SavedDork[] }>('/dorks/saved'),
+  save: (body: { query: string; category: string; platform: string; notes: string }) =>
+    postJson<{ ok: boolean; dork: SavedDork }>('/dorks/saved', body),
+  deleteSaved: async (id: string): Promise<{ ok: boolean }> => {
+    const res = await fetch(`${BASE}/dorks/saved/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    return (await res.json()) as { ok: boolean }
+  },
+}

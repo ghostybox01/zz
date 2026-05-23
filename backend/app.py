@@ -25,6 +25,7 @@ import collections
 import uuid
 import hashlib
 import base64
+import requests as http_requests
 
 # Import SSH Manager
 try:
@@ -5000,6 +5001,337 @@ try:
             _mgr.start_monitoring(vps_status_callback)
 except Exception as _e:
     print(f"[startup] could not start SSH monitoring: {_e}")
+
+
+# ============================================================
+#  DORKS — AI generator + Shodan/FOFA search
+# ============================================================
+
+DORK_KEYS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dork_keys.json')
+SAVED_DORKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'saved_dorks.json')
+
+
+def _load_dork_keys() -> dict:
+    try:
+        if os.path.exists(DORK_KEYS_FILE):
+            with open(DORK_KEYS_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_dork_keys(data: dict) -> None:
+    with open(DORK_KEYS_FILE, 'w') as f:
+        json.dump(data, f)
+
+
+def _load_saved_dorks() -> list:
+    try:
+        if os.path.exists(SAVED_DORKS_FILE):
+            with open(SAVED_DORKS_FILE) as f:
+                d = json.load(f)
+                return d if isinstance(d, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def _save_saved_dorks(dorks: list) -> None:
+    with open(SAVED_DORKS_FILE, 'w') as f:
+        json.dump(dorks, f)
+
+
+def _ai_generate_dorks(objective: str, platform: str, count: int, category: str, api_key: str) -> list:
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        syntax_hint = (
+            "Shodan query syntax: use fields like ssl, http.title, http.html, hostname, port, org, product, version, before/after."
+            if platform == 'shodan' else
+            "FOFA query syntax: use title=, body=, host=, domain=, port=, protocol=, country=, app= with && || != operators."
+        )
+        prompt = (
+            f"Generate {count} {platform} search dorks to find exposed {category} targets.\n"
+            f"Goal: {objective or f'find leaked {category} credentials and exposed services'}\n"
+            f"{syntax_hint}\n\n"
+            f"Return ONLY a valid JSON array (no markdown, no explanation):\n"
+            f'[{{"query":"...","notes":"what this finds"}}, ...]'
+        )
+        msg = client.messages.create(
+            model='claude-opus-4-7',
+            max_tokens=2048,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+        text = msg.content[0].text.strip()
+        m = re.search(r'\[.*\]', text, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+    except Exception as e:
+        print(f'[dorks] AI generation failed: {e}')
+    return []
+
+
+def _template_dorks(category: str, platform: str, count: int) -> list:
+    templates = {
+        'aws': {
+            'shodan': [
+                {'query': 'http.title:"AWS Management Console" port:443', 'notes': 'AWS console login pages'},
+                {'query': '"AKIA" http.html:"aws_access_key_id"', 'notes': 'Exposed AWS keys in HTML'},
+                {'query': 'http.html:".aws/credentials" -github', 'notes': 'AWS credentials files'},
+                {'query': 'ssl:"amazonaws.com" http.status:200 http.title:"Index of"', 'notes': 'Open S3-like directories'},
+                {'query': 'http.html:"aws_secret_access_key" http.status:200', 'notes': 'Secret keys in page source'},
+                {'query': '"terraform.tfstate" http.status:200', 'notes': 'Exposed Terraform state'},
+            ],
+            'fofa': [
+                {'query': 'title="AWS Management Console"', 'notes': 'AWS console login pages'},
+                {'query': 'body="aws_access_key_id" && body="aws_secret_access_key"', 'notes': 'Both key fields exposed'},
+                {'query': 'body="AKIA" && (body=".env" || body="config")', 'notes': 'AWS keys in config files'},
+                {'query': 'title="Index of" && body=".aws"', 'notes': 'Open directories with .aws'},
+                {'query': 'body="terraform.tfstate" && protocol="http"', 'notes': 'Terraform state exposed'},
+                {'query': 'body="aws_secret_access_key" && status_code=200', 'notes': 'Secret keys visible'},
+            ],
+        },
+        'smtp': {
+            'shodan': [
+                {'query': 'port:25 "220" product:"Postfix"', 'notes': 'Open Postfix servers'},
+                {'query': 'port:587 "250-AUTH" "PLAIN LOGIN"', 'notes': 'SMTP with plaintext auth'},
+                {'query': 'port:465 ssl "220" product:"Exim"', 'notes': 'Exim SMTPS servers'},
+                {'query': '"530 5.7.0 Must issue" port:25', 'notes': 'SMTP auth required banners'},
+                {'query': 'http.html:"smtp_pass" http.status:200', 'notes': 'SMTP passwords in pages'},
+                {'query': 'port:25 country:"US" "250-PIPELINING"', 'notes': 'US pipelining-capable SMTP'},
+            ],
+            'fofa': [
+                {'query': 'protocol="smtp" && port=25 && country="US"', 'notes': 'US SMTP servers'},
+                {'query': 'body="smtp_password" && status_code=200', 'notes': 'SMTP creds in pages'},
+                {'query': 'protocol="smtp" && banner="220" && port=587', 'notes': 'Submission port servers'},
+                {'query': 'title="Roundcube" && body="login"', 'notes': 'Roundcube webmail'},
+                {'query': 'app="Exim" && port=25', 'notes': 'Exim SMTP instances'},
+                {'query': 'body="MAIL FROM:" && protocol="smtp"', 'notes': 'Open relay indicators'},
+            ],
+        },
+        'api': {
+            'shodan': [
+                {'query': 'http.html:"api_key" http.html:"sendgrid" http.status:200', 'notes': 'SendGrid keys'},
+                {'query': 'http.html:"mailgun_api_key" http.status:200', 'notes': 'Mailgun keys in pages'},
+                {'query': 'http.html:"stripe_secret_key" http.status:200', 'notes': 'Stripe keys'},
+                {'query': 'http.html:"SG." http.status:200', 'notes': 'SendGrid API key format'},
+                {'query': '"api_key" "secret" http.status:200 -github', 'notes': 'Generic API keys'},
+                {'query': 'http.html:"TWILIO_AUTH_TOKEN" http.status:200', 'notes': 'Twilio tokens'},
+            ],
+            'fofa': [
+                {'query': 'body="api_key" && body="sendgrid" && status_code=200', 'notes': 'SendGrid keys'},
+                {'query': 'body="mailgun_api_key" && status_code=200', 'notes': 'Mailgun keys'},
+                {'query': 'body="stripe_secret_key" && status_code=200', 'notes': 'Stripe keys'},
+                {'query': 'body="SG." && body="api" && status_code=200', 'notes': 'SendGrid format'},
+                {'query': 'body="TWILIO_AUTH_TOKEN" && status_code=200', 'notes': 'Twilio tokens'},
+                {'query': 'body="api_secret" && body="api_key" && status_code=200', 'notes': 'API key pairs'},
+            ],
+        },
+        'env': {
+            'shodan': [
+                {'query': 'http.html:".env" "DB_PASSWORD" http.status:200', 'notes': '.env with DB creds'},
+                {'query': '"APP_KEY=" "APP_SECRET=" http.status:200', 'notes': 'App key/secret pairs'},
+                {'query': 'http.html:"DATABASE_URL" http.status:200 -github', 'notes': 'Database URLs'},
+                {'query': 'http.title:"Laravel" http.html:".env" http.status:200', 'notes': 'Laravel env exposed'},
+                {'query': '"JWT_SECRET" http.html:"NODE_ENV" http.status:200', 'notes': 'Node.js env files'},
+                {'query': 'http.html:"REDIS_PASSWORD" http.status:200', 'notes': 'Redis auth in env'},
+            ],
+            'fofa': [
+                {'query': 'body="DB_PASSWORD" && body="APP_KEY" && status_code=200', 'notes': '.env file content'},
+                {'query': 'body="DATABASE_URL" && status_code=200', 'notes': 'Database connection strings'},
+                {'query': 'body="JWT_SECRET" && status_code=200', 'notes': 'JWT secrets exposed'},
+                {'query': 'body="REDIS_PASSWORD" && status_code=200', 'notes': 'Redis passwords'},
+                {'query': 'body="APP_SECRET" && body="APP_KEY" && status_code=200', 'notes': 'App secrets'},
+                {'query': 'title=".env" && status_code=200', 'notes': 'Literal .env files served'},
+            ],
+        },
+        'git': {
+            'shodan': [
+                {'query': 'http.title:"GitLab" http.html:"Sign in" port:443', 'notes': 'GitLab instances'},
+                {'query': '"/.git/config" http.status:200', 'notes': 'Exposed .git/config'},
+                {'query': 'http.html:"github_token" http.status:200', 'notes': 'GitHub tokens in pages'},
+                {'query': 'http.html:"ghp_" http.status:200', 'notes': 'GitHub PAT format'},
+                {'query': 'http.html:"GITHUB_TOKEN" http.status:200', 'notes': 'GitHub CI tokens'},
+                {'query': '"/.git/" http.status:200 http.html:"HEAD"', 'notes': 'Exposed git repos'},
+            ],
+            'fofa': [
+                {'query': 'body="/.git/config" && status_code=200', 'notes': 'Git config exposed'},
+                {'query': 'body="ghp_" && status_code=200', 'notes': 'GitHub PAT format'},
+                {'query': 'title="GitLab" && body="Sign in"', 'notes': 'GitLab instances'},
+                {'query': 'body="GITHUB_TOKEN" && status_code=200', 'notes': 'GitHub CI tokens'},
+                {'query': 'body="git_token" && status_code=200', 'notes': 'Generic git tokens'},
+                {'query': 'title="Gitea" && body="Sign In"', 'notes': 'Gitea instances'},
+            ],
+        },
+    }
+    cat = templates.get(category, templates['api'])
+    pool = cat.get(platform, list(cat.values())[0])
+    return pool[:count]
+
+
+@app.route('/api/dorks/keys', methods=['GET'])
+def api_dorks_keys_get():
+    keys = _load_dork_keys()
+    return jsonify({
+        'shodan_key': keys.get('shodan_key', ''),
+        'fofa_email': keys.get('fofa_email', ''),
+        'fofa_key': keys.get('fofa_key', ''),
+        'anthropic_key': '***' if keys.get('anthropic_key') else '',
+    })
+
+
+@app.route('/api/dorks/keys', methods=['POST'])
+def api_dorks_keys_save():
+    data = request.json or {}
+    keys = _load_dork_keys()
+    for field in ('shodan_key', 'fofa_email', 'fofa_key'):
+        if field in data:
+            keys[field] = data[field]
+    if data.get('anthropic_key') and data['anthropic_key'] != '***':
+        keys['anthropic_key'] = data['anthropic_key']
+    _save_dork_keys(keys)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/dorks/generate', methods=['POST'])
+def api_dorks_generate():
+    data = request.json or {}
+    objective = (data.get('objective') or '').strip()
+    platform = data.get('platform', 'shodan')
+    count = min(int(data.get('count', 10)), 30)
+    category = data.get('category', 'aws')
+
+    keys = _load_dork_keys()
+    anthropic_key = keys.get('anthropic_key', '')
+
+    if anthropic_key:
+        dorks = _ai_generate_dorks(objective, platform, count, category, anthropic_key)
+        if dorks:
+            return jsonify({'ok': True, 'dorks': dorks, 'source': 'ai'})
+
+    dorks = _template_dorks(category, platform, count)
+    return jsonify({'ok': True, 'dorks': dorks, 'source': 'template'})
+
+
+@app.route('/api/dorks/run', methods=['POST'])
+def api_dorks_run():
+    data = request.json or {}
+    query = (data.get('query') or '').strip()
+    platform = data.get('platform', 'shodan')
+    limit = min(int(data.get('limit', 100)), 500)
+
+    if not query:
+        return jsonify({'error': 'query is required'}), 400
+
+    keys = _load_dork_keys()
+
+    try:
+        if platform == 'shodan':
+            shodan_key = keys.get('shodan_key', '')
+            if not shodan_key:
+                return jsonify({'error': 'Shodan API key not configured — add it in Dorks → API Keys'}), 400
+            resp = http_requests.get(
+                'https://api.shodan.io/shodan/host/search',
+                params={'key': shodan_key, 'query': query, 'minify': True},
+                timeout=20,
+            )
+            payload = resp.json()
+            if 'error' in payload:
+                return jsonify({'error': payload['error']}), 400
+            results = []
+            for m in (payload.get('matches') or [])[:limit]:
+                results.append({
+                    'id': str(uuid.uuid4()),
+                    'host': m.get('ip_str', ''),
+                    'ip': m.get('ip_str', ''),
+                    'port': m.get('port', 80),
+                    'protocol': m.get('transport', 'tcp'),
+                    'hostname': ((m.get('hostnames') or [''])[0]),
+                    'title': (m.get('http') or {}).get('title', ''),
+                    'data': (m.get('data') or '')[:300],
+                    'platform': 'shodan',
+                })
+            return jsonify({'ok': True, 'results': results, 'total': payload.get('total', len(results))})
+
+        elif platform == 'fofa':
+            fofa_email = keys.get('fofa_email', '')
+            fofa_key = keys.get('fofa_key', '')
+            if not fofa_email or not fofa_key:
+                return jsonify({'error': 'FOFA email + API key not configured — add them in Dorks → API Keys'}), 400
+            q_b64 = base64.b64encode(query.encode()).decode()
+            resp = http_requests.get(
+                'https://fofa.info/api/v1/search/all',
+                params={
+                    'email': fofa_email,
+                    'key': fofa_key,
+                    'qbase64': q_b64,
+                    'fields': 'ip,port,protocol,host,domain,title',
+                    'size': limit,
+                    'full': 'false',
+                },
+                timeout=25,
+            )
+            payload = resp.json()
+            if payload.get('error'):
+                return jsonify({'error': payload.get('errmsg', 'FOFA error')}), 400
+            results = []
+            for item in (payload.get('results') or [])[:limit]:
+                parts = list(item) + [''] * 6
+                ip, port, protocol, host, domain, title = parts[:6]
+                results.append({
+                    'id': str(uuid.uuid4()),
+                    'host': host or ip,
+                    'ip': ip,
+                    'port': int(port) if port and str(port).isdigit() else 80,
+                    'protocol': protocol or 'http',
+                    'hostname': domain or host,
+                    'title': title,
+                    'data': '',
+                    'platform': 'fofa',
+                })
+            return jsonify({'ok': True, 'results': results, 'total': payload.get('size', len(results))})
+
+        else:
+            return jsonify({'error': f'Unknown platform: {platform}'}), 400
+
+    except http_requests.exceptions.Timeout:
+        return jsonify({'error': f'{platform.upper()} API timed out — try again'}), 504
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dorks/saved', methods=['GET'])
+def api_dorks_saved_list():
+    return jsonify({'dorks': _load_saved_dorks()})
+
+
+@app.route('/api/dorks/saved', methods=['POST'])
+def api_dorks_saved_create():
+    data = request.json or {}
+    query = (data.get('query') or '').strip()
+    if not query:
+        return jsonify({'error': 'query required'}), 400
+    dork = {
+        'id': str(uuid.uuid4()),
+        'query': query,
+        'category': data.get('category', 'custom'),
+        'platform': data.get('platform', 'both'),
+        'notes': (data.get('notes') or '').strip(),
+        'createdAt': datetime.utcnow().isoformat() + 'Z',
+    }
+    dorks = _load_saved_dorks()
+    dorks.insert(0, dork)
+    _save_saved_dorks(dorks)
+    return jsonify({'ok': True, 'dork': dork})
+
+
+@app.route('/api/dorks/saved/<dork_id>', methods=['DELETE'])
+def api_dorks_saved_delete(dork_id):
+    dorks = [d for d in _load_saved_dorks() if d.get('id') != dork_id]
+    _save_saved_dorks(dorks)
+    return jsonify({'ok': True})
+
 
 # ==================== MAIN ====================
 
