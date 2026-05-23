@@ -5721,3 +5721,23 @@
 .btn-glass--on { color: #7dd3af !important; border-color: color-mix(in srgb, #7dd3af, transparent 55%) !important; }
 .btn-glass--danger { color: var(--danger) !important; }
 
+
+
+/* ── Help panel ─────────────────────────────────────────── */
+.help-panel { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+.help-panel__hero { margin-bottom: 2rem; }
+.help-panel__title { margin: 0 0 .5rem; font-size: 1.5rem; font-weight: 800; }
+.help-panel__sub { margin: 0; color: var(--muted); font-size: .9rem; max-width: 70ch; line-height: 1.6; }
+.help-panel__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.25rem; }
+.help-card { background: var(--card); border: 1px solid var(--hairline); border-radius: 12px; padding: 1.25rem 1.5rem; }
+.help-card--wide { grid-column: 1 / -1; }
+.help-card__heading { margin: 0 0 .75rem; font-size: .85rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+.help-card__list { margin: 0; padding-left: 1.2rem; font-size: .82rem; color: var(--text); line-height: 1.8; }
+.help-card__list--ol { list-style: decimal; }
+.help-card__list li { margin-bottom: .2rem; }
+.help-card__list code { font-family: var(--mono); font-size: .78rem; background: rgba(255,255,255,.06); padding: .1rem .35rem; border-radius: 4px; }
+.help-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+.help-table th { text-align: left; padding: .4rem .6rem; background: rgba(255,255,255,.02); color: var(--muted); font-size: .65rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; border-bottom: 1px solid var(--hairline); }
+.help-table td { padding: .45rem .6rem; border-bottom: 1px solid var(--hairline); vertical-align: top; line-height: 1.5; }
+.help-table tr:last-child td { border-bottom: none; }
+.help-table code { font-family: var(--mono); font-size: .75rem; background: rgba(255,255,255,.06); padding: .05rem .3rem; border-radius: 4px; }

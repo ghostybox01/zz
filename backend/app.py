@@ -64,6 +64,13 @@ FILE_MAPPING = {
     'valid_gcp_key.txt': ('GCP', 'valid'),
     'mnemonic_seed_phrases.txt': ('Mnemonic', 'valid'),
     'valid_crypto.txt': ('Crypto', 'valid'),
+    'valid_postmark.txt': ('Postmark', 'valid'),
+    'valid_sparkpost.txt': ('SparkPost', 'valid'),
+    'valid_mailtrap.txt': ('Mailtrap', 'valid'),
+    'valid_mailjet.txt': ('Mailjet', 'valid'),
+    'valid_heroku.txt': ('Heroku', 'valid'),
+    'valid_datadog.txt': ('Datadog', 'valid'),
+    'valid_plivo.txt': ('Plivo', 'valid'),
     'trufflehog_secrets.txt': ('TruffleHog', 'valid'),
     'gitleaks_secrets.txt': ('GitLeaks', 'valid'),
     # Wave-5 — pattern-only finds (saved by main.go's nonValidatedChecks loop)

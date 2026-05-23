@@ -213,7 +213,10 @@ type AWSScanner struct {
 	GitLabPATPattern        *regexp.Regexp
 	JWTPattern              *regexp.Regexp
 	PostmarkAPIKeyPattern   *regexp.Regexp
+	SparkPostAPIKeyPattern  *regexp.Regexp
+	MailtrapAPIKeyPattern   *regexp.Regexp
 	MailjetAPIKeyPattern    *regexp.Regexp
+	PlivoAuthIDPattern      *regexp.Regexp
 	AWSSNSTopicARNPattern   *regexp.Regexp
 
 	// SMTP Service Patterns
@@ -623,10 +626,16 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		GitLabPATPattern: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),
 		// JWT — three base64url-encoded parts
 		JWTPattern: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`),
-		// Postmark server token (UUID-ish)
-		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)postmark[^\n]*server[^\n]*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
-		// Mailjet — API key:secret pair
-		MailjetAPIKeyPattern: regexp.MustCompile(`(?i)mailjet[^\n]*(?:api[_-]?key|public)[\s:=]+([0-9a-f]{32})`),
+		// Postmark server token (UUID format)
+		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)(?:POSTMARK_SERVER_TOKEN|postmark[^\n]*server[^\n]*token)[\s:="']+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
+		// SparkPost API key (40 hex chars)
+		SparkPostAPIKeyPattern: regexp.MustCompile(`(?i)(?:sparkpost[_-]?(?:api[_-]?)?key|SPARKPOST_API_KEY)["'\s:=]+([a-f0-9]{40})`),
+		// Mailtrap API token (32 hex chars)
+		MailtrapAPIKeyPattern: regexp.MustCompile(`(?i)(?:mailtrap[_-]?(?:api[_-]?)?(?:token|key)|MAILTRAP_API_TOKEN)["'\s:=]+([a-f0-9]{32})`),
+		// Mailjet — API key (32 hex chars)
+		MailjetAPIKeyPattern: regexp.MustCompile(`(?i)(?:MAILJET_API_KEY|MAILJET_PUBLIC_KEY|mailjet[^\n]*(?:api[_-]?key|public[_-]?key))[\s:="']+([0-9a-f]{32})`),
+		// Plivo Auth ID (starts with MA or SA, 20 chars)
+		PlivoAuthIDPattern: regexp.MustCompile(`(?i)(?:plivo[_-]?(?:auth[_-]?)?(?:id|sid))["'\s:=]+([MS]A[A-Z0-9]{18})`),
 		// AWS SNS topic ARNs (intel — feeds the SNS limit check)
 		AWSSNSTopicARNPattern: regexp.MustCompile(`arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]+`),
 
@@ -3670,21 +3679,13 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.MandrillAppAPIKeyPattern, a.Config.Features.Mandrill, "Mandrill", a.CheckMandrill},
 		{a.MailerSendAPIKeyPattern, a.Config.Features.MailerSend, "MailerSend", a.CheckMailerSend},
 		{a.NewMailgunAPIKeyPattern, a.Config.Features.NewMailgun, "NewMailgun", a.CheckMailgun},
-		// TODO(detector-stubs): commit 77abad7 wired UI dispatch for these 7
-		// detectors but never landed the matching {fooPattern} regex constants
-		// or a.CheckFoo methods. Result: `go build` fails with "undefined: X"
-		// for each line, which aborts the installer entirely (and therefore
-		// blocks the dashboard rebuild that wires RECONX_REPO into the bundle).
-		// Commenting out the dispatch so the binary compiles. Picking them in
-		// the Cracker UI will still be a no-op — to actually validate these
-		// providers, add the patterns + Check* methods, then re-enable here.
-		// {postmarkPattern,  a.Config.APIValidation.Postmark,  "Postmark",  a.CheckPostmark},
-		// {sparkpostPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
-		// {mailtrapPattern,  a.Config.APIValidation.Mailtrap,  "Mailtrap",  a.CheckMailtrap},
-		// {mailjetPattern,   a.Config.APIValidation.Mailjet,   "Mailjet",   a.CheckMailjet},
-		// {herokuPattern,    a.Config.APIValidation.Heroku,    "Heroku",    a.CheckHeroku},
-		// {datadogPattern,   a.Config.APIValidation.Datadog,   "Datadog",   a.CheckDatadog},
-		// {plivoPattern,     a.Config.APIValidation.Plivo,     "Plivo",     a.CheckPlivo},
+		{a.PostmarkAPIKeyPattern,  a.Config.APIValidation.Postmark,  "Postmark",  a.CheckPostmark},
+		{a.SparkPostAPIKeyPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
+		{a.MailtrapAPIKeyPattern,  a.Config.APIValidation.Mailtrap,  "Mailtrap",  a.CheckMailtrap},
+		{a.MailjetAPIKeyPattern,   a.Config.APIValidation.Mailjet,   "Mailjet",   a.CheckMailjet},
+		{a.HerokuAPIKeyPattern,    a.Config.APIValidation.Heroku,    "Heroku",    a.CheckHeroku},
+		{a.DatadogAPIKeyPattern,   a.Config.APIValidation.Datadog,   "Datadog",   a.CheckDatadog},
+		{a.PlivoAuthIDPattern,     a.Config.APIValidation.Plivo,     "Plivo",     a.CheckPlivo},
 	}
 
 	var wg sync.WaitGroup
@@ -3737,15 +3738,11 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.DiscordWebhookPattern, "Discord Webhook"},
 		{a.CloudflareGlobalPattern, "Cloudflare Global"},
 		{a.DigitalOceanPATPattern, "DigitalOcean PAT"},
-		{a.HerokuAPIKeyPattern, "Heroku API Key"},
-		{a.DatadogAPIKeyPattern, "Datadog API Key"},
 		{a.SentryDSNPattern, "Sentry DSN"},
 		{a.NpmTokenPattern, "NPM Token"},
 		{a.PyPITokenPattern, "PyPI Token"},
 		{a.GitLabPATPattern, "GitLab PAT"},
 		{a.JWTPattern, "JWT"},
-		{a.PostmarkAPIKeyPattern, "Postmark Server Token"},
-		{a.MailjetAPIKeyPattern, "Mailjet API Key"},
 		{a.AWSSNSTopicARNPattern, "AWS SNS Topic ARN"},
 	}
 

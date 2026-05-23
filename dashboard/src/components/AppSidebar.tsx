@@ -126,7 +126,17 @@ function IcoTerminal(props: SVGProps<SVGSVGElement>) {
   )
 }
 
-export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'dorks' | 'logs' | 'settings'
+function IcoHelp(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 2-2.5 3.5" strokeLinecap="round" />
+      <circle cx="12" cy="17" r="0.8" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'dorks' | 'logs' | 'settings' | 'help'
 
 type Item = { id: DashboardTab; label: string; Ico: typeof IcoDash; goldWhenActive?: boolean }
 
@@ -142,6 +152,7 @@ const ITEMS: Item[] = [
   { id: 'dorks', label: 'Dorks', Ico: IcoSearch },
   { id: 'logs', label: 'Logs', Ico: IcoTerminal },
   { id: 'settings', label: 'Settings', Ico: IcoGear },
+  { id: 'help', label: 'Help', Ico: IcoHelp },
 ]
 
 type Props = {
@@ -161,6 +172,7 @@ const TAB_TITLE: Record<DashboardTab, string> = {
   dorks: 'Dork hunter',
   logs: 'Logs',
   settings: 'Integrations',
+  help: 'Help & docs',
 }
 
 export function AppSidebar({ active, onChange }: Props) {

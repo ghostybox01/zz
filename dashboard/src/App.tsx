@@ -31,6 +31,7 @@ import { DorksPanel } from './components/DorksPanel'
 import { StripePanel } from './components/StripePanel'
 import { CryptoPanel } from './components/CryptoPanel'
 import { LogsPanel } from './components/LogsPanel'
+import { HelpPanel } from './components/HelpPanel'
 import { readTargetTxtFile } from './lib/targetList'
 import { VulnerabilityPicker } from './components/VulnerabilityPicker'
 import { VULN_CATALOG, defaultVulnSelection, type VulnSelection } from './data/vulnCatalog'
@@ -398,6 +399,7 @@ export default function App() {
   const dorksHidden = tab !== 'dorks'
   const logsHidden = tab !== 'logs'
   const settingsHidden = tab !== 'settings'
+  const helpHidden = tab !== 'help'
 
   const upsertList = useCallback(
     (next: TargetList) => {
@@ -929,6 +931,16 @@ export default function App() {
                 </details>
 
               </div>
+            </section>
+
+            <section
+              id="panel-help"
+              role="tabpanel"
+              aria-labelledby="tab-help"
+              hidden={helpHidden}
+              className="tab-panel"
+            >
+              <HelpPanel />
             </section>
           </div>
 
