@@ -126,7 +126,7 @@ function IcoTerminal(props: SVGProps<SVGSVGElement>) {
   )
 }
 
-export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'dorks' | 'logs' | 'settings'
+export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'dorks' | 'logs' | 'settings'
 
 type Item = { id: DashboardTab; label: string; Ico: typeof IcoDash; goldWhenActive?: boolean }
 
@@ -137,6 +137,8 @@ const ITEMS: Item[] = [
   { id: 'lists', label: 'Lists', Ico: IcoList },
   { id: 'fleet', label: 'Fleet', Ico: IcoServers },
   { id: 'findings', label: 'Hits', Ico: IcoTrophy },
+  { id: 'stripe', label: 'Stripe', Ico: IcoTrophy },
+  { id: 'crypto', label: 'Crypto', Ico: IcoTrophy },
   { id: 'dorks', label: 'Dorks', Ico: IcoSearch },
   { id: 'logs', label: 'Logs', Ico: IcoTerminal },
   { id: 'settings', label: 'Settings', Ico: IcoGear },
@@ -154,6 +156,8 @@ const TAB_TITLE: Record<DashboardTab, string> = {
   lists: 'Target lists',
   fleet: 'Fleet & shards',
   findings: 'Hits ledger',
+  stripe: 'Stripe keys',
+  crypto: 'Crypto keys',
   dorks: 'Dork hunter',
   logs: 'Logs',
   settings: 'Integrations',

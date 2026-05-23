@@ -28,6 +28,8 @@ import { ToastStack, type ToastItem } from './components/ToastStack'
 import { categoryForFinding } from './lib/toastCategory'
 import { WarcPanel } from './components/WarcPanel'
 import { DorksPanel } from './components/DorksPanel'
+import { StripePanel } from './components/StripePanel'
+import { CryptoPanel } from './components/CryptoPanel'
 import { LogsPanel } from './components/LogsPanel'
 import { readTargetTxtFile } from './lib/targetList'
 import { VulnerabilityPicker } from './components/VulnerabilityPicker'
@@ -391,6 +393,8 @@ export default function App() {
   const listsHidden = tab !== 'lists'
   const fleetHidden = tab !== 'fleet'
   const findingsHidden = tab !== 'findings'
+  const stripeHidden = tab !== 'stripe'
+  const cryptoHidden = tab !== 'crypto'
   const dorksHidden = tab !== 'dorks'
   const logsHidden = tab !== 'logs'
   const settingsHidden = tab !== 'settings'
@@ -734,6 +738,26 @@ export default function App() {
                       }
                 }
               />
+            </section>
+
+            <section
+              id="panel-stripe"
+              role="tabpanel"
+              aria-labelledby="tab-stripe"
+              hidden={stripeHidden}
+              className="tab-panel"
+            >
+              <StripePanel onToast={pushAlertToast} />
+            </section>
+
+            <section
+              id="panel-crypto"
+              role="tabpanel"
+              aria-labelledby="tab-crypto"
+              hidden={cryptoHidden}
+              className="tab-panel"
+            >
+              <CryptoPanel onToast={pushAlertToast} />
             </section>
 
             <section

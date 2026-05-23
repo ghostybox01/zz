@@ -63,6 +63,7 @@ FILE_MAPPING = {
     'valid_mailersend.txt': ('MailerSend', 'valid'),
     'valid_gcp_key.txt': ('GCP', 'valid'),
     'mnemonic_seed_phrases.txt': ('Mnemonic', 'valid'),
+    'valid_crypto.txt': ('Crypto', 'valid'),
     'trufflehog_secrets.txt': ('TruffleHog', 'valid'),
     'gitleaks_secrets.txt': ('GitLeaks', 'valid'),
     # Wave-5 — pattern-only finds (saved by main.go's nonValidatedChecks loop)
@@ -147,7 +148,21 @@ def init_db():
         cursor.execute("SELECT smtp_servers_found FROM statistics LIMIT 1")
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE statistics ADD COLUMN smtp_servers_found INTEGER DEFAULT 0")
-    
+
+    # ── reported column for operator's disclosure tracking ───────────
+    try:
+        cursor.execute("SELECT reported FROM credentials LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE credentials ADD COLUMN reported INTEGER DEFAULT 0")
+    try:
+        cursor.execute("SELECT last_verified FROM credentials LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE credentials ADD COLUMN last_verified TEXT")
+    try:
+        cursor.execute("SELECT verify_meta FROM credentials LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE credentials ADD COLUMN verify_meta TEXT")
+
     conn.commit()
     conn.close()
     print("✅ Database initialized")
@@ -5799,6 +5814,213 @@ def api_dorks_evolve():
                 print(f'[dorks] evolve Anthropic failed: {e}')
 
         return jsonify({'ok': True, 'dorks': result_dorks, 'source': 'ai' if result_dorks else 'none'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Findings panels (Stripe + Crypto admin) ──────────────────────────────
+
+def _serialize_credential(row) -> dict:
+    """Turn a DB row into the JSON shape both panels share."""
+    return {
+        'id': row[0],
+        'type': row[1],
+        'key_value': row[2],
+        'source_url': row[3],
+        'status': row[4],
+        'metadata': row[5] or '',
+        'timestamp': row[6],
+        'reported': bool(row[7]) if len(row) > 7 else False,
+        'last_verified': row[8] if len(row) > 8 else None,
+        'verify_meta': row[9] if len(row) > 9 else None,
+    }
+
+
+@app.route('/api/findings/stripe', methods=['GET'])
+def api_findings_stripe():
+    """List Stripe keys the scanner has validated. Read-only — admin
+    actions (refresh, delete, mark-reported) hit dedicated endpoints."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''SELECT id, type, key_value, source_url, status, metadata,
+                            timestamp, reported, last_verified, verify_meta
+                     FROM credentials WHERE type = 'Stripe' AND status = 'valid'
+                     ORDER BY id DESC LIMIT 500''')
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/crypto', methods=['GET'])
+def api_findings_crypto():
+    """List crypto findings — both Crypto (validated private keys/wallets)
+    and Mnemonic (BIP39 seed phrases) types."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''SELECT id, type, key_value, source_url, status, metadata,
+                            timestamp, reported, last_verified, verify_meta
+                     FROM credentials
+                     WHERE type IN ('Crypto', 'Mnemonic') AND status = 'valid'
+                     ORDER BY id DESC LIMIT 500''')
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/<int:finding_id>', methods=['DELETE'])
+def api_findings_delete(finding_id: int):
+    """Operator-initiated delete of a discovered key. Used for cleanup
+    after disclosure or false positives."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('DELETE FROM credentials WHERE id = ?', (finding_id,))
+        deleted = c.rowcount
+        conn.commit()
+        conn.close()
+        return jsonify({'ok': True, 'deleted': deleted})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/<int:finding_id>/report', methods=['POST'])
+def api_findings_mark_reported(finding_id: int):
+    """Toggle the 'reported' flag — operator's marker that they've
+    notified the leak owner via responsible disclosure."""
+    try:
+        data = request.json or {}
+        reported = 1 if data.get('reported', True) else 0
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('UPDATE credentials SET reported = ? WHERE id = ?',
+                  (reported, finding_id))
+        updated = c.rowcount
+        conn.commit()
+        conn.close()
+        return jsonify({'ok': True, 'updated': updated, 'reported': bool(reported)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/stripe/<int:finding_id>/refresh', methods=['POST'])
+def api_findings_stripe_refresh(finding_id: int):
+    """Re-test a previously validated Stripe key against /v1/balance.
+    Returns liveness + available balance per currency (read-only)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT key_value FROM credentials WHERE id = ?', (finding_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'error': 'finding not found'}), 404
+        key = row[0]
+
+        try:
+            r = http_requests.get(
+                'https://api.stripe.com/v1/balance',
+                auth=(key, ''),
+                timeout=15,
+            )
+        except Exception as e:
+            conn.close()
+            return jsonify({'ok': False, 'live': False, 'error': str(e)})
+
+        if r.status_code != 200:
+            verify_meta = json.dumps({'live': False, 'status': r.status_code})
+            c.execute('UPDATE credentials SET last_verified = ?, verify_meta = ? WHERE id = ?',
+                      (datetime.now().isoformat(), verify_meta, finding_id))
+            conn.commit()
+            conn.close()
+            return jsonify({'ok': True, 'live': False, 'status': r.status_code})
+
+        body = r.json()
+        available = body.get('available') or []
+        pending = body.get('pending') or []
+        live = bool(body.get('livemode'))
+        verify_meta = json.dumps({
+            'live': True,
+            'livemode': live,
+            'available': available,
+            'pending': pending,
+        })
+        c.execute('UPDATE credentials SET last_verified = ?, verify_meta = ? WHERE id = ?',
+                  (datetime.now().isoformat(), verify_meta, finding_id))
+        conn.commit()
+        conn.close()
+        return jsonify({
+            'ok': True, 'live': True, 'livemode': live,
+            'available': available, 'pending': pending,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/crypto/<int:finding_id>/refresh', methods=['POST'])
+def api_findings_crypto_refresh(finding_id: int):
+    """Re-check the on-chain balance for a crypto finding. Expects either
+    a stored address in `verify_meta.address` or accepts ?address=&chain=
+    overrides from the operator (e.g. derived from a mnemonic offline)."""
+    try:
+        address = (request.args.get('address') or (request.json or {}).get('address') or '').strip()
+        chain = ((request.args.get('chain') or (request.json or {}).get('chain') or 'eth')
+                 .strip().lower())
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT key_value, metadata, verify_meta FROM credentials WHERE id = ?',
+                  (finding_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'error': 'finding not found'}), 404
+
+        # Fall back to any address already known on the finding.
+        if not address:
+            prev = {}
+            try:
+                prev = json.loads(row[2] or '{}')
+            except Exception:
+                prev = {}
+            address = (prev.get('address') or '').strip()
+
+        if not address:
+            conn.close()
+            return jsonify({
+                'ok': False,
+                'error': 'no address known for this finding — pass ?address=0x...',
+            }), 400
+
+        # Delegate to the verify-balance endpoint logic by calling internally.
+        from flask import current_app
+        with current_app.test_request_context(
+            '/api/crypto/verify-balance',
+            method='POST',
+            json={'address': address, 'chain': chain},
+        ):
+            resp = api_crypto_verify_balance()
+        # `resp` may be a (response, status) tuple or a plain Response.
+        if isinstance(resp, tuple):
+            payload = resp[0].get_json()
+        else:
+            payload = resp.get_json()
+
+        verify_meta = json.dumps({
+            'address': address,
+            'chain': chain,
+            **{k: v for k, v in payload.items() if k != 'ok'},
+        })
+        c.execute('UPDATE credentials SET last_verified = ?, verify_meta = ? WHERE id = ?',
+                  (datetime.now().isoformat(), verify_meta, finding_id))
+        conn.commit()
+        conn.close()
+        return jsonify(payload)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

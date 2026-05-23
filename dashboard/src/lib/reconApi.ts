@@ -810,3 +810,50 @@ export const crypto = {
   verifyBalance: (address: string, chain: 'eth' | 'btc' | 'bnb') =>
     postJson<CryptoBalanceResult>('/crypto/verify-balance', { address, chain }),
 }
+
+/* ── Findings panels (Stripe + Crypto admin) ─────────────────────── */
+
+export type DiscoveredKey = {
+  id: number
+  type: string
+  key_value: string
+  source_url: string
+  status: string
+  metadata: string
+  timestamp: string
+  reported: boolean
+  last_verified: string | null
+  verify_meta: string | null
+}
+
+export type StripeRefreshResult = {
+  ok: boolean
+  live: boolean
+  livemode?: boolean
+  available?: Array<{ amount: number; currency: string }>
+  pending?: Array<{ amount: number; currency: string }>
+  status?: number
+  error?: string
+}
+
+export const findings = {
+  listStripe: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/stripe'),
+  listCrypto: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/crypto'),
+  refreshStripe: (id: number) =>
+    postJson<StripeRefreshResult>(`/findings/stripe/${id}/refresh`, {}),
+  refreshCrypto: (id: number, address?: string, chain?: 'eth' | 'btc' | 'bnb') =>
+    postJson<CryptoBalanceResult>(`/findings/crypto/${id}/refresh`, address ? { address, chain: chain ?? 'eth' } : {}),
+  markReported: (id: number, reported: boolean) =>
+    postJson<{ ok: boolean; reported: boolean }>(`/findings/${id}/report`, { reported }),
+  remove: async (id: number): Promise<{ ok: boolean; deleted: number }> => {
+    const res = await fetch(`${BASE}/findings/${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      let body: unknown
+      try { body = await res.json() } catch { body = await res.text().catch(() => '') }
+      throw new ReconApiError(res.status, `/findings/${id}`, body)
+    }
+    return (await res.json()) as { ok: boolean; deleted: number }
+  },
+}
