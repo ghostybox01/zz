@@ -793,3 +793,20 @@ export const dorks = {
   evolve: (body: { query: string; category: string; platform: string; count?: number }) =>
     postJson<{ ok: boolean; dorks: GeneratedDork[]; source: 'ai' | 'none' }>('/dorks/evolve', body),
 }
+
+export type CryptoBalanceResult = {
+  ok: boolean
+  address?: string
+  chain?: string
+  balance_native?: number
+  symbol?: string
+  balance_usd?: number | null
+  explorer_url?: string
+  source?: string
+  error?: string
+}
+
+export const crypto = {
+  verifyBalance: (address: string, chain: 'eth' | 'btc' | 'bnb') =>
+    postJson<CryptoBalanceResult>('/crypto/verify-balance', { address, chain }),
+}

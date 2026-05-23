@@ -151,17 +151,6 @@ export function CrackerWorkspace({
   const activeCracks = scans.filter(
     (s) => s.status === 'running' || s.status === 'paused' || s.status === 'queued',
   ).length
-  const addonCount = useMemo(() => {
-    if (!config) return 0
-    return (
-      Number(config.aws_checks.ses_quota_check) +
-      Number(config.api_validation.sendgrid) +
-      Number(config.api_validation.stripe) +
-      Number(config.api_validation.twilio) +
-      Number(config.scanning_features.aws_main_scan)
-    )
-  }, [config])
-
   // ── Catalog-driven composer addon list ─────────────────────────────
   const composerAddons = useMemo(() => getEnabledAddons(enabledMap), [enabledMap])
 
@@ -288,7 +277,7 @@ export function CrackerWorkspace({
           </div>
           <div className="cw__summary-card">
             <span className="cw__summary-k">Owned Addons</span>
-            <strong>{addonCount}</strong>
+            <strong>{composerAddons.length}</strong>
           </div>
         </div>
       </header>

@@ -19,6 +19,7 @@ const CATEGORIES = [
   { id: 'api',          label: 'API Keys' },
   { id: 'env',          label: '.env / Config' },
   { id: 'git',          label: 'Git / Source' },
+  { id: 'crypto',       label: 'Crypto Keys' },
   { id: 'custom',       label: 'Custom' },
 ]
 
@@ -65,6 +66,11 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
 
   const [savingDork, setSavingDork] = useState(false)
   const [seedingLib, setSeedingLib] = useState(false)
+
+  const [balanceAddr, setBalanceAddr]   = useState('')
+  const [balanceChain, setBalanceChain] = useState<'eth' | 'btc' | 'bnb'>('eth')
+  const [balanceResult, setBalanceResult] = useState<null | { ok: boolean; balance_native?: number; balance_usd?: number | null; symbol?: string; explorer_url?: string; error?: string }>(null)
+  const [checkingBalance, setCheckingBalance] = useState(false)
 
   const [autoHunting, setAutoHunting]       = useState(false)
   const [huntStatus, setHuntStatus]         = useState<string | null>(null)
@@ -174,6 +180,25 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
       setSavingKeys(false)
     }
   }, [shodanKey, fofaEmail, fofaKey, anthropicKey, openaiKey, onToast])
+
+  const checkBalance = useCallback(async () => {
+    if (!balanceAddr.trim()) return
+    setCheckingBalance(true)
+    setBalanceResult(null)
+    try {
+      const r = await fetch('/api/crypto/verify-balance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: balanceAddr.trim(), chain: balanceChain }),
+      })
+      const data = await r.json()
+      setBalanceResult(data)
+    } catch (e) {
+      setBalanceResult({ ok: false, error: (e as Error).message })
+    } finally {
+      setCheckingBalance(false)
+    }
+  }, [balanceAddr, balanceChain])
 
   const handleKeyPaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>) => {
     const pasted = e.clipboardData.getData('text').trim()
@@ -554,6 +579,59 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
               </p>
             </div>
           )}
+
+          {/* ── Crypto Balance Checker ── */}
+          <div className="dorks-balance-checker">
+            <header className="dorks-balance-checker__head">
+              <span>Crypto Balance Verifier</span>
+              <span className="muted" style={{ fontSize: '.75rem' }}>Paste a wallet address discovered in dork results to check on-chain balance</span>
+            </header>
+            <div className="dorks-balance-checker__row">
+              <input
+                className="tg-input"
+                style={{ flex: 1, minWidth: 0 }}
+                type="text"
+                value={balanceAddr}
+                onChange={(e) => { setBalanceAddr(e.target.value); setBalanceResult(null) }}
+                placeholder="0x... or bc1... wallet address"
+                spellCheck={false}
+              />
+              <select
+                className="tg-input"
+                style={{ width: '5.5rem' }}
+                value={balanceChain}
+                onChange={(e) => setBalanceChain(e.target.value as 'eth' | 'btc' | 'bnb')}
+              >
+                <option value="eth">ETH</option>
+                <option value="btc">BTC</option>
+                <option value="bnb">BNB</option>
+              </select>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void checkBalance()}
+                disabled={checkingBalance || !balanceAddr.trim()}
+              >{checkingBalance ? 'Checking…' : 'Check Balance'}</button>
+            </div>
+            {balanceResult && (
+              <div className={`dorks-balance-checker__result ${balanceResult.ok ? 'dorks-balance-checker__result--ok' : 'dorks-balance-checker__result--err'}`}>
+                {balanceResult.ok ? (
+                  <>
+                    <span><strong>{balanceResult.balance_native} {balanceResult.symbol}</strong></span>
+                    {balanceResult.balance_usd != null && (
+                      <span className="muted">≈ ${balanceResult.balance_usd.toLocaleString()}</span>
+                    )}
+                    {balanceResult.balance_usd == null && <span className="muted">USD price unavailable</span>}
+                    <a href={balanceResult.explorer_url} target="_blank" rel="noopener noreferrer" className="dorks-balance-checker__link">
+                      View on explorer ↗
+                    </a>
+                  </>
+                ) : (
+                  <span className="muted">{balanceResult.error ?? 'Check failed'}</span>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

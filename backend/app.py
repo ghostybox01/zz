@@ -2860,7 +2860,7 @@ def api_r2_objects():
 
     accounts = _load_r2_accounts()
     if not accounts:
-        return jsonify({'ok': False, 'error': 'no R2 accounts configured'}), 503
+        return jsonify({'ok': False, 'error': 'no R2 accounts configured', 'objects': [], 'accounts': []}), 200
 
     targets = [a for a in accounts if a.get('id') == explicit_id] if explicit_id else accounts
     if explicit_id and not targets:
@@ -5431,6 +5431,61 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': 'body=".git/HEAD" && status_code=200', 'notes': '.git/HEAD reachable'},
             ],
         },
+        # ── CRYPTO KEYS ───────────────────────────────────────────────────────
+        'crypto': {
+            'google': [
+                # Private keys in .env files
+                {'query': f'filetype:env "PRIVATE_KEY" "0x" {_NOISE_NO_GH}', 'notes': 'ETH private key in .env'},
+                {'query': f'filetype:env "MNEMONIC" {_NOISE_NO_GH}', 'notes': 'Wallet mnemonic phrase in .env'},
+                {'query': f'filetype:env "SEED_PHRASE" {_NOISE_NO_GH}', 'notes': 'Seed phrase in .env'},
+                {'query': f'filetype:env "SECRET_RECOVERY_PHRASE" {_NOISE_NO_GH}', 'notes': 'MetaMask recovery phrase'},
+                {'query': f'filetype:env "WALLET_PRIVATE_KEY" {_NOISE_NO_GH}', 'notes': 'Wallet private key variable'},
+                # Exchange API keys
+                {'query': f'filetype:env "BINANCE_API_KEY" "BINANCE_SECRET" {_NOISE_NO_GH}', 'notes': 'Binance API credentials'},
+                {'query': f'filetype:env "COINBASE_API_KEY" {_NOISE_NO_GH}', 'notes': 'Coinbase API key'},
+                {'query': f'filetype:env "KRAKEN_API_KEY" "KRAKEN_SECRET" {_NOISE_NO_GH}', 'notes': 'Kraken exchange credentials'},
+                {'query': f'filetype:env "FTX_API_KEY" {_NOISE_NO_GH}', 'notes': 'FTX exchange API key'},
+                {'query': f'filetype:env "BYBIT_API_KEY" {_NOISE_NO_GH}', 'notes': 'Bybit exchange API key'},
+                {'query': f'filetype:env "KUCOIN_API_KEY" {_NOISE_NO_GH}', 'notes': 'KuCoin exchange API key'},
+                # Hardcoded keys in source
+                {'query': f'intext:"private_key" intext:"0x" filetype:json {_NOISE}', 'notes': 'ETH private key in JSON'},
+                {'query': f'"-----BEGIN EC PRIVATE KEY-----" filetype:pem {_NOISE}', 'notes': 'EC private keys (used by ETH wallets)'},
+                {'query': f'intext:"xprv" filetype:txt {_NOISE_NO_GH}', 'notes': 'Extended private key (BIP32 xprv)'},
+                # Config/keystore files
+                {'query': f'inurl:"keystore" filetype:json "crypto" "kdfparams" {_NOISE}', 'notes': 'Ethereum UTC keystore files'},
+                {'query': f'inurl:".keystore" "version" "crypto" {_NOISE}', 'notes': 'Web3 keystore files'},
+                {'query': f'filetype:json "cipher" "kdf" "mac" "ciphertext" {_NOISE}', 'notes': 'Ethereum keystore format'},
+                # MetaMask/wallet config
+                {'query': f'inurl:"metamask" filetype:json "vault" {_NOISE}', 'notes': 'MetaMask vault files'},
+                {'query': f'"MetaMask" "seed" OR "mnemonic" filetype:txt {_NOISE_NO_GH}', 'notes': 'MetaMask seeds in text files'},
+                # Infura / Alchemy keys
+                {'query': f'filetype:env "INFURA_PROJECT_ID" {_NOISE_NO_GH}', 'notes': 'Infura project ID (Ethereum RPC)'},
+                {'query': f'filetype:env "ALCHEMY_API_KEY" {_NOISE_NO_GH}', 'notes': 'Alchemy API key'},
+                {'query': f'filetype:js "infura.io/v3/" {_NOISE_NO_GH}', 'notes': 'Infura endpoint embedded in JS'},
+            ],
+            'shodan': [
+                {'query': 'http.html:"PRIVATE_KEY" http.html:"0x" http.status:200', 'notes': 'ETH private key on page'},
+                {'query': 'http.html:"MNEMONIC" http.html:"BIP39" http.status:200', 'notes': 'Mnemonic phrase exposed'},
+                {'query': 'http.html:"BINANCE_API_KEY" http.status:200', 'notes': 'Binance key in page'},
+                {'query': 'http.html:"COINBASE_API_KEY" http.status:200', 'notes': 'Coinbase key in page'},
+                {'query': 'http.html:"kdfparams" http.html:"ciphertext" http.status:200', 'notes': 'ETH keystore JSON'},
+                {'query': 'http.html:"xprv" http.status:200', 'notes': 'BIP32 extended private key'},
+                {'query': 'http.html:"INFURA_PROJECT_ID" http.status:200', 'notes': 'Infura project ID'},
+                {'query': 'http.html:"ALCHEMY_API_KEY" http.status:200', 'notes': 'Alchemy key in page'},
+                {'query': 'http.html:"KRAKEN_API_KEY" http.status:200', 'notes': 'Kraken key in page'},
+            ],
+            'fofa': [
+                {'query': 'body="PRIVATE_KEY" && body="0x" && status_code=200', 'notes': 'ETH private key on page'},
+                {'query': 'body="MNEMONIC" && status_code=200', 'notes': 'Mnemonic phrase exposed'},
+                {'query': 'body="BINANCE_API_KEY" && status_code=200', 'notes': 'Binance key in page'},
+                {'query': 'body="COINBASE_API_KEY" && status_code=200', 'notes': 'Coinbase key exposed'},
+                {'query': 'body="kdfparams" && body="ciphertext" && status_code=200', 'notes': 'ETH keystore JSON'},
+                {'query': 'body="INFURA_PROJECT_ID" && status_code=200', 'notes': 'Infura project ID'},
+                {'query': 'body="ALCHEMY_API_KEY" && status_code=200', 'notes': 'Alchemy key in page'},
+                {'query': 'body="SEED_PHRASE" && status_code=200', 'notes': 'Seed phrase exposed'},
+                {'query': 'body="KRAKEN_API_KEY" && status_code=200', 'notes': 'Kraken key exposed'},
+            ],
+        },
     }
     cat = templates.get(category, templates.get('file_exposure', templates['aws']))
     pool = cat.get(platform, cat.get('google', list(cat.values())[0]))
@@ -5440,7 +5495,7 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
 def _all_template_dorks() -> list:
     """Flatten every template into a list of seed dorks for the saved library."""
     seeds = []
-    for cat_id in ('file_exposure', 'aws', 'smtp', 'api', 'env', 'git'):
+    for cat_id in ('file_exposure', 'aws', 'smtp', 'api', 'env', 'git', 'crypto'):
         for plat in ('google', 'shodan', 'fofa'):
             for d in _template_dorks(cat_id, plat, 100):
                 seeds.append({
@@ -5744,6 +5799,120 @@ def api_dorks_evolve():
                 print(f'[dorks] evolve Anthropic failed: {e}')
 
         return jsonify({'ok': True, 'dorks': result_dorks, 'source': 'ai' if result_dorks else 'none'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Crypto balance verification ───────────────────────────────────────────
+
+@app.route('/api/crypto/verify-balance', methods=['POST'])
+def api_crypto_verify_balance():
+    """Check on-chain balance for an ETH or BTC address.
+
+    Request body: {"address": "0x...", "chain": "eth"|"btc"|"bnb"}
+    Uses free public APIs (Etherscan free tier, blockchain.info, BSCScan).
+    Returns: {ok, address, chain, balance_native, balance_usd, explorer_url}
+    """
+    try:
+        data = request.json or {}
+        address = (data.get('address') or '').strip()
+        chain = (data.get('chain') or 'eth').strip().lower()
+
+        if not address:
+            return jsonify({'error': 'address required'}), 400
+
+        # ETH / BSC (same EVM address format, different chain scanners)
+        if chain in ('eth', 'ethereum', 'bnb', 'bsc'):
+            explorer_map = {
+                'eth': ('https://api.etherscan.io', 'https://etherscan.io/address/'),
+                'bnb': ('https://api.bscscan.com',  'https://bscscan.com/address/'),
+                'bsc': ('https://api.bscscan.com',  'https://bscscan.com/address/'),
+                'ethereum': ('https://api.etherscan.io', 'https://etherscan.io/address/'),
+            }
+            api_base, explorer_prefix = explorer_map.get(chain, explorer_map['eth'])
+            norm_chain = 'eth' if chain in ('eth', 'ethereum') else 'bnb'
+
+            # Fallback: use public JSON-RPC if scanner API is unavailable
+            try:
+                rpc_map = {
+                    'eth': 'https://eth.llamarpc.com',
+                    'bnb': 'https://bsc-dataseed.binance.org',
+                }
+                rpc_url = rpc_map.get(norm_chain, rpc_map['eth'])
+                rpc_payload = {
+                    'jsonrpc': '2.0', 'method': 'eth_getBalance',
+                    'params': [address, 'latest'], 'id': 1,
+                }
+                rpc_resp = http_requests.post(rpc_url, json=rpc_payload, timeout=8)
+                rpc_resp.raise_for_status()
+                rpc_data = rpc_resp.json()
+                hex_val = rpc_data.get('result', '0x0') or '0x0'
+                wei = int(hex_val, 16)
+                native = wei / 1e18
+                # ETH price via free CoinGecko endpoint
+                usd_estimate = None
+                coin_id = 'ethereum' if norm_chain == 'eth' else 'binancecoin'
+                try:
+                    pg = http_requests.get(
+                        f'https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd',
+                        timeout=5,
+                    )
+                    if pg.ok:
+                        usd_price = pg.json().get(coin_id, {}).get('usd', 0)
+                        usd_estimate = round(native * usd_price, 2)
+                except Exception:
+                    pass
+                return jsonify({
+                    'ok': True,
+                    'address': address,
+                    'chain': norm_chain,
+                    'balance_native': round(native, 8),
+                    'symbol': 'ETH' if norm_chain == 'eth' else 'BNB',
+                    'balance_usd': usd_estimate,
+                    'explorer_url': explorer_prefix + address,
+                    'source': 'rpc',
+                })
+            except Exception as rpc_err:
+                return jsonify({'ok': False, 'error': f'RPC query failed: {rpc_err}', 'address': address, 'chain': norm_chain}), 200
+
+        elif chain in ('btc', 'bitcoin'):
+            try:
+                r = http_requests.get(
+                    f'https://blockchain.info/balance?active={address}&cors=true',
+                    timeout=10,
+                )
+                r.raise_for_status()
+                bdata = r.json()
+                info = bdata.get(address) or next(iter(bdata.values()), {})
+                satoshis = info.get('final_balance', 0)
+                btc = satoshis / 1e8
+                usd_estimate = None
+                try:
+                    pg = http_requests.get(
+                        'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd',
+                        timeout=5,
+                    )
+                    if pg.ok:
+                        usd_price = pg.json().get('bitcoin', {}).get('usd', 0)
+                        usd_estimate = round(btc * usd_price, 2)
+                except Exception:
+                    pass
+                return jsonify({
+                    'ok': True,
+                    'address': address,
+                    'chain': 'btc',
+                    'balance_native': round(btc, 8),
+                    'symbol': 'BTC',
+                    'balance_usd': usd_estimate,
+                    'explorer_url': f'https://www.blockchain.com/explorer/addresses/btc/{address}',
+                    'source': 'blockchain.info',
+                })
+            except Exception as e:
+                return jsonify({'ok': False, 'error': str(e), 'address': address, 'chain': 'btc'}), 200
+
+        else:
+            return jsonify({'error': f'unsupported chain: {chain}. Use eth, btc, or bnb'}), 400
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
