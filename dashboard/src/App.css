@@ -5664,17 +5664,6 @@
 .dorks-table tr:hover td { background: rgba(255,255,255,.025); }
 .dorks-row--selected td { background: rgba(99,217,196,.07); }
 
-/* Crypto balance checker */
-.dorks-balance-checker { background: rgba(0,0,0,.18); border: 1px solid var(--hairline); border-radius: 12px; padding: .75rem .9rem; display: flex; flex-direction: column; gap: .55rem; }
-.dorks-balance-checker__head { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
-.dorks-balance-checker__head > span:first-child { font-size: .8rem; font-weight: 700; color: var(--text); }
-.dorks-balance-checker__row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
-.dorks-balance-checker__result { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; padding: .45rem .65rem; border-radius: 8px; font-size: .8rem; }
-.dorks-balance-checker__result--ok { background: rgba(99,217,196,.08); border: 1px solid rgba(99,217,196,.25); }
-.dorks-balance-checker__result--err { background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.2); color: var(--danger); }
-.dorks-balance-checker__link { color: var(--accent); text-decoration: none; font-size: .78rem; }
-.dorks-balance-checker__link:hover { text-decoration: underline; }
-
 /* Generator modal content */
 .dorks-gen-form { display: flex; flex-direction: column; gap: .85rem; }
 .dorks-gen-results { border-top: 1px solid var(--hairline); padding-top: .85rem; margin-top: .25rem; }
