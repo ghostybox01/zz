@@ -170,6 +170,23 @@ def sync_source(args: argparse.Namespace) -> None:
         '--exclude=node_modules', '--exclude=dist', '--exclude=.git',
         '--exclude=.nelson', '--exclude=venv', '--exclude=.venv',
         '--exclude=__pycache__', '--exclude=ResultJS', '--exclude=installer/cache',
+        # Runtime data — never overwrite with rsync
+        '--exclude=backend/lists/',
+        '--exclude=backend/config.json',
+        '--exclude=backend/crack_sessions.json',
+        '--exclude=backend/warc_state.json',
+        '--exclude=backend/ssh_config.json',
+        '--exclude=backend/fleet_creds.json',
+        '--exclude=backend/dork_keys.json',
+        '--exclude=backend/saved_dorks.json',
+        '--exclude=backend/server_ips.txt',
+        '--exclude=backend/targets.txt',
+        '--exclude=backend/paths.txt',
+        '--exclude=backend/dedup_log.txt',
+        '--exclude=backend/.ssh/',
+        '--exclude=backend/collected_results/',
+        '--exclude=backend/valid_*.txt',
+        '--exclude=.ssh/',
         f'{SOURCE_DIR}/', f'{INSTALL_DIR}/',
     ])
     run(['chown', '-R', f'{SERVICE_USER}:{SERVICE_USER}', str(INSTALL_DIR)])
