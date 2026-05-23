@@ -4,10 +4,12 @@ import type { Finding, Scan, ScanShard, TargetList, VpsNode } from '../types'
 import {
   scannerConfig,
   crack,
+  vps as reconVps,
   type CrackSession,
   type ReconScannerConfig,
   type ReconScannerConfigPatch,
 } from '../lib/reconApi'
+import { getListBody } from '../lib/listBodyCache'
 import {
   ADDON_CATALOG,
   getEnabledAddons,
@@ -225,10 +227,23 @@ export function CrackerWorkspace({
     const trimmedName = sessionName.trim() || `crack-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`
 
     setSubmitting(true)
+    // Ensure the list exists on the server. Small files are stored locally;
+    // upload them now so crack.start can resolve `lists/<id>.txt`.
+    let resolvedListId = list.id
+    try {
+      const body = getListBody(list.id)
+      if (body) {
+        const file = new File([body], list.name, { type: 'text/plain' })
+        const upRes = await reconVps.uploadTargets(file)
+        if (upRes.list_id) resolvedListId = upRes.list_id
+      }
+    } catch {
+      // Upload failed — crack.start will try with original ID and surface the error if needed
+    }
     try {
       const r = await crack.start({
         session_name: trimmedName,
-        list_id: list.id,
+        list_id: resolvedListId,
         addon_ids: Array.from(pickedAddons),
         worker_ips,
       })
