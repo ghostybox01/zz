@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { dorks as dorksApi, type DorkResult, type GeneratedDork, type SavedDork } from '../lib/reconApi'
+import { dorks as dorksApi, lists as listsApi, type DorkResult, type GeneratedDork, type SavedDork } from '../lib/reconApi'
 
 function detectKeyProvider(key: string): 'openai' | 'anthropic' | null {
   const k = key.trim()
@@ -29,6 +29,14 @@ const PLATFORM_HINT: Record<Platform, string> = {
   google: 'e.g. filetype:tfstate "AKIA" -site:stackoverflow.com -site:medium.com',
 }
 
+type BulkItem = {
+  id: string
+  query: string
+  platform: string
+  status: 'pending' | 'running' | 'done' | 'error'
+  count: number
+}
+
 type Props = {
   onImportTargets: (hosts: string[], label: string) => void
   onToast: (title: string, message?: string, kind?: 'error' | 'info') => void
@@ -46,6 +54,19 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   const [searching, setSearching]     = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [selected, setSelected]       = useState<Set<string>>(new Set())
+
+  // Multi-select for saved dorks rail
+  const [dorksSelected, setDorksSelected] = useState<Set<string>>(new Set())
+
+  // Bulk run modal
+  const [bulkOpen, setBulkOpen]         = useState(false)
+  const [bulkRunning, setBulkRunning]   = useState(false)
+  const bulkStopRef                     = useRef(false)
+  const [bulkItems, setBulkItems]       = useState<BulkItem[]>([])
+  const [bulkCollected, setBulkCollected] = useState<string[]>([])
+  const [bulkListName, setBulkListName] = useState('')
+  const [bulkSaving, setBulkSaving]     = useState(false)
+  const [bulkSaved, setBulkSaved]       = useState(false)
 
   const [genOpen, setGenOpen]           = useState(false)
   const [genObjective, setGenObjective] = useState('')
@@ -132,6 +153,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     try {
       await dorksApi.deleteSaved(id)
       setSavedDorks((prev) => prev.filter((d) => d.id !== id))
+      setDorksSelected((prev) => { const n = new Set(prev); n.delete(id); return n })
     } catch (e) {
       onToast('Delete failed', (e as Error).message, 'error')
     }
@@ -210,7 +232,6 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
 
     while (!autoStopRef.current) {
       if (qi >= queue.length) {
-        // End of queue — reload to pick up newly added dorks, re-sort by score
         try {
           const r = await dorksApi.listSaved()
           queue = r.dorks
@@ -237,7 +258,6 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
         setSearchTotal(r.total)
         await dorksApi.scoreRun(dork.id, r.results.length)
 
-        // Evolve high-performers — spawn variations with AI
         if (r.results.length >= EVOLVE_THRESHOLD && !autoStopRef.current) {
           const ev = await dorksApi.evolve({ query: dork.query, category: dork.category, platform: dork.platform, count: 5 }).catch(() => ({ ok: true, dorks: [], source: 'none' as const }))
           for (const nd of ev.dorks) {
@@ -253,7 +273,6 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
         }
       } catch { /* skip failing dork */ }
 
-      // Rate limit between requests
       await new Promise((res) => setTimeout(res, 1800))
     }
 
@@ -308,10 +327,112 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     setSelected(new Set())
   }
 
+  // ── Saved-dork multi-select ──────────────────────────────────────────
+  const toggleDorkSelect = (id: string) => {
+    setDorksSelected((prev) => {
+      const n = new Set(prev)
+      n.has(id) ? n.delete(id) : n.add(id)
+      return n
+    })
+  }
+
   const visibleSaved = (catFilter === 'all'
     ? savedDorks
     : savedDorks.filter((d) => d.category === catFilter)
   ).sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+
+  const selectAllVisible = () => setDorksSelected(new Set(visibleSaved.map((d) => d.id)))
+  const clearDorksSelect  = () => setDorksSelected(new Set())
+
+  // ── Bulk run ─────────────────────────────────────────────────────────
+  const startBulkRun = useCallback(async () => {
+    const dorks = visibleSaved.filter((d) => dorksSelected.has(d.id))
+    if (dorks.length === 0) return
+
+    const items: BulkItem[] = dorks.map((d) => ({
+      id: d.id, query: d.query, platform: d.platform, status: 'pending', count: 0,
+    }))
+
+    setBulkOpen(true)
+    setBulkRunning(true)
+    setBulkItems(items)
+    setBulkCollected([])
+    setBulkSaved(false)
+    setBulkListName(`dork-bulk-${new Date().toISOString().slice(0, 10)}`)
+    bulkStopRef.current = false
+
+    const seen = new Set<string>()
+    const allLines: string[] = []
+
+    for (let i = 0; i < items.length; i++) {
+      if (bulkStopRef.current) break
+      const item = items[i]
+
+      setBulkItems((prev) => prev.map((it, idx) => idx === i ? { ...it, status: 'running' } : it))
+
+      if (item.platform === 'google') {
+        // Can't run programmatically — add the Google search URL as a target line
+        const url = `https://www.google.com/search?q=${encodeURIComponent(item.query)}`
+        if (!seen.has(url)) { seen.add(url); allLines.push(url) }
+        setBulkItems((prev) => prev.map((it, idx) => idx === i ? { ...it, status: 'done', count: 1 } : it))
+        setBulkCollected([...allLines])
+        continue
+      }
+
+      const plat = item.platform === 'both' ? 'shodan' : item.platform as Platform
+      try {
+        const r = await dorksApi.run({ query: item.query, platform: plat, limit: 200 })
+        let count = 0
+        for (const res of r.results) {
+          const h = res.hostname || res.host || res.ip
+          if (!h) continue
+          const line = (res.port && res.port !== 80 && res.port !== 443) ? `${h}:${res.port}` : h
+          if (!seen.has(line)) { seen.add(line); allLines.push(line); count++ }
+        }
+        setBulkItems((prev) => prev.map((it, idx) => idx === i ? { ...it, status: 'done', count } : it))
+        setBulkCollected([...allLines])
+        await dorksApi.scoreRun(item.id, r.results.length).catch(() => {/* score update is best-effort */})
+      } catch {
+        setBulkItems((prev) => prev.map((it, idx) => idx === i ? { ...it, status: 'error', count: 0 } : it))
+      }
+
+      if (!bulkStopRef.current) await new Promise((res) => setTimeout(res, 1200))
+    }
+
+    setBulkRunning(false)
+  }, [visibleSaved, dorksSelected])
+
+  const stopBulkRun = () => { bulkStopRef.current = true }
+
+  const saveBulkList = useCallback(async () => {
+    if (bulkCollected.length === 0) return
+    setBulkSaving(true)
+    try {
+      const r = await listsApi.create(bulkListName || 'dork-bulk', bulkCollected)
+      onToast('List saved to R2', `${r.lines} hosts → "${r.name}"`)
+      setBulkSaved(true)
+    } catch (e) {
+      onToast('Save failed', (e as Error).message, 'error')
+    } finally {
+      setBulkSaving(false)
+    }
+  }, [bulkCollected, bulkListName, onToast])
+
+  const copyBulkToClipboard = () => {
+    navigator.clipboard.writeText(bulkCollected.join('\n')).then(() => {
+      onToast('Copied', `${bulkCollected.length} lines copied to clipboard`)
+    }).catch(() => onToast('Copy failed', 'Clipboard access denied', 'error'))
+  }
+
+  const importBulkTocracker = () => {
+    if (bulkCollected.length === 0) return
+    onImportTargets(bulkCollected, bulkListName || 'dork-bulk')
+    onToast('Imported to cracker', `${bulkCollected.length} hosts added`)
+    setBulkOpen(false)
+  }
+
+  const bulkRunning_idx = bulkItems.findIndex((it) => it.status === 'running')
+  const bulkDone = bulkItems.filter((it) => it.status === 'done').length
 
   const isGoogle = platform === 'google'
 
@@ -361,7 +482,18 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
         <aside className="dorks-rail">
           <div className="dorks-rail__head">
             <span className="dorks-rail__title">Saved dorks</span>
-            <span className="mono muted" style={{ fontSize: '.72rem' }}>{savedDorks.length}</span>
+            <div style={{ display: 'flex', gap: '.35rem', alignItems: 'center' }}>
+              <span className="mono muted" style={{ fontSize: '.72rem' }}>{savedDorks.length}</span>
+              <button
+                type="button"
+                className="btn-glass btn-glass--xs"
+                style={{ fontSize: '.62rem', padding: '.1rem .4rem' }}
+                onClick={dorksSelected.size === visibleSaved.length ? clearDorksSelect : selectAllVisible}
+                title={dorksSelected.size === visibleSaved.length ? 'Deselect all' : 'Select all visible'}
+              >
+                {dorksSelected.size === visibleSaved.length && visibleSaved.length > 0 ? '✕ All' : '☐ All'}
+              </button>
+            </div>
           </div>
           <div className="dorks-rail__cats">
             <button
@@ -384,35 +516,67 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                 No saved dorks yet — hit <strong>⊕ Seed Library</strong> to load the ORACLE_HUNTER base set, or generate some with AI.
               </li>
             )}
-            {visibleSaved.map((d) => (
-              <li key={d.id} className="dorks-rail__item">
-                <button
-                  type="button"
-                  className="dorks-rail__load"
-                  onClick={() => loadSaved(d)}
-                  title={d.notes || d.query}
-                >
-                  <div className="dorks-rail__badges">
-                    <span className="dorks-rail__badge dorks-rail__badge--cat">{d.category.replace('_', ' ')}</span>
-                    <span className="dorks-rail__badge dorks-rail__badge--plat">{d.platform}</span>
-                    {d.runs != null && d.runs > 0 && (
-                      <span className={`dorks-rail__badge dorks-rail__badge--score${(d.score ?? 0) >= EVOLVE_THRESHOLD ? ' dorks-rail__badge--hot' : ''}`} title={`${d.hits ?? 0} hits over ${d.runs} runs`}>
-                        ↑{d.score?.toFixed(1) ?? '0'}
-                      </span>
-                    )}
-                  </div>
-                  <span className="dorks-rail__query mono">{d.query}</span>
-                  {d.notes && <span className="dorks-rail__notes muted">{d.notes}</span>}
-                </button>
-                <button
-                  type="button"
-                  className="dorks-rail__del"
-                  onClick={() => void deleteSaved(d.id)}
-                  aria-label="Delete dork"
-                >×</button>
-              </li>
-            ))}
+            {visibleSaved.map((d) => {
+              const on = dorksSelected.has(d.id)
+              return (
+                <li key={d.id} className={`dorks-rail__item${on ? ' dorks-rail__item--sel' : ''}`}>
+                  <button
+                    type="button"
+                    className="dorks-rail__check"
+                    aria-label={on ? 'Deselect' : 'Select'}
+                    onClick={() => toggleDorkSelect(d.id)}
+                    aria-pressed={on}
+                  >
+                    <span className="dorks-rail__chk-box">{on ? '✓' : ''}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="dorks-rail__load"
+                    onClick={() => loadSaved(d)}
+                    title={d.notes || d.query}
+                  >
+                    <div className="dorks-rail__badges">
+                      <span className="dorks-rail__badge dorks-rail__badge--cat">{d.category.replace('_', ' ')}</span>
+                      <span className="dorks-rail__badge dorks-rail__badge--plat">{d.platform}</span>
+                      {d.runs != null && d.runs > 0 && (
+                        <span className={`dorks-rail__badge dorks-rail__badge--score${(d.score ?? 0) >= EVOLVE_THRESHOLD ? ' dorks-rail__badge--hot' : ''}`} title={`${d.hits ?? 0} hits over ${d.runs} runs`}>
+                          ↑{d.score?.toFixed(1) ?? '0'}
+                        </span>
+                      )}
+                    </div>
+                    <span className="dorks-rail__query mono">{d.query}</span>
+                    {d.notes && <span className="dorks-rail__notes muted">{d.notes}</span>}
+                  </button>
+                  <button
+                    type="button"
+                    className="dorks-rail__del"
+                    onClick={() => void deleteSaved(d.id)}
+                    aria-label="Delete dork"
+                  >×</button>
+                </li>
+              )
+            })}
           </ul>
+
+          {/* Selection toolbar */}
+          {dorksSelected.size > 0 && (
+            <div className="dorks-bulk-bar">
+              <span className="dorks-bulk-bar__count">{dorksSelected.size} selected</span>
+              <button
+                type="button"
+                className="btn-primary"
+                style={{ fontSize: '.72rem', padding: '.28rem .7rem' }}
+                onClick={() => void startBulkRun()}
+              >
+                ▶ Run &amp; collect
+              </button>
+              <button
+                type="button"
+                className="btn-glass btn-glass--xs"
+                onClick={clearDorksSelect}
+              >✕</button>
+            </div>
+          )}
         </aside>
 
         {/* ── Search + results ── */}
@@ -558,6 +722,111 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
 
         </div>
       </div>
+
+      {/* ── Bulk run modal ── */}
+      {bulkOpen && (
+        <div className="cw-hub-modal__backdrop" role="dialog" aria-modal="true">
+          <div className="cw-hub-modal" style={{ width: 'min(680px, 96vw)' }} onClick={(e) => e.stopPropagation()}>
+            <header className="cw-hub-modal__head">
+              <div>
+                <h3 style={{ margin: 0 }}>Bulk Run — {bulkItems.length} dork{bulkItems.length !== 1 ? 's' : ''}</h3>
+                <p className="muted" style={{ margin: '.25rem 0 0', fontSize: '.82rem' }}>
+                  {bulkRunning
+                    ? `Running dork ${bulkDone + 1} of ${bulkItems.length}…`
+                    : `Done — ${bulkCollected.length} unique hosts / URLs collected`}
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '.5rem' }}>
+                {bulkRunning && (
+                  <button type="button" className="btn-danger" style={{ fontSize: '.78rem' }} onClick={stopBulkRun}>
+                    ■ Stop
+                  </button>
+                )}
+                {!bulkRunning && (
+                  <button type="button" className="btn-glass btn-glass--xs" onClick={() => setBulkOpen(false)}>
+                    Close
+                  </button>
+                )}
+              </div>
+            </header>
+
+            {/* Progress bar */}
+            {bulkItems.length > 0 && (
+              <div className="dorks-bulk-progress">
+                <div
+                  className="dorks-bulk-progress__bar"
+                  style={{ width: `${(bulkDone / bulkItems.length) * 100}%` }}
+                />
+              </div>
+            )}
+
+            {/* Per-dork status list */}
+            <ul className="dorks-bulk-list">
+              {bulkItems.map((it) => (
+                <li key={it.id} className={`dorks-bulk-item dorks-bulk-item--${it.status}`}>
+                  <span className="dorks-bulk-item__ico">
+                    {it.status === 'pending' ? '○'
+                      : it.status === 'running' ? '●'
+                      : it.status === 'done'    ? '✓'
+                      :                           '✗'}
+                  </span>
+                  <span className="dorks-bulk-item__plat">{it.platform}</span>
+                  <span className="dorks-bulk-item__query mono">{it.query}</span>
+                  {it.status === 'done' && (
+                    <span className="dorks-bulk-item__count muted">{it.count} hosts</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+
+            {/* Save / export actions — shown after run */}
+            {!bulkRunning && bulkCollected.length > 0 && (
+              <div className="dorks-bulk-save">
+                <p className="muted" style={{ margin: '0 0 .6rem', fontSize: '.8rem' }}>
+                  <strong style={{ color: 'var(--accent)' }}>{bulkCollected.length}</strong> unique hosts collected across {bulkDone} dork{bulkDone !== 1 ? 's' : ''}
+                </p>
+                <div className="dorks-bulk-save__row">
+                  <input
+                    className="tg-input"
+                    type="text"
+                    value={bulkListName}
+                    onChange={(e) => setBulkListName(e.target.value)}
+                    placeholder="List name"
+                    style={{ flex: 1 }}
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    className={`btn-primary${bulkSaved ? ' btn-glass' : ''}`}
+                    onClick={() => void saveBulkList()}
+                    disabled={bulkSaving || bulkSaved}
+                  >
+                    {bulkSaving ? 'Saving…' : bulkSaved ? '✓ Saved' : '⬇ Save to R2 list'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-glass"
+                    onClick={copyBulkToClipboard}
+                    title="Copy all hosts to clipboard"
+                  >⧉ Copy</button>
+                  <button
+                    type="button"
+                    className="btn-glass"
+                    onClick={importBulkTocracker}
+                    title="Import directly into the cracker target list"
+                  >⬆ Import</button>
+                </div>
+              </div>
+            )}
+
+            {!bulkRunning && bulkCollected.length === 0 && bulkDone === bulkItems.length && (
+              <p className="muted" style={{ padding: '.75rem 0', textAlign: 'center', fontSize: '.82rem' }}>
+                No hosts were returned by any dork.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── AI Generator modal ── */}
       {genOpen && (

@@ -866,6 +866,34 @@ def api_lists_delete(list_id):
     return jsonify({'ok': True, 'id': safe})
 
 
+@app.route('/api/lists/create', methods=['POST'])
+def api_lists_create():
+    """Create a target list directly from a JSON array of lines.
+    Used by DorksPanel bulk-run to persist collected hosts without a file upload."""
+    data = request.get_json(force=True, silent=True) or {}
+    name = str(data.get('name') or 'dork-list').strip()[:120]
+    raw_lines = data.get('lines') or []
+    if not isinstance(raw_lines, list):
+        return jsonify({'ok': False, 'error': 'lines must be array'}), 400
+    seen: set = set()
+    clean: list = []
+    for ln in raw_lines:
+        s = str(ln).strip()
+        if s and s not in seen:
+            seen.add(s)
+            clean.append(s)
+    if not clean:
+        return jsonify({'ok': False, 'error': 'no lines provided'}), 400
+    _ensure_lists_dir()
+    list_id = _mint_list_id(name)
+    data_path, _ = _list_paths(list_id)
+    with open(data_path, 'w') as f:
+        f.write('\n'.join(clean) + '\n')
+    size = os.path.getsize(data_path)
+    _write_list_meta(list_id, name, len(clean), size)
+    return jsonify({'ok': True, 'id': list_id, 'name': name, 'lines': len(clean)})
+
+
 @app.route('/api/vps/test-ssh', methods=['POST'])
 def api_vps_test_ssh():
     """Quick SSH key validation - check if key exists and is valid"""

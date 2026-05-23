@@ -292,6 +292,8 @@ export const lists = {
     try { body = await res.json() } catch { body = {} }
     return body as { ok: boolean; error?: string }
   },
+  create: (name: string, lines: string[]) =>
+    postJson<{ ok: boolean; id: string; name: string; lines: number }>('/lists/create', { name, lines }),
 }
 
 /* ── Scanner config (live flags consumed by main.go) ─────────────── */
