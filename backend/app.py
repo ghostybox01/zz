@@ -5042,36 +5042,70 @@ def _save_saved_dorks(dorks: list) -> None:
         json.dump(dorks, f)
 
 
-def _ai_generate_dorks(objective: str, platform: str, count: int, category: str, api_key: str) -> list:
+def _dork_ai_prompt(objective: str, platform: str, count: int, category: str) -> str:
+    syntax_hint = (
+        "Shodan query syntax: use fields like ssl, http.title, http.html, hostname, port, org, product, version, before/after."
+        if platform == 'shodan' else
+        "FOFA query syntax: use title=, body=, host=, domain=, port=, protocol=, country=, app= with && || != operators."
+        if platform == 'fofa' else
+        "Google dork syntax: use filetype:, inurl:, intext:, intitle:, site:, -site: operators. "
+        "Always add -site:stackoverflow.com -site:medium.com -site:github.com to filter noise."
+    )
+    return (
+        f"Generate {count} {platform} search dorks to find exposed {category} targets.\n"
+        f"Goal: {objective or f'find leaked {category} credentials and exposed services'}\n"
+        f"{syntax_hint}\n\n"
+        f"Return ONLY a valid JSON array (no markdown, no explanation):\n"
+        f'[{{"query":"...","notes":"what this finds"}}, ...]'
+    )
+
+
+def _parse_dork_json(text: str) -> list:
+    m = re.search(r'\[.*\]', text, re.DOTALL)
+    if m:
+        return json.loads(m.group())
+    return []
+
+
+def _ai_generate_dorks_anthropic(objective: str, platform: str, count: int, category: str, api_key: str) -> list:
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
-        syntax_hint = (
-            "Shodan query syntax: use fields like ssl, http.title, http.html, hostname, port, org, product, version, before/after."
-            if platform == 'shodan' else
-            "FOFA query syntax: use title=, body=, host=, domain=, port=, protocol=, country=, app= with && || != operators."
-            if platform == 'fofa' else
-            "Google dork syntax: use filetype:, inurl:, intext:, intitle:, site:, -site: operators. "
-            "Always add -site:stackoverflow.com -site:medium.com -site:github.com to filter noise."
-        )
-        prompt = (
-            f"Generate {count} {platform} search dorks to find exposed {category} targets.\n"
-            f"Goal: {objective or f'find leaked {category} credentials and exposed services'}\n"
-            f"{syntax_hint}\n\n"
-            f"Return ONLY a valid JSON array (no markdown, no explanation):\n"
-            f'[{{"query":"...","notes":"what this finds"}}, ...]'
-        )
         msg = client.messages.create(
             model='claude-opus-4-7',
             max_tokens=2048,
-            messages=[{'role': 'user', 'content': prompt}],
+            messages=[{'role': 'user', 'content': _dork_ai_prompt(objective, platform, count, category)}],
         )
-        text = msg.content[0].text.strip()
-        m = re.search(r'\[.*\]', text, re.DOTALL)
-        if m:
-            return json.loads(m.group())
+        return _parse_dork_json(msg.content[0].text.strip())
     except Exception as e:
-        print(f'[dorks] AI generation failed: {e}')
+        print(f'[dorks] Anthropic generation failed: {e}')
+    return []
+
+
+def _ai_generate_dorks_openai(objective: str, platform: str, count: int, category: str, api_key: str) -> list:
+    try:
+        import openai
+        client = openai.OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model='gpt-4o',
+            max_tokens=2048,
+            messages=[{'role': 'user', 'content': _dork_ai_prompt(objective, platform, count, category)}],
+        )
+        return _parse_dork_json(resp.choices[0].message.content.strip())
+    except Exception as e:
+        print(f'[dorks] OpenAI generation failed: {e}')
+    return []
+
+
+def _ai_generate_dorks(objective: str, platform: str, count: int, category: str, openai_key: str, anthropic_key: str) -> list:
+    if openai_key:
+        result = _ai_generate_dorks_openai(objective, platform, count, category, openai_key)
+        if result:
+            return result
+    if anthropic_key:
+        result = _ai_generate_dorks_anthropic(objective, platform, count, category, anthropic_key)
+        if result:
+            return result
     return []
 
 
@@ -5282,46 +5316,61 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
 
 @app.route('/api/dorks/keys', methods=['GET'])
 def api_dorks_keys_get():
-    keys = _load_dork_keys()
-    return jsonify({
-        'shodan_key': keys.get('shodan_key', ''),
-        'fofa_email': keys.get('fofa_email', ''),
-        'fofa_key': keys.get('fofa_key', ''),
-        'anthropic_key': '***' if keys.get('anthropic_key') else '',
-    })
+    try:
+        keys = _load_dork_keys()
+        return jsonify({
+            'shodan_key': keys.get('shodan_key', ''),
+            'fofa_email': keys.get('fofa_email', ''),
+            'fofa_key': keys.get('fofa_key', ''),
+            'anthropic_key': '***' if keys.get('anthropic_key') else '',
+            'openai_key': '***' if keys.get('openai_key') else '',
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/dorks/keys', methods=['POST'])
 def api_dorks_keys_save():
-    data = request.json or {}
-    keys = _load_dork_keys()
-    for field in ('shodan_key', 'fofa_email', 'fofa_key'):
-        if field in data:
-            keys[field] = data[field]
-    if data.get('anthropic_key') and data['anthropic_key'] != '***':
-        keys['anthropic_key'] = data['anthropic_key']
-    _save_dork_keys(keys)
-    return jsonify({'ok': True})
+    try:
+        data = request.json or {}
+        keys = _load_dork_keys()
+        for field in ('shodan_key', 'fofa_email', 'fofa_key'):
+            if field in data:
+                keys[field] = str(data[field])
+        for secret_field in ('anthropic_key', 'openai_key'):
+            val = data.get(secret_field, '')
+            if val and val != '***':
+                keys[secret_field] = str(val)
+        _save_dork_keys(keys)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/dorks/generate', methods=['POST'])
 def api_dorks_generate():
-    data = request.json or {}
-    objective = (data.get('objective') or '').strip()
-    platform = data.get('platform', 'shodan')
-    count = min(int(data.get('count', 10)), 30)
-    category = data.get('category', 'aws')
+    try:
+        data = request.json or {}
+        objective = (data.get('objective') or '').strip()[:500]
+        platform = data.get('platform', 'shodan')
+        if platform not in ('shodan', 'fofa', 'google'):
+            platform = 'shodan'
+        count = max(1, min(int(data.get('count', 10)), 30))
+        category = (data.get('category') or 'aws').strip()
 
-    keys = _load_dork_keys()
-    anthropic_key = keys.get('anthropic_key', '')
+        keys = _load_dork_keys()
+        openai_key = keys.get('openai_key', '')
+        anthropic_key = keys.get('anthropic_key', '')
 
-    if anthropic_key:
-        dorks = _ai_generate_dorks(objective, platform, count, category, anthropic_key)
-        if dorks:
-            return jsonify({'ok': True, 'dorks': dorks, 'source': 'ai'})
+        if openai_key or anthropic_key:
+            ai_dorks = _ai_generate_dorks(objective, platform, count, category, openai_key, anthropic_key)
+            if ai_dorks:
+                return jsonify({'ok': True, 'dorks': ai_dorks, 'source': 'ai'})
 
-    dorks = _template_dorks(category, platform, count)
-    return jsonify({'ok': True, 'dorks': dorks, 'source': 'template'})
+        dorks = _template_dorks(category, platform, count)
+        return jsonify({'ok': True, 'dorks': dorks, 'source': 'template'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/dorks/run', methods=['POST'])
@@ -5407,6 +5456,10 @@ def api_dorks_run():
 
     except http_requests.exceptions.Timeout:
         return jsonify({'error': f'{platform.upper()} API timed out — try again'}), 504
+    except http_requests.exceptions.ConnectionError:
+        return jsonify({'error': f'Could not reach {platform.upper()} API — check network connectivity'}), 502
+    except http_requests.exceptions.TooManyRedirects:
+        return jsonify({'error': f'{platform.upper()} API returned too many redirects'}), 502
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -5441,6 +5494,115 @@ def api_dorks_saved_delete(dork_id):
     dorks = [d for d in _load_saved_dorks() if d.get('id') != dork_id]
     _save_saved_dorks(dorks)
     return jsonify({'ok': True})
+
+
+@app.route('/api/dorks/saved/<dork_id>/score', methods=['POST'])
+def api_dorks_saved_score(dork_id):
+    """Record how many results a dork returned; updates running average score."""
+    try:
+        data = request.json or {}
+        result_count = max(0, int(data.get('result_count', 0)))
+        dorks = _load_saved_dorks()
+        updated = False
+        for d in dorks:
+            if d.get('id') == dork_id:
+                d['runs'] = d.get('runs', 0) + 1
+                d['hits'] = d.get('hits', 0) + result_count
+                d['last_run_hits'] = result_count
+                d['score'] = round(d['hits'] / d['runs'], 2) if d['runs'] > 0 else 0
+                updated = True
+                break
+        if updated:
+            _save_saved_dorks(dorks)
+        return jsonify({'ok': True, 'updated': updated})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dorks/evolve', methods=['POST'])
+def api_dorks_evolve():
+    """Generate AI variations of a high-performing dork."""
+    try:
+        data = request.json or {}
+        base_query = (data.get('query') or '').strip()[:400]
+        category = (data.get('category') or 'custom').strip()
+        platform = data.get('platform', 'shodan')
+        if platform not in ('shodan', 'fofa', 'google'):
+            platform = 'shodan'
+        count = max(1, min(int(data.get('count', 5)), 15))
+
+        if not base_query:
+            return jsonify({'error': 'query required'}), 400
+
+        keys = _load_dork_keys()
+        openai_key = keys.get('openai_key', '')
+        anthropic_key = keys.get('anthropic_key', '')
+
+        prompt = (
+            f"This {platform} dork returned good results:\n{base_query}\n\n"
+            f"Generate {count} variations and related queries with similar syntax for the same platform ({platform}), "
+            f"same category ({category}). Focus on alternative paths, related keywords, and adjacent exposure patterns.\n\n"
+            f"Return ONLY a valid JSON array (no markdown):\n"
+            f'[{{"query":"...","notes":"what this variation finds"}}, ...]'
+        )
+
+        result_dorks = []
+        if openai_key:
+            try:
+                import openai as _oai
+                client = _oai.OpenAI(api_key=openai_key)
+                resp = client.chat.completions.create(
+                    model='gpt-4o', max_tokens=1024,
+                    messages=[{'role': 'user', 'content': prompt}],
+                )
+                result_dorks = _parse_dork_json(resp.choices[0].message.content.strip())
+            except Exception as e:
+                print(f'[dorks] evolve OpenAI failed: {e}')
+
+        if not result_dorks and anthropic_key:
+            try:
+                import anthropic as _ant
+                client = _ant.Anthropic(api_key=anthropic_key)
+                msg = client.messages.create(
+                    model='claude-opus-4-7', max_tokens=1024,
+                    messages=[{'role': 'user', 'content': prompt}],
+                )
+                result_dorks = _parse_dork_json(msg.content[0].text.strip())
+            except Exception as e:
+                print(f'[dorks] evolve Anthropic failed: {e}')
+
+        return jsonify({'ok': True, 'dorks': result_dorks, 'source': 'ai' if result_dorks else 'none'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Global error handlers ─────────────────────────────────────────────────
+
+@app.errorhandler(400)
+def err_bad_request(e):
+    return jsonify({'error': 'bad request', 'detail': str(e)}), 400
+
+
+@app.errorhandler(404)
+def err_not_found(e):
+    return jsonify({'error': 'endpoint not found', 'path': request.path}), 404
+
+
+@app.errorhandler(405)
+def err_method(e):
+    return jsonify({'error': 'method not allowed'}), 405
+
+
+@app.errorhandler(500)
+def err_server(e):
+    app.logger.error('Unhandled 500: %s', e, exc_info=True)
+    return jsonify({'error': 'internal server error', 'detail': str(e)}), 500
+
+
+@app.errorhandler(Exception)
+def err_unhandled(e):
+    app.logger.error('Unhandled exception: %s', e, exc_info=True)
+    return jsonify({'error': str(e) or 'unexpected error'}), 500
 
 
 # ==================== MAIN ====================

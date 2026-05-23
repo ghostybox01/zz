@@ -5598,6 +5598,14 @@
 /* ──────────────────────────────────────────────────────────────────
    Dorks panel
    ────────────────────────────────────────────────────────────────── */
+.btn-danger { background: var(--danger); color: #fff; border: none; border-radius: 8px; padding: .45rem 1rem; font-size: .82rem; font-weight: 600; cursor: pointer; transition: opacity .15s; }
+.btn-danger:hover { opacity: .85; }
+.btn-danger:disabled { opacity: .45; cursor: not-allowed; }
+
+.dorks-hunt-bar { display: flex; align-items: center; gap: .6rem; background: rgba(251,191,36,.06); border: 1px solid rgba(251,191,36,.25); border-radius: 8px; padding: .45rem .85rem; }
+.dorks-hunt-bar__dot { width: 7px; height: 7px; border-radius: 50%; background: #fbbf24; flex-shrink: 0; animation: hunt-pulse 1.1s ease-in-out infinite; }
+@keyframes hunt-pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
 .dorks-panel { display: flex; flex-direction: column; gap: 1.25rem; }
 .dorks-panel__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
 .dorks-panel__title { margin: 0; font-size: 1.35rem; font-weight: 800; color: var(--text-strong); }
@@ -5625,6 +5633,8 @@
 .dorks-rail__badge { font-size: .6rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; padding: .12rem .4rem; border-radius: 999px; border: 1px solid var(--hairline); }
 .dorks-rail__badge--cat { color: var(--accent); border-color: color-mix(in srgb, var(--accent), transparent 60%); }
 .dorks-rail__badge--plat { color: var(--muted); }
+.dorks-rail__badge--score { color: #7dd3af; border-color: color-mix(in srgb, #7dd3af, transparent 55%); }
+.dorks-rail__badge--hot { color: #fbbf24; border-color: color-mix(in srgb, #fbbf24, transparent 55%); }
 .dorks-rail__query { font-family: var(--mono); font-size: .7rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dorks-rail__notes { font-size: .68rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dorks-rail__del { padding: 0 .65rem; background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 1rem; transition: color .1s; flex-shrink: 0; }

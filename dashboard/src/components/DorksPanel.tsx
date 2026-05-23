@@ -1,5 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { dorks as dorksApi, type DorkResult, type GeneratedDork, type SavedDork } from '../lib/reconApi'
+
+function detectKeyProvider(key: string): 'openai' | 'anthropic' | null {
+  const k = key.trim()
+  if (k.startsWith('sk-ant-')) return 'anthropic'
+  if (k.startsWith('sk-proj-') || (k.startsWith('sk-') && !k.startsWith('sk-ant-'))) return 'openai'
+  return null
+}
+
+const EVOLVE_THRESHOLD = 3
 
 type Platform = 'shodan' | 'fofa' | 'google'
 
@@ -51,13 +60,22 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   const [fofaEmail, setFofaEmail]         = useState('')
   const [fofaKey, setFofaKey]             = useState('')
   const [anthropicKey, setAnthropicKey]   = useState('')
+  const [openaiKey, setOpenaiKey]         = useState('')
   const [savingKeys, setSavingKeys]       = useState(false)
 
   const [savingDork, setSavingDork] = useState(false)
 
+  const [autoHunting, setAutoHunting]       = useState(false)
+  const [huntStatus, setHuntStatus]         = useState<string | null>(null)
+  const [huntCycles, setHuntCycles]         = useState(0)
+  const [huntNewDorks, setHuntNewDorks]     = useState(0)
+  const autoStopRef = useRef(false)
+
   useEffect(() => {
-    dorksApi.listSaved().then((r) => setSavedDorks(r.dorks)).catch(() => {})
-  }, [])
+    dorksApi.listSaved()
+      .then((r) => setSavedDorks(r.dorks))
+      .catch((e) => onToast('Could not load saved dorks', (e as Error).message, 'error'))
+  }, [onToast])
 
   useEffect(() => {
     if (!keysOpen) return
@@ -66,8 +84,9 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
       setFofaEmail(k.fofa_email ?? '')
       setFofaKey(k.fofa_key ?? '')
       setAnthropicKey(k.anthropic_key ?? '')
-    }).catch(() => {})
-  }, [keysOpen])
+      setOpenaiKey(k.openai_key ?? '')
+    }).catch((e) => onToast('Could not load API keys', (e as Error).message, 'error'))
+  }, [keysOpen, onToast])
 
   const openInGoogle = useCallback(() => {
     if (!query.trim()) return
@@ -145,7 +164,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   const saveKeys = useCallback(async () => {
     setSavingKeys(true)
     try {
-      await dorksApi.saveKeys({ shodan_key: shodanKey, fofa_email: fofaEmail, fofa_key: fofaKey, anthropic_key: anthropicKey })
+      await dorksApi.saveKeys({ shodan_key: shodanKey, fofa_email: fofaEmail, fofa_key: fofaKey, anthropic_key: anthropicKey, openai_key: openaiKey })
       onToast('API keys saved')
       setKeysOpen(false)
     } catch (e) {
@@ -153,7 +172,97 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     } finally {
       setSavingKeys(false)
     }
-  }, [shodanKey, fofaEmail, fofaKey, anthropicKey, onToast])
+  }, [shodanKey, fofaEmail, fofaKey, anthropicKey, openaiKey, onToast])
+
+  const handleKeyPaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>) => {
+    const pasted = e.clipboardData.getData('text').trim()
+    const provider = detectKeyProvider(pasted)
+    if (!provider) return
+    e.preventDefault()
+    if (provider === 'openai') {
+      setOpenaiKey(pasted)
+      onToast('OpenAI key detected', 'Pasted into the OpenAI field automatically')
+    } else {
+      setAnthropicKey(pasted)
+      onToast('Anthropic key detected', 'Pasted into the Anthropic field automatically')
+    }
+  }, [onToast])
+
+  const startAutoHunt = useCallback(async () => {
+    if (autoHunting) return
+    const initial = await dorksApi.listSaved().catch(() => ({ dorks: [] }))
+    const runnable = initial.dorks.filter((d) => d.platform !== 'both' && d.platform !== 'google')
+    if (runnable.length === 0) {
+      onToast('Auto Hunt needs saved dorks', 'Add Shodan or FOFA dorks to the library first.', 'error')
+      return
+    }
+    setAutoHunting(true)
+    setHuntCycles(0)
+    setHuntNewDorks(0)
+    autoStopRef.current = false
+
+    let queue: SavedDork[] = [...runnable].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    let qi = 0
+    let newDorkCount = 0
+    let cycleCount = 0
+
+    while (!autoStopRef.current) {
+      if (qi >= queue.length) {
+        // End of queue — reload to pick up newly added dorks, re-sort by score
+        try {
+          const r = await dorksApi.listSaved()
+          queue = r.dorks
+            .filter((d) => d.platform !== 'both' && d.platform !== 'google')
+            .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+          setSavedDorks(r.dorks)
+        } catch { break }
+        qi = 0
+        cycleCount++
+        setHuntCycles(cycleCount)
+        if (autoStopRef.current) break
+      }
+
+      const dork = queue[qi++]
+      if (!dork) continue
+
+      setHuntStatus(`[${cycleCount + 1}] ${dork.query.slice(0, 60)}`)
+      setQuery(dork.query)
+      setPlatform(dork.platform as Platform)
+
+      try {
+        const r = await dorksApi.run({ query: dork.query, platform: dork.platform, limit: 100 })
+        setResults(r.results)
+        setSearchTotal(r.total)
+        await dorksApi.scoreRun(dork.id, r.results.length)
+
+        // Evolve high-performers — spawn variations with AI
+        if (r.results.length >= EVOLVE_THRESHOLD && !autoStopRef.current) {
+          const ev = await dorksApi.evolve({ query: dork.query, category: dork.category, platform: dork.platform, count: 5 }).catch(() => ({ ok: true, dorks: [], source: 'none' as const }))
+          for (const nd of ev.dorks) {
+            if (autoStopRef.current) break
+            try {
+              const saved = await dorksApi.save({ query: nd.query, category: dork.category, platform: dork.platform, notes: nd.notes })
+              queue.push(saved.dork)
+              setSavedDorks((prev) => [saved.dork, ...prev])
+              newDorkCount++
+              setHuntNewDorks(newDorkCount)
+            } catch { /* skip */ }
+          }
+        }
+      } catch { /* skip failing dork */ }
+
+      // Rate limit between requests
+      await new Promise((res) => setTimeout(res, 1800))
+    }
+
+    setAutoHunting(false)
+    setHuntStatus(null)
+    onToast('Auto Hunt stopped', `${cycleCount} full cycles · ${newDorkCount} new dorks spawned`)
+  }, [autoHunting, onToast])
+
+  const stopAutoHunt = useCallback(() => {
+    autoStopRef.current = true
+  }, [])
 
   const loadSaved = (d: SavedDork) => {
     setQuery(d.query)
@@ -183,9 +292,10 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     setSelected(new Set())
   }
 
-  const visibleSaved = catFilter === 'all'
+  const visibleSaved = (catFilter === 'all'
     ? savedDorks
     : savedDorks.filter((d) => d.category === catFilter)
+  ).sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
 
   const isGoogle = platform === 'google'
 
@@ -199,6 +309,15 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
           </p>
         </div>
         <div className="dorks-panel__actions">
+          {autoHunting ? (
+            <button type="button" className="btn-danger" onClick={stopAutoHunt}>
+              ■ Stop Hunt
+            </button>
+          ) : (
+            <button type="button" className="btn-primary btn-with-ico" onClick={() => void startAutoHunt()} title="Auto-iterate saved dorks by score, spawn AI variants of high performers">
+              ◎ Auto Hunt
+            </button>
+          )}
           <button type="button" className="btn-primary btn-with-ico" onClick={() => setGenOpen(true)}>
             ✦ AI Generate
           </button>
@@ -207,6 +326,16 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
           </button>
         </div>
       </header>
+
+      {autoHunting && (
+        <div className="dorks-hunt-bar">
+          <span className="dorks-hunt-bar__dot" aria-hidden />
+          <span className="mono" style={{ fontSize: '.75rem' }}>{huntStatus || 'starting…'}</span>
+          <span className="muted" style={{ fontSize: '.72rem', marginLeft: 'auto' }}>
+            cycle {huntCycles + 1} · +{huntNewDorks} new dorks
+          </span>
+        </div>
+      )}
 
       <div className="dorks-panel__body">
         {/* ── Saved dorks rail ── */}
@@ -247,6 +376,11 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                   <div className="dorks-rail__badges">
                     <span className="dorks-rail__badge dorks-rail__badge--cat">{d.category.replace('_', ' ')}</span>
                     <span className="dorks-rail__badge dorks-rail__badge--plat">{d.platform}</span>
+                    {d.runs != null && d.runs > 0 && (
+                      <span className={`dorks-rail__badge dorks-rail__badge--score${(d.score ?? 0) >= EVOLVE_THRESHOLD ? ' dorks-rail__badge--hot' : ''}`} title={`${d.hits ?? 0} hits over ${d.runs} runs`}>
+                        ↑{d.score?.toFixed(1) ?? '0'}
+                      </span>
+                    )}
                   </div>
                   <span className="dorks-rail__query mono">{d.query}</span>
                   {d.notes && <span className="dorks-rail__notes muted">{d.notes}</span>}
@@ -413,8 +547,8 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
               <div>
                 <h3 style={{ margin: 0 }}>AI Dork Generator</h3>
                 <p className="muted" style={{ margin: '.25rem 0 0', fontSize: '.82rem' }}>
-                  Describe what you're hunting — Claude writes syntax-perfect dorks for the selected platform.
-                  Falls back to curated templates if no Anthropic key is configured.
+                  Describe what you're hunting — ChatGPT or Claude writes syntax-perfect dorks for the selected platform.
+                  Falls back to curated templates if no AI key is configured.
                 </p>
               </div>
               <button type="button" className="btn-glass btn-glass--xs" onClick={() => setGenOpen(false)} disabled={generating}>Close</button>
@@ -504,7 +638,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
             <div className="cw-composer">
               <label className="cw-composer__field">
                 <span className="cw-composer__label">Shodan API key</span>
-                <input className="tg-input" type="password" value={shodanKey} onChange={(e) => setShodanKey(e.target.value)} placeholder="your-shodan-api-key" spellCheck={false} autoComplete="off" />
+                <input className="tg-input" type="password" value={shodanKey} onChange={(e) => setShodanKey(e.target.value)} onPaste={handleKeyPaste} placeholder="your-shodan-api-key" spellCheck={false} autoComplete="off" />
               </label>
               <label className="cw-composer__field">
                 <span className="cw-composer__label">FOFA email</span>
@@ -512,11 +646,16 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
               </label>
               <label className="cw-composer__field">
                 <span className="cw-composer__label">FOFA API key</span>
-                <input className="tg-input" type="password" value={fofaKey} onChange={(e) => setFofaKey(e.target.value)} placeholder="your-fofa-api-key" spellCheck={false} autoComplete="off" />
+                <input className="tg-input" type="password" value={fofaKey} onChange={(e) => setFofaKey(e.target.value)} onPaste={handleKeyPaste} placeholder="your-fofa-api-key" spellCheck={false} autoComplete="off" />
               </label>
               <label className="cw-composer__field">
-                <span className="cw-composer__label">Anthropic API key (AI dork generation)</span>
-                <input className="tg-input" type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)}
+                <span className="cw-composer__label">OpenAI API key (ChatGPT — tried first)</span>
+                <input className="tg-input" type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} onPaste={handleKeyPaste}
+                  placeholder={openaiKey === '***' ? '(saved — enter new to replace)' : 'sk-...'} spellCheck={false} autoComplete="off" />
+              </label>
+              <label className="cw-composer__field">
+                <span className="cw-composer__label">Anthropic API key (Claude — fallback)</span>
+                <input className="tg-input" type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} onPaste={handleKeyPaste}
                   placeholder={anthropicKey === '***' ? '(saved — enter new to replace)' : 'sk-ant-...'} spellCheck={false} autoComplete="off" />
               </label>
               <div className="settings-btn-row">

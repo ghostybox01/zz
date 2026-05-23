@@ -753,9 +753,13 @@ export type SavedDork = {
   id: string
   query: string
   category: string
-  platform: 'shodan' | 'fofa' | 'both'
+  platform: 'shodan' | 'fofa' | 'both' | 'google'
   notes: string
   createdAt: string
+  runs?: number
+  hits?: number
+  last_run_hits?: number
+  score?: number
 }
 
 export type GeneratedDork = {
@@ -764,8 +768,8 @@ export type GeneratedDork = {
 }
 
 export const dorks = {
-  getKeys: () => getJson<{ shodan_key: string; fofa_email: string; fofa_key: string; anthropic_key: string }>('/dorks/keys'),
-  saveKeys: (body: { shodan_key?: string; fofa_email?: string; fofa_key?: string; anthropic_key?: string }) =>
+  getKeys: () => getJson<{ shodan_key: string; fofa_email: string; fofa_key: string; anthropic_key: string; openai_key: string }>('/dorks/keys'),
+  saveKeys: (body: { shodan_key?: string; fofa_email?: string; fofa_key?: string; anthropic_key?: string; openai_key?: string }) =>
     postJson<{ ok: boolean }>('/dorks/keys', body),
   generate: (body: { objective: string; platform: string; count: number; category: string }) =>
     postJson<{ ok: boolean; dorks: GeneratedDork[]; source: 'ai' | 'template' }>('/dorks/generate', body),
@@ -776,6 +780,15 @@ export const dorks = {
     postJson<{ ok: boolean; dork: SavedDork }>('/dorks/saved', body),
   deleteSaved: async (id: string): Promise<{ ok: boolean }> => {
     const res = await fetch(`${BASE}/dorks/saved/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!res.ok) {
+      let body: unknown
+      try { body = await res.json() } catch { body = await res.text().catch(() => '') }
+      throw new ReconApiError(res.status, `/dorks/saved/${id}`, body)
+    }
     return (await res.json()) as { ok: boolean }
   },
+  scoreRun: (id: string, resultCount: number) =>
+    postJson<{ ok: boolean; updated: boolean }>(`/dorks/saved/${encodeURIComponent(id)}/score`, { result_count: resultCount }),
+  evolve: (body: { query: string; category: string; platform: string; count?: number }) =>
+    postJson<{ ok: boolean; dorks: GeneratedDork[]; source: 'ai' | 'none' }>('/dorks/evolve', body),
 }

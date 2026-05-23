@@ -67,6 +67,15 @@ const PROBES: Probe[] = [
       return r.ok
     },
   },
+  {
+    id: 'dorks',
+    label: 'Dork hunter',
+    description: 'AI generator + Shodan/FOFA/Google search endpoints',
+    run: async () => {
+      const r = await fetch('/api/dorks/keys', { headers: { Accept: 'application/json' } })
+      return r.ok
+    },
+  },
 ]
 
 type Props = {
