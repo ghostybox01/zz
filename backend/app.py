@@ -3722,6 +3722,72 @@ def api_crack_start():
     return jsonify({'ok': True, 'session': _crack_session_view(session)})
 
 
+def _collect_crack_results(sess: dict) -> None:
+    """Pull ResultJS/*.txt files from every worker in a completed session back
+    to the controller's backend directory, then call import_from_files() so
+    results appear in the Hits/Stripe/Crypto tabs immediately."""
+    remote_dir = sess.get('remote_dir') or ''
+    worker_ips = list((sess.get('remote_pids') or {}).keys()) or list(sess.get('worker_ips') or [])
+    if not remote_dir or not worker_ips:
+        return
+    mgr = get_ssh_manager()
+    if not mgr:
+        return
+    results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+    for ip in worker_ips:
+        try:
+            ssh = mgr._get_ssh_client(ip, 30)
+            sftp = ssh.open_sftp()
+            sftp.get_channel().settimeout(60)
+            result_path = f'{remote_dir}/ResultJS'
+            try:
+                remote_files = sftp.listdir(result_path)
+            except Exception:
+                sftp.close(); ssh.close()
+                continue
+            for fname in remote_files:
+                if not fname.endswith('.txt'):
+                    continue
+                local_path = os.path.join(results_dir, fname)
+                try:
+                    # Download to a temp file then append to local copy so we
+                    # don't clobber keys from previous sessions.
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
+                        tmp_path = tf.name
+                    sftp.get(f'{result_path}/{fname}', tmp_path)
+                    with open(tmp_path, 'r', errors='ignore') as fh:
+                        new_lines = fh.read()
+                    if new_lines.strip():
+                        with open(local_path, 'a') as out:
+                            out.write(new_lines)
+                    os.unlink(tmp_path)
+                except Exception as e:
+                    print(f'[collect] {ip}/{fname}: {e}')
+            sftp.close()
+            ssh.close()
+        except Exception as e:
+            print(f'[collect] {ip}: {e}')
+    try:
+        import_from_files()
+    except Exception as e:
+        print(f'[collect] import_from_files: {e}')
+
+
+@app.route('/api/crack/<sid>/collect', methods=['POST'])
+def api_crack_collect(sid):
+    """Manually trigger result collection for a session (pull ResultJS from workers)."""
+    if not re.match(r'^[0-9a-f]{12}$', sid):
+        return jsonify({'error': 'invalid session id'}), 400
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sess = _crack_sessions.get(sid)
+    if not sess:
+        return jsonify({'error': 'session not found'}), 404
+    threading.Thread(target=_collect_crack_results, args=(sess,), daemon=True).start()
+    return jsonify({'ok': True, 'message': 'Collection started in background'})
+
+
 @app.route('/api/crack/sessions', methods=['GET'])
 def api_crack_sessions():
     """List all sessions with liveness-verified status. Active sessions get
@@ -3758,6 +3824,13 @@ def api_crack_sessions():
             sess['status'] = 'completed'
             sess['finished_at'] = datetime.now().isoformat()
             mutated = True
+            # Fire-and-forget: pull ResultJS files from the worker back to
+            # the controller so import_from_files() can ingest them.
+            threading.Thread(
+                target=_collect_crack_results,
+                args=(sess,),
+                daemon=True,
+            ).start()
 
     if mutated:
         with _crack_lock:
