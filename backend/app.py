@@ -3719,7 +3719,108 @@ def api_crack_start():
         daemon=True,
     ).start()
 
+    # Live result poller: pulls ResultJS/*.txt from workers every 60 s so
+    # hits appear in the dashboard during scanning, not just at completion.
+    threading.Thread(
+        target=_poll_live_results,
+        args=(session_id,),
+        name=f'crack-poll-{session_id}',
+        daemon=True,
+    ).start()
+
     return jsonify({'ok': True, 'session': _crack_session_view(session)})
+
+
+def _poll_live_results(session_id: str) -> None:
+    """Background thread: every 60 s during an active scan, pull ResultJS/*.txt
+    from each worker and INSERT OR IGNORE new credentials directly into the DB.
+    Emits a stats_update socket event whenever new rows land, giving the
+    dashboard near-real-time hits without waiting for session completion."""
+    import time as _time
+    POLL_INTERVAL = 60
+    while True:
+        _time.sleep(POLL_INTERVAL)
+        with _crack_lock:
+            _reload_crack_state_if_changed()
+            sess = dict(_crack_sessions.get(session_id) or {})
+        if not sess or sess.get('status') not in ('running', 'queued'):
+            break
+        remote_dir = sess.get('remote_dir') or ''
+        worker_ips = (
+            list((sess.get('remote_pids') or {}).keys())
+            or list(sess.get('worker_ips') or [])
+        )
+        if not remote_dir or not worker_ips:
+            continue
+        mgr = get_ssh_manager()
+        if not mgr:
+            continue
+        inserted_total = 0
+        for ip in worker_ips:
+            try:
+                ssh = mgr._get_ssh_client(ip, 30)
+                sftp = ssh.open_sftp()
+                sftp.get_channel().settimeout(30)
+                result_path = f'{remote_dir}/ResultJS'
+                try:
+                    remote_files = sftp.listdir(result_path)
+                except Exception:
+                    sftp.close(); ssh.close()
+                    continue
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                for fname in remote_files:
+                    mapping = FILE_MAPPING.get(fname)
+                    if not mapping:
+                        continue
+                    cred_type, status = mapping
+                    if status == 'hit':
+                        continue
+                    import tempfile as _tmpmod
+                    with _tmpmod.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
+                        tmp_path = tf.name
+                    try:
+                        sftp.get(f'{result_path}/{fname}', tmp_path)
+                        with open(tmp_path, 'r', errors='ignore') as fh:
+                            for line in fh:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                parts = line.split(':', 1)
+                                if len(parts) < 2:
+                                    continue
+                                source_url = parts[0].strip()
+                                key_and_rest = parts[1].strip()
+                                key_parts = key_and_rest.split(':', 1)
+                                key_value = key_parts[0].strip()
+                                metadata = key_parts[1].strip() if len(key_parts) > 1 else ''
+                                cursor.execute(
+                                    'INSERT OR IGNORE INTO credentials '
+                                    '(type, key_value, source_url, metadata, status) '
+                                    'VALUES (?, ?, ?, ?, ?)',
+                                    (cred_type, key_value, source_url, metadata, 'valid'),
+                                )
+                                if cursor.rowcount > 0:
+                                    inserted_total += 1
+                    except Exception as e:
+                        print(f'[live-poll] {ip}/{fname}: {e}')
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except Exception:
+                            pass
+                conn.commit()
+                conn.close()
+                sftp.close()
+                ssh.close()
+            except Exception as e:
+                print(f'[live-poll] {ip}: {e}')
+        if inserted_total > 0:
+            print(f'[live-poll] {session_id}: +{inserted_total} new credentials')
+            try:
+                socketio.emit('stats_update', get_statistics())
+            except Exception:
+                pass
 
 
 def _collect_crack_results(sess: dict) -> None:
