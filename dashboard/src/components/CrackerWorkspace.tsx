@@ -184,6 +184,8 @@ export function CrackerWorkspace({
   function openComposer() {
     setPickedListId((prev) => prev || lists[0]?.id || '')
     setComposerError(null)
+    // Pre-select all healthy workers so users don't have to manually click each one.
+    setPickedVpsIds(new Set(deployableFleet.map((n) => n.id)))
     setComposerOpen(true)
   }
 
@@ -496,12 +498,17 @@ export function CrackerWorkspace({
                     return (
                       <li key={s.id} style={{ marginBottom: '0.25rem' }}>
                         <strong>{s.name}</strong>
-                        {' · '}<code>{s.status}</code>
+                        {' · '}<code style={s.status === 'failed' ? { color: 'var(--color-red, #f87171)' } : undefined}>{s.status}</code>
                         {' · list '}<code>{s.list_name}</code>
                         {' · '}<code>{s.worker_ips.length} worker(s)</code>
                         {addonLabels.length > 0
                           ? <> · addons: <code>{addonLabels.join(', ')}</code></>
                           : null}
+                        {s.status === 'failed' && s.last_error && (
+                          <div style={{ color: 'var(--color-red, #f87171)', fontSize: '0.8em', marginTop: '0.2rem', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                            ✕ {s.last_error}
+                          </div>
+                        )}
                         {(s.status === 'running' || s.status === 'queued') && (
                           <button
                             type="button"
