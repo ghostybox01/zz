@@ -112,8 +112,18 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
       setError({ kind: 'duplicate', message: `Identical content already uploaded as "${dup.name}".` })
       return
     }
+    // Upload to server immediately so the ID survives page refreshes.
+    // Fall back to a client-side ID + in-memory body if the server is unreachable.
+    let listId = makeListId()
+    try {
+      const upResult = await reconVps.uploadTargets(file)
+      if (upResult.list_id) listId = upResult.list_id
+      else setListBody(listId, parsed.body)
+    } catch {
+      setListBody(listId, parsed.body)
+    }
     const next: TargetList = {
-      id: makeListId(),
+      id: listId,
       name: file.name,
       uploadedAt: new Date().toISOString(),
       lineCount: parsed.lineCount,
@@ -124,7 +134,6 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
       status: 'idle',
     }
     onUpload(next)
-    setListBody(next.id, parsed.body)
   }
 
   async function ingestLarge(file: File) {
