@@ -3205,6 +3205,75 @@ except Exception:
     _crack_sessions_mtime = 0.0
 
 
+def _liveness_monitor_loop() -> None:
+    """Background thread: probes every 15 s whether each running session's
+    scanner PIDs are still alive on the worker. Updates _crack_sessions in
+    place so api_crack_sessions() can return instantly without any SSH I/O
+    inside the request handler — preventing gunicorn worker exhaustion."""
+    import time as _time
+    while True:
+        _time.sleep(15)
+        try:
+            with _crack_lock:
+                _reload_crack_state_if_changed()
+                sessions_copy = {sid: dict(s) for sid, s in _crack_sessions.items()}
+
+            mgr = get_ssh_manager()
+            mutated = False
+
+            for sid, sess in sessions_copy.items():
+                if sess.get('status') not in ('running', 'queued'):
+                    continue
+                pids = sess.get('remote_pids') or {}
+                if not pids or mgr is None:
+                    continue
+                alive_count = 0
+                for ip, pid in pids.items():
+                    try:
+                        out = mgr.ssh_exec(
+                            ip,
+                            f'kill -0 {int(pid)} 2>/dev/null && echo alive || echo dead',
+                            5,
+                        )
+                        if (out or '').strip().endswith('alive'):
+                            alive_count += 1
+                    except Exception:
+                        alive_count += 1  # transient SSH blip — stay alive
+                if alive_count == 0:
+                    sess['status'] = 'completed'
+                    sess['finished_at'] = datetime.now().isoformat()
+                    mutated = True
+                    threading.Thread(
+                        target=_collect_crack_results,
+                        args=(sess,),
+                        daemon=True,
+                    ).start()
+
+            if mutated:
+                with _crack_lock:
+                    for sid, sess in sessions_copy.items():
+                        if sid in _crack_sessions and sess.get('status') == 'completed':
+                            _crack_sessions[sid].update({
+                                'status': 'completed',
+                                'finished_at': sess.get('finished_at'),
+                            })
+                    _save_crack_sessions(_crack_sessions)
+                try:
+                    global _crack_sessions_mtime
+                    _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f'[liveness] monitor error: {e}')
+
+
+threading.Thread(
+    target=_liveness_monitor_loop,
+    name='crack-liveness-monitor',
+    daemon=True,
+).start()
+
+
 def _build_crack_config_snapshot(addon_ids: list) -> dict:
     """Build a per-session config.json by starting from the controller's
     current config.json and forcing the boolean at each addon's scannerKey
@@ -3893,65 +3962,14 @@ def api_crack_collect(sid):
 
 @app.route('/api/crack/sessions', methods=['GET'])
 def api_crack_sessions():
-    """List all sessions with liveness-verified status. Active sessions get
-    a per-worker `kill -0 $pid` probe; if every worker is dead the session
-    transitions to completed and the change is persisted."""
+    """List all sessions. Liveness probing is done by the background
+    _liveness_monitor_loop thread (every 15 s) — this handler never does
+    SSH I/O so it can never block a gunicorn worker."""
     with _crack_lock:
         _reload_crack_state_if_changed()
-        sessions = {sid: dict(s) for sid, s in _crack_sessions.items()}
+        sessions = list(_crack_sessions.values())
 
-    mgr = get_ssh_manager()
-    mutated = False
-
-    for sid, sess in sessions.items():
-        if sess.get('status') not in ('running', 'queued'):
-            continue
-        pids = sess.get('remote_pids') or {}
-        if not pids or mgr is None:
-            continue
-        alive_count = 0
-        for ip, pid in pids.items():
-            try:
-                out = mgr.ssh_exec(
-                    ip,
-                    f'kill -0 {int(pid)} 2>/dev/null && echo alive || echo dead',
-                    5,
-                )
-                if (out or '').strip().endswith('alive'):
-                    alive_count += 1
-            except Exception:
-                # Network blip — count as alive so we don't flap the
-                # session to completed on a transient SSH failure.
-                alive_count += 1
-        if alive_count == 0:
-            sess['status'] = 'completed'
-            sess['finished_at'] = datetime.now().isoformat()
-            mutated = True
-            # Fire-and-forget: pull ResultJS files from the worker back to
-            # the controller so import_from_files() can ingest them.
-            threading.Thread(
-                target=_collect_crack_results,
-                args=(sess,),
-                daemon=True,
-            ).start()
-
-    if mutated:
-        with _crack_lock:
-            for sid, sess in sessions.items():
-                if sid in _crack_sessions:
-                    _crack_sessions[sid].update({
-                        'status': sess['status'],
-                        'finished_at': sess.get('finished_at'),
-                    })
-            _save_crack_sessions(_crack_sessions)
-        try:
-            global _crack_sessions_mtime
-            _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
-        except Exception:
-            pass
-
-    out = [_crack_session_view(s) for s in sessions.values()]
-    # Newest first — the cockpit rail reads top-to-bottom.
+    out = [_crack_session_view(s) for s in sessions]
     out.sort(key=lambda s: s.get('created_at') or '', reverse=True)
     return jsonify({'sessions': out})
 
