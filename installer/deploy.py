@@ -301,6 +301,7 @@ def push_binary_to_workers() -> None:
             # running binary. chmod before rename so the file is never
             # executable-but-partially-written.
             tmp = f'{work_dir}/reconx-scanner.new'
+            sftp.get_channel().settimeout(180)
             sftp.put(str(binary), tmp)
             sftp.close()
             _, _, stderr = client.exec_command(f'chmod +x {tmp} && mv -f {tmp} {work_dir}/reconx-scanner')

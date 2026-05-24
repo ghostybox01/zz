@@ -767,6 +767,10 @@ class SSHManager:
         try:
             ssh = self._get_ssh_client(ip, 30)
             sftp = ssh.open_sftp()
+            # Apply a per-operation socket timeout so a hung SFTP channel
+            # fails in bounded time instead of blocking the dispatch thread
+            # forever. 120 s is generous for files up to a few hundred KB.
+            sftp.get_channel().settimeout(120)
             sftp.put(local_path, remote_path)
             sftp.close()
             ssh.close()

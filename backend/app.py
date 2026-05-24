@@ -3542,7 +3542,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             f"nohup ./reconx-scanner targets.txt "
             f"> crack.log 2>&1 & echo $!"
         )
-        out = mgr.ssh_exec(ip, remote_cmd, 30)
+        out = mgr.ssh_exec(ip, remote_cmd, 60)
         pid = _extract_remote_pid(out or '')
         if pid is None:
             real = mgr.last_error(ip) if hasattr(mgr, 'last_error') else ''
@@ -4654,8 +4654,11 @@ def api_crack_session_log(sid):
     mgr = get_ssh_manager()
     if not mgr or not remote_dir:
         return jsonify({'error': 'SSH manager unavailable or no remote_dir'}), 503
+    # Fall back to worker_ips when remote_pids is empty (happens when the SSH
+    # timed out before echo $! returned, but the scanner was already spawned).
+    ips = list(pids.keys()) or list(sess.get('worker_ips') or [])
     results = {}
-    for ip in pids:
+    for ip in ips:
         out = mgr.ssh_exec(ip, f'tail -n {n} {remote_dir}/crack.log 2>/dev/null || echo "(no crack.log)"', 15)
         results[ip] = (out or '').splitlines()
     return jsonify({'session_id': sid, 'remote_dir': remote_dir, 'logs': results})
