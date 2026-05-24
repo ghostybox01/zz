@@ -355,7 +355,7 @@ def write_systemd_units() -> None:
         User={SERVICE_USER}
         WorkingDirectory={INSTALL_DIR}/backend
         Environment=PYTHONUNBUFFERED=1
-        ExecStart={INSTALL_DIR}/venv/bin/gunicorn --bind 127.0.0.1:{DASH_PORT} --worker-class eventlet --workers 4 --timeout 300 --keep-alive 65 app:app
+        ExecStart={INSTALL_DIR}/venv/bin/gunicorn --bind 127.0.0.1:{DASH_PORT} --worker-class gthread --workers 4 --threads 8 --timeout 300 --keep-alive 65 app:app
         Restart=on-failure
         RestartSec=4
 
