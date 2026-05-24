@@ -297,9 +297,14 @@ def push_binary_to_workers() -> None:
                            key_filename=str(ssh_key), timeout=15, banner_timeout=15)
             client.exec_command(f'mkdir -p {work_dir}')
             sftp = client.open_sftp()
-            sftp.put(str(binary), f'{work_dir}/reconx-scanner')
+            # Upload to .new then atomically rename to avoid ETXTBSY on a
+            # running binary. chmod before rename so the file is never
+            # executable-but-partially-written.
+            tmp = f'{work_dir}/reconx-scanner.new'
+            sftp.put(str(binary), tmp)
             sftp.close()
-            client.exec_command(f'chmod +x {work_dir}/reconx-scanner')
+            _, _, stderr = client.exec_command(f'chmod +x {tmp} && mv -f {tmp} {work_dir}/reconx-scanner')
+            stderr.read()
             client.close()
             log(f'  pushed reconx-scanner → {user}@{ip}:{work_dir}/')
         except Exception as e:

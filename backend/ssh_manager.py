@@ -1019,14 +1019,17 @@ class SSHManager:
         # binary on disk.
         if not os.path.exists('reconx-scanner'):
             return {"success": False, "message": "reconx-scanner binary not found locally", "steps": steps}
-        if not self.scp_upload(ip, 'reconx-scanner', f"{work_dir}/reconx-scanner"):
+        # Upload to .new then atomically rename to avoid ETXTBSY if a
+        # session is concurrently running the old binary.
+        tmp_remote = f"{work_dir}/reconx-scanner.new"
+        if not self.scp_upload(ip, 'reconx-scanner', tmp_remote):
             return {"success": False, "message": "Failed to upload reconx-scanner binary", "steps": steps}
         steps.append("Uploaded reconx-scanner")
         try:
-            self.ssh_exec(ip, f"chmod +x {work_dir}/reconx-scanner", 5)
+            self.ssh_exec(ip, f"chmod +x {tmp_remote} && mv -f {tmp_remote} {work_dir}/reconx-scanner", 5)
             steps.append("chmod +x reconx-scanner")
         except Exception as e:
-            return {"success": False, "message": f"chmod failed: {e}", "steps": steps}
+            return {"success": False, "message": f"chmod/rename failed: {e}", "steps": steps}
 
         return {"success": True, "message": "Bootstrap complete", "steps": steps}
 
