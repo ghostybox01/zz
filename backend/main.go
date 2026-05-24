@@ -376,7 +376,7 @@ func NewEnhancer(client *http.Client) *Enhancer {
 	return &Enhancer{
 		client:           client,
 		firebasePattern:  regexp.MustCompile(`(?i)apiKey\s*[:=]\s*["'](AIza[0-9A-Za-z-_]{35})["']`),
-		supabasePattern:  regexp.MustCompile(`(?i)SUPABASE_URL\s*[:=]\s*["'](https?://[\w.-]+)/?\b`),
+		supabasePattern:  regexp.MustCompile(`(?i)SUPABASE_URL\s*[:=]\s*["'](https?://[\w.-]+)/?`),
 		firebaseKeyPatt:  regexp.MustCompile(`(?i)firebaseConfig\s*=\s*\{[\s\S]{0,800}?apiKey\s*[:=]\s*["'](AIza[0-9A-Za-z-_]{35})["']`),
 		bearerPattern:    regexp.MustCompile(`(?i)Bearer\s+([A-Za-z0-9\-_.=]{20,300})`),
 		evalAtobPattern:  regexp.MustCompile(`eval\(atob\(['\"]([A-Za-z0-9\+/=_-]{20,})['\"]\)\)`),
@@ -565,18 +565,18 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		AWSRandomPattern:             regexp.MustCompile(`email-smtp\.[a-z0-9\-]+\.amazonaws\.com`),
 		AWSSMTPHostPattern:           regexp.MustCompile(`(?i)(email-smtp\.[a-z0-9\-]+\.amazonaws\.com)`),
 		DefaultRegion:                "us-east-1",
-		AWSAccessKeyPatternInfo:      regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
-		AWSSecretKeyPatternInfo:      regexp.MustCompile(`\b[A-Za-z0-9/+=]{40}\b`),
-		SendGridAPIKeyPatternInfo:    regexp.MustCompile(`\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}\b`),
-		MailgunAPIKeyPatternInfo:     regexp.MustCompile(`\bkey-[0-9a-zA-Z]{32}\b`),
-		GitHubAccessTokenPatternInfo: regexp.MustCompile(`\b(gh[oprus]_[A-Za-z0-9]{36}|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})\b`),
+		AWSAccessKeyPatternInfo:      regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+		AWSSecretKeyPatternInfo:      regexp.MustCompile(`[A-Za-z0-9/+=]{40}`),
+		SendGridAPIKeyPatternInfo:    regexp.MustCompile(`SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}`),
+		MailgunAPIKeyPatternInfo:     regexp.MustCompile(`key-[0-9a-zA-Z]{32}`),
+		GitHubAccessTokenPatternInfo: regexp.MustCompile(`(gh[oprus]_[A-Za-z0-9]{36}|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})`),
 		// Stripe key formats: secret (sk_*), publishable (pk_*), restricted (rk_*) — live and test variants.
 		// Restricted-key variants rk_live_ and rk_test_ explicitly enumerated to keep coverage visible.
 		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|pk_live_|pk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
 		// ETH/EVM private key: 64 hex chars, often prefixed 0x. Match labeled occurrences only
 		// to keep false positives down (any 64-hex string would otherwise match git SHAs, etc.).
 		ETHPrivateKeyPattern: regexp.MustCompile(`(?i)(?:PRIVATE[_-]?KEY|ETH[_-]?PRIVATE[_-]?KEY|WALLET[_-]?PRIVATE[_-]?KEY|PRIVKEY)\s*[:=]\s*["']?(0x[a-fA-F0-9]{64}|[a-fA-F0-9]{64})["']?`),
-		ETHAddressPattern:    regexp.MustCompile(`\b0x[a-fA-F0-9]{40}\b`),
+		ETHAddressPattern:    regexp.MustCompile(`0x[a-fA-F0-9]{40}`),
 		OpenAIAPIPattern:             regexp.MustCompile(`sk-[a-zA-Z0-9]{48}`),
 		AnthropicPattern:             regexp.MustCompile(`sk-ant-[a-zA-Z0-9]{32}-[a-zA-Z0-9]{64}`),
 		MessageBirdPattern:           regexp.MustCompile(`(AccessKey|TestKey)_[a-zA-Z0-9]{32}`),
@@ -597,7 +597,7 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		AWSSecretV2KeyPattern:        regexp.MustCompile(`<td class="v">([0-9a-zA-Z\/+]{40})<\/td>`),
 
 		AWSSessionTokenPattern: regexp.MustCompile(`['"]([A-Za-z0-9/+=]{256,})['"]`),
-		AWSSESUserPattern:      regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`),
+		AWSSESUserPattern:      regexp.MustCompile(`(AKIA|ASIA)[A-Z0-9]{16}`),
 
 		// ── New (Wave-5) credential patterns ──────────────────────────────
 		// Slack — bot (xoxb-), user (xoxp-), legacy (xoxa-/xoxr-/xoxs-), webhooks
@@ -608,24 +608,24 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		DiscordBotTokenPattern: regexp.MustCompile(`[MN][A-Za-z0-9_-]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}`),
 		DiscordWebhookPattern:  regexp.MustCompile(`https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{17,20}/[\w-]{60,80}`),
 		// Cloudflare — scoped tokens & legacy global keys
-		CloudflareTokenPattern:  regexp.MustCompile(`\b[A-Za-z0-9_-]{40}\b`), // narrow via context elsewhere (Bearer + cloudflare)
-		CloudflareGlobalPattern: regexp.MustCompile(`(?i)cloudflare[^\n]*[\b:=]([a-f0-9]{37})\b`),
+		CloudflareTokenPattern:  regexp.MustCompile(`[A-Za-z0-9_-]{40}`), // narrow via context elsewhere (Bearer + cloudflare)
+		CloudflareGlobalPattern: regexp.MustCompile(`(?i)cloudflare[^\n]*[:=]([a-f0-9]{37})`),
 		// DigitalOcean Personal Access Token
-		DigitalOceanPATPattern: regexp.MustCompile(`\bdop_v1_[a-f0-9]{64}\b`),
+		DigitalOceanPATPattern: regexp.MustCompile(`dop_v1_[a-f0-9]{64}`),
 		// Heroku API key (UUIDv4)
-		HerokuAPIKeyPattern: regexp.MustCompile(`(?i)heroku[^\n]*[\b:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
+		HerokuAPIKeyPattern: regexp.MustCompile(`(?i)heroku[^\n]*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
 		// Datadog API key (32 hex)
 		DatadogAPIKeyPattern: regexp.MustCompile(`(?i)(?:dd[-_]?api[-_]?key|datadog[^\n]*api[^\n]*key)[\s:=]+([0-9a-f]{32})`),
 		// Sentry DSN
 		SentryDSNPattern: regexp.MustCompile(`https://[a-f0-9]{32}@(?:[a-z0-9.-]+\.)?ingest\.sentry\.io/\d+`),
 		// NPM token
-		NpmTokenPattern: regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`),
+		NpmTokenPattern: regexp.MustCompile(`npm_[A-Za-z0-9]{36}`),
 		// PyPI token
-		PyPITokenPattern: regexp.MustCompile(`\bpypi-[A-Za-z0-9_-]{50,}\b`),
+		PyPITokenPattern: regexp.MustCompile(`pypi-[A-Za-z0-9_-]{50,}`),
 		// GitLab PAT (classic and personal)
-		GitLabPATPattern: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),
+		GitLabPATPattern: regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`),
 		// JWT — three base64url-encoded parts
-		JWTPattern: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`),
+		JWTPattern: regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
 		// Postmark server token (UUID format)
 		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)(?:POSTMARK_SERVER_TOKEN|postmark[^\n]*server[^\n]*token)[\s:="']+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
 		// SparkPost API key (40 hex chars)
@@ -4281,7 +4281,7 @@ func (a *AWSScanner) ExploitSSRF(targetURL, sourceURL string) {
 
 // ExtractIPOnly - ekstrak hanya IP address dari URL atau teks
 func (a *AWSScanner) ExtractIPOnly(input string) []string {
-	ipPattern := regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b`)
+	ipPattern := regexp.MustCompile(`(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)`)
 	ips := ipPattern.FindAllString(input, -1)
 
 	// Remove duplicates
