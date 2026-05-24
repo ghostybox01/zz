@@ -252,6 +252,60 @@ def build_scanner(args: argparse.Namespace) -> None:
         user=SERVICE_USER, cwd=backend, env=go_env)
 
 
+def push_binary_to_workers() -> None:
+    """After rebuilding reconx-scanner, SCP the new binary to every fleet worker.
+    Silently skips workers that are unreachable — they'll get it on next bootstrap."""
+    import json, socket
+    binary = INSTALL_DIR / 'backend' / 'reconx-scanner'
+    if not binary.exists():
+        warn('  reconx-scanner binary not found — skipping worker push')
+        return
+    fleet_creds_path = INSTALL_DIR / 'backend' / 'fleet_creds.json'
+    if not fleet_creds_path.exists():
+        return
+    try:
+        fleet = json.loads(fleet_creds_path.read_text())
+    except Exception:
+        return
+    if not fleet:
+        return
+    ssh_key = INSTALL_DIR / '.ssh' / 'id_ed25519'
+    if not ssh_key.exists():
+        warn('  SSH key not found — skipping worker push')
+        return
+    try:
+        import paramiko
+    except ImportError:
+        warn('  paramiko not installed — skipping worker push (pip install paramiko)')
+        return
+    work_dir = '/root/python_job'
+    for ip, creds in fleet.items():
+        if (creds.get('role') or 'scanner') == 'warc':
+            continue
+        port = int(creds.get('port') or 22)
+        user = str(creds.get('user') or 'root')
+        try:
+            sock = socket.create_connection((ip, port), timeout=5)
+            sock.close()
+        except Exception:
+            warn(f'  {ip}: unreachable, skipping binary push')
+            continue
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(ip, port=port, username=user,
+                           key_filename=str(ssh_key), timeout=15, banner_timeout=15)
+            client.exec_command(f'mkdir -p {work_dir}')
+            sftp = client.open_sftp()
+            sftp.put(str(binary), f'{work_dir}/reconx-scanner')
+            sftp.close()
+            client.exec_command(f'chmod +x {work_dir}/reconx-scanner')
+            client.close()
+            log(f'  pushed reconx-scanner → {user}@{ip}:{work_dir}/')
+        except Exception as e:
+            warn(f'  {ip}: binary push failed — {e}')
+
+
 def setup_ssh_key() -> str:
     log('ensuring SSH key for fleet ops…')
     ssh_dir = INSTALL_DIR / '.ssh'
@@ -456,6 +510,7 @@ def main() -> int:
     setup_python_venv(args)
     build_dashboard(args)
     build_scanner(args)
+    push_binary_to_workers()
     pub_key = setup_ssh_key()
     write_systemd_units()
     write_nginx_site()

@@ -4600,6 +4600,43 @@ def api_fleet_worker_role(ip):
     return jsonify({'ok': True, 'role': role})
 
 
+@app.route('/api/fleet/worker/<ip>/redeploy', methods=['POST'])
+def api_fleet_worker_redeploy(ip):
+    """Push the current reconx-scanner binary to a single worker and chmod +x.
+    Runs asynchronously; returns immediately. Call after reconx-update to ensure
+    workers have the latest binary."""
+    if not re.match(r'^[0-9a-zA-Z.\-:]{3,64}$', ip):
+        return jsonify({'error': 'invalid ip'}), 400
+    creds = _load_fleet_creds()
+    if ip not in creds:
+        return jsonify({'error': 'ip not in fleet'}), 404
+    threading.Thread(target=_auto_deploy_one, args=(ip,), daemon=True).start()
+    return jsonify({'ok': True, 'message': f'Binary push to {ip} started in background'})
+
+
+@app.route('/api/crack/<sid>/log', methods=['GET'])
+def api_crack_session_log(sid):
+    """Return the last N lines of crack.log from each worker for a session."""
+    if not re.match(r'^[0-9a-f]{12}$', sid):
+        return jsonify({'error': 'invalid session id'}), 400
+    n = max(10, min(500, int(request.args.get('n', 100))))
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sess = _crack_sessions.get(sid)
+    if not sess:
+        return jsonify({'error': 'session not found'}), 404
+    remote_dir = sess.get('remote_dir') or ''
+    pids = sess.get('remote_pids') or {}
+    mgr = get_ssh_manager()
+    if not mgr or not remote_dir:
+        return jsonify({'error': 'SSH manager unavailable or no remote_dir'}), 503
+    results = {}
+    for ip in pids:
+        out = mgr.ssh_exec(ip, f'tail -n {n} {remote_dir}/crack.log 2>/dev/null || echo "(no crack.log)"', 15)
+        results[ip] = (out or '').splitlines()
+    return jsonify({'session_id': sid, 'remote_dir': remote_dir, 'logs': results})
+
+
 @app.route('/api/fleet/install-keys', methods=['POST'])
 def api_fleet_install_keys():
     """For each row that authenticates with a password, append the controller's
