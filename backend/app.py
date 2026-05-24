@@ -3733,7 +3733,9 @@ def _collect_crack_results(sess: dict) -> None:
     mgr = get_ssh_manager()
     if not mgr:
         return
-    results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+    # Write collected files into RESULTS_DIR so import_from_files() picks them up.
+    results_dir = RESULTS_DIR  # relative to CWD, same as import_from_files()
+    os.makedirs(results_dir, exist_ok=True)
     for ip in worker_ips:
         try:
             ssh = mgr._get_ssh_client(ip, 30)
