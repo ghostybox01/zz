@@ -4614,6 +4614,30 @@ def api_fleet_worker_redeploy(ip):
     return jsonify({'ok': True, 'message': f'Binary push to {ip} started in background'})
 
 
+@app.route('/api/fleet/worker/<ip>/ps', methods=['GET'])
+def api_fleet_worker_ps(ip):
+    """Return `ps aux` output for reconx-scanner processes on a worker."""
+    if not re.match(r'^[0-9a-zA-Z.\-:]{3,64}$', ip):
+        return jsonify({'error': 'invalid ip'}), 400
+    mgr = get_ssh_manager()
+    if not mgr:
+        return jsonify({'error': 'SSH not available'}), 503
+    out = mgr.ssh_exec(ip, "ps aux | grep reconx-scanner | grep -v grep || echo '(none)'", 10)
+    return jsonify({'ip': ip, 'processes': (out or '').splitlines()})
+
+
+@app.route('/api/fleet/worker/<ip>/kill-scanner', methods=['POST'])
+def api_fleet_worker_kill_scanner(ip):
+    """Send SIGKILL to all reconx-scanner processes on a worker."""
+    if not re.match(r'^[0-9a-zA-Z.\-:]{3,64}$', ip):
+        return jsonify({'error': 'invalid ip'}), 400
+    mgr = get_ssh_manager()
+    if not mgr:
+        return jsonify({'error': 'SSH not available'}), 503
+    out = mgr.ssh_exec(ip, "pkill -KILL reconx-scanner 2>/dev/null; echo killed:$?", 10)
+    return jsonify({'ip': ip, 'result': (out or '').strip()})
+
+
 @app.route('/api/crack/<sid>/log', methods=['GET'])
 def api_crack_session_log(sid):
     """Return the last N lines of crack.log from each worker for a session."""
