@@ -804,14 +804,41 @@ class SSHManager:
             self._last_ssh_error[ip] = f'scp: {kind}: {msg}' if msg else f'scp: {kind}'
             return False
 
+    def ssh_spawn_bg(self, ip: str, cmd: str, timeout: int = 120) -> str | None:
+        """Run a fire-and-forget background command (nohup ... &) and return
+        the first line of stdout (typically the PID via `echo $!`).
+
+        Unlike ssh_exec this method:
+        - Uses readline() not read(), so it returns as soon as the shell
+          emits the PID without waiting for the background process to exit.
+        - Never retries — retrying a `nohup ... &` would spawn a duplicate
+          process with no way to distinguish it from the original.
+        - Uses a 120 s I/O timeout on the channel so a hung worker doesn't
+          block the dispatch thread forever.
+        """
+        try:
+            ssh = self._get_pooled_ssh(ip, timeout)
+            stdin, stdout, stderr = ssh.exec_command(cmd)
+            stdout.channel.settimeout(timeout)
+            line = stdout.readline()
+            self._last_ssh_error.pop(ip, None)
+            return (line or '').strip() or None
+        except Exception as e:
+            kind = type(e).__name__
+            msg = str(e)
+            if len(msg) > 160:
+                msg = msg[:160] + '…'
+            self._last_ssh_error[ip] = f'{kind}: {msg}' if msg else kind
+            return None
+
     def last_error(self, ip: str) -> str:
         """Most recent SSH/SFTP error captured for this host (empty if the
         last operation succeeded). Public accessor — callers should use
         this instead of touching _last_ssh_error directly."""
         return self._last_ssh_error.get(ip, '') or ''
-    
+
     # ==================== CONNECTION TESTING ====================
-    
+
     def quick_ssh_test(self) -> dict:
         """Quick test if SSH key exists and is valid format"""
         ssh_key = self.config.get("ssh_key_path", "/root/ssh/1")

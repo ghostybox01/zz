@@ -3606,12 +3606,17 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             5,
         )
 
+        # setsid creates a new session so the scanner is fully detached from
+        # the SSH channel — no inherited FDs keep the channel alive.
+        # </dev/null closes stdin. ssh_spawn_bg uses readline() (not read())
+        # so it returns as soon as echo $! is written, never retries, and
+        # never blocks waiting for the scanner to finish.
         remote_cmd = (
             f"cd {remote_dir} && "
-            f"nohup ./reconx-scanner targets.txt "
-            f"> crack.log 2>&1 & echo $!"
+            f"setsid nohup ./reconx-scanner targets.txt </dev/null > crack.log 2>&1 &"
+            f"echo $!"
         )
-        out = mgr.ssh_exec(ip, remote_cmd, 60)
+        out = mgr.ssh_spawn_bg(ip, remote_cmd, 120) if hasattr(mgr, 'ssh_spawn_bg') else mgr.ssh_exec(ip, remote_cmd, 120)
         pid = _extract_remote_pid(out or '')
         if pid is None:
             real = mgr.last_error(ip) if hasattr(mgr, 'last_error') else ''
