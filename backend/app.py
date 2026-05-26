@@ -292,13 +292,13 @@ def get_statistics():
     
     cursor.execute('''
         SELECT type, COUNT(*) as count FROM credentials
-        WHERE status = 'valid' GROUP BY type ORDER BY count DESC
+        GROUP BY type ORDER BY count DESC
     ''')
     type_counts = dict(cursor.fetchall())
-    
+
     cursor.execute('''
         SELECT type, key_value, source_url, timestamp, metadata
-        FROM credentials WHERE status = 'valid'
+        FROM credentials
         ORDER BY id DESC LIMIT 50
     ''')
     recent_findings = cursor.fetchall()
