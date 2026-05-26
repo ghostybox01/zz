@@ -4270,6 +4270,50 @@ def api_crack_reattach(sid):
     return jsonify({'ok': True, 'found_pids': found_pids})
 
 
+@app.route('/api/crack/<sid>/throttle', methods=['POST'])
+def api_crack_throttle(sid):
+    """Force-install cpulimit on each worker and (re-)apply it to the scanner
+    PID so CPU stays ≤90%.  Idempotent — kills stale cpulimit first."""
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        raw = _crack_sessions.get(sid)
+        if raw is None:
+            return jsonify({'ok': False, 'error': 'session not found'}), 404
+        worker_pids = dict(raw.get('remote_pids') or {})
+
+    mgr = get_ssh_manager()
+    if mgr is None:
+        return jsonify({'ok': False, 'error': 'SSH not available'}), 503
+
+    results = {}
+    for ip, pid in worker_pids.items():
+        try:
+            out = mgr.ssh_exec(
+                ip,
+                # 1. find actual live scanner PID (pgrep -of handles stale stored pid)
+                f'_p=$(pgrep -of reconx-scanner 2>/dev/null) ; '
+                f'[ -z "$_p" ] && _p={int(pid)} ; '
+                # 2. install cpulimit if missing
+                f'command -v cpulimit >/dev/null 2>&1 || '
+                f'  apt-get install -y cpulimit -qq 2>/dev/null || '
+                f'  yum install -y cpulimit -q 2>/dev/null || true ; '
+                # 3. kill any existing cpulimit for this process (stale or wrong)
+                f'pkill -f "cpulimit.*-p.*$_p" 2>/dev/null || true ; '
+                # 4. compute limit (nproc * 90) and apply
+                f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
+                f'command -v cpulimit >/dev/null 2>&1 && '
+                f'setsid nohup cpulimit -p $_p -l $_lim -q '
+                f'</dev/null >/dev/null 2>&1 & '
+                f'echo "ok:$_p:$_lim"',
+                30,
+            )
+            results[ip] = (out or '').strip()
+        except Exception as e:
+            results[ip] = f'error:{e}'
+
+    return jsonify({'ok': True, 'results': results})
+
+
 @app.route('/api/crack/<sid>/stop', methods=['POST'])
 def api_crack_stop(sid):
     """SIGTERM + SIGKILL escalation on each worker pid; status flips to
