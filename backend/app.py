@@ -3341,13 +3341,13 @@ def _liveness_monitor_loop() -> None:
                 alive_count = 0
                 for ip, pid in pids.items():
                     try:
-                        # Primary: find ANY reconx-scanner on this worker.
-                        # The stored PID is the setsid/nohup wrapper which may
-                        # differ after a gunicorn restart (PID recycled). Using
-                        # pgrep -of avoids relying on the stored value at all.
+                        # Use pgrep -ox (exact comm name, oldest) to find the
+                        # actual reconx-scanner binary. pgrep -f/-of would also
+                        # match the SSH shell that launched it (bash with
+                        # "reconx-scanner" in its argv), returning the wrong PID.
                         out = mgr.ssh_exec(
                             ip,
-                            f'_p=$(pgrep -of reconx-scanner 2>/dev/null) ; '
+                            f'_p=$(pgrep -ox reconx-scanner 2>/dev/null) ; '
                             f'[ -n "$_p" ] && echo "alive:$_p" || '
                             f'kill -0 {int(pid)} 2>/dev/null && echo "alive:{int(pid)}" || '
                             f'echo dead',
@@ -4004,7 +4004,7 @@ def _poll_live_results(session_id: str) -> None:
                 if mgr_check and worker_ips_check:
                     for _ip in worker_ips_check:
                         try:
-                            _p = (mgr_check.ssh_exec(_ip, 'pgrep -of reconx-scanner 2>/dev/null || echo ""', 5) or '').strip()
+                            _p = (mgr_check.ssh_exec(_ip, 'pgrep -ox reconx-scanner 2>/dev/null || echo ""', 5) or '').strip()
                             if _p.isdigit():
                                 scanner_alive = True
                                 # Heal the session back to 'running' and update PID.
@@ -4243,7 +4243,7 @@ def api_crack_reattach(sid):
     found_pids: dict = {}
     for ip in worker_ips:
         try:
-            out = (mgr.ssh_exec(ip, 'pgrep -of reconx-scanner 2>/dev/null || echo ""', 8) or '').strip()
+            out = (mgr.ssh_exec(ip, 'pgrep -ox reconx-scanner 2>/dev/null || echo ""', 8) or '').strip()
             if out.isdigit():
                 found_pids[ip] = int(out)
         except Exception as e:
@@ -4291,7 +4291,7 @@ def api_crack_throttle(sid):
         detail = {}
         try:
             # 1. find live PID
-            pid_out = (mgr.ssh_exec(ip, 'pgrep -of reconx-scanner 2>/dev/null || echo ""', 8) or '').strip()
+            pid_out = (mgr.ssh_exec(ip, 'pgrep -ox reconx-scanner 2>/dev/null || echo ""', 8) or '').strip()
             actual_pid = int(pid_out) if pid_out.isdigit() else int(stored_pid)
             detail['pid'] = actual_pid
 
