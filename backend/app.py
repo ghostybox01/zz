@@ -3313,20 +3313,6 @@ try:
 except Exception:
     _crack_sessions_mtime = 0.0
 
-# Re-attach poll threads for any sessions that were running before this
-# process started (e.g. after a gunicorn restart / reconx-update).  The
-# threads are daemons so they die if the process exits.
-for _sid, _sess in _crack_sessions.items():
-    if _sess.get('status') == 'running':
-        threading.Thread(
-            target=_poll_live_results,
-            args=(_sid,),
-            name=f'crack-poll-{_sid}',
-            daemon=True,
-        ).start()
-        print(f'[crack] resumed poll thread for running session {_sid}')
-
-
 def _liveness_monitor_loop() -> None:
     """Background thread: probes every 15 s whether each running session's
     scanner PIDs are still alive on the worker. Updates _crack_sessions in
@@ -4760,6 +4746,20 @@ def api_fleet_enroll():
         'hostname': hostname,
         'region': None,
     })
+
+
+# Re-attach poll threads for any sessions that were running before this
+# process started (e.g. after a gunicorn restart / reconx-update).  Must
+# be placed after _poll_live_results is defined.
+for _sid, _sess in _crack_sessions.items():
+    if _sess.get('status') == 'running':
+        threading.Thread(
+            target=_poll_live_results,
+            args=(_sid,),
+            name=f'crack-poll-{_sid}',
+            daemon=True,
+        ).start()
+        print(f'[crack] resumed poll thread for running session {_sid}')
 
 
 # ──────────────────────────────────────────────────────────────────────────
