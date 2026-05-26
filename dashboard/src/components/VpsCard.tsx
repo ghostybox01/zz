@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { TargetList, VpsNode } from '../types'
 import { VPS_MAX_RECONNECT_TRIES } from '../types'
-import { hasScanBacklog, scanningListLabel, scanListCaption, vpsWorkloadState, workloadLabel } from '../lib/vpsWorkload'
+import { scanningListLabel, scanListCaption, vpsWorkloadState, workloadLabel } from '../lib/vpsWorkload'
 import { CpuRing } from './CpuRing'
 import { CpuSparkline } from './CpuSparkline'
 import { ProgressBar } from './ProgressBar'
@@ -39,9 +39,11 @@ export function VpsCard({ node, lists = [], onForceOutage, onAction }: Props) {
   const workload = vpsWorkloadState(node, lists)
   const scanList = scanningListLabel(node, lists)
   const scanCaption = scanList ? scanListCaption(node, lists) : null
-  // If backend overlays a crack session name onto activeListName but there's no WARC scan
-  // backlog, the worker is cracking (not scanning). Show a distinct label.
-  const isCracking = workload === 'busy' && !!node.activeListName && !hasScanBacklog(node)
+  // Show "CRACKING" whenever a crack session is active on this node (activeListName
+  // is overlaid by the backend). The hasScanBacklog check is intentionally absent:
+  // crack sessions always have a backlog (targetsAssigned = total list size,
+  // targetsDone = URLs scanned so far) so !hasScanBacklog would never fire.
+  const isCracking = workload === 'busy' && !!node.activeListName
   const ramRatio = node.ramTotalGb > 0 ? node.ramUsedGb / node.ramTotalGb : 0
   const ramTone = ramRatio >= 0.85 ? 'danger' : ramRatio >= 0.7 ? 'orange' : 'ok'
   const diskTotal = node.diskTotalGb ?? Math.max(node.diskUsedGb * 4, 80)

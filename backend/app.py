@@ -177,6 +177,10 @@ def init_db():
         cursor.execute("SELECT verify_meta FROM credentials LIMIT 1")
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE credentials ADD COLUMN verify_meta TEXT")
+    try:
+        cursor.execute("SELECT session_id FROM credentials LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE credentials ADD COLUMN session_id TEXT")
 
     conn.commit()
     conn.close()
@@ -460,19 +464,12 @@ def _parse_crack_log_progress(ip: str, session_id: str) -> int:
 def _count_crack_session_findings(session_id: str) -> int:
     """Return the number of credential rows associated with a crack session.
 
-    Uses the cached ``findings_count`` stored in the session dict when
-    available; falls back to a live DB query so the Fleet panel still shows
-    a meaningful number even before the first poll tick."""
-    with _crack_lock:
-        _reload_crack_state_if_changed()
-        sess = _crack_sessions.get(session_id) or {}
-    cached = sess.get('findings_count')
-    if cached is not None:
-        return int(cached)
+    Queries the DB directly by session_id (set on INSERT during live polling)
+    so each session gets its own accurate count instead of the global total."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM credentials WHERE status = "valid"')
+        cursor.execute('SELECT COUNT(*) FROM credentials WHERE session_id = ?', (session_id,))
         row = cursor.fetchone()
         conn.close()
         return int(row[0]) if row else 0
@@ -537,11 +534,8 @@ def api_vps_status():
                 pass
             scanned = _parse_crack_log_progress(sip, sid)
             hits = _count_crack_session_findings(sid)
-            # Speed: lines/s derived from stored progress deltas.
-            prev_scanned = int(sess.get('_speed_prev_scanned', scanned))
-            prev_ts = float(sess.get('_speed_prev_ts', time.time()))
-            elapsed = time.time() - prev_ts
-            speed = round((scanned - prev_scanned) / elapsed, 1) if elapsed > 0 and scanned >= prev_scanned else 0
+            # Speed stored by _poll_live_results between two progress readings.
+            speed = float(sess.get('last_speed', 0))
             srv.update({
                 'targets': targets,
                 'scanned': scanned,
@@ -3319,6 +3313,19 @@ try:
 except Exception:
     _crack_sessions_mtime = 0.0
 
+# Re-attach poll threads for any sessions that were running before this
+# process started (e.g. after a gunicorn restart / reconx-update).  The
+# threads are daemons so they die if the process exits.
+for _sid, _sess in _crack_sessions.items():
+    if _sess.get('status') == 'running':
+        threading.Thread(
+            target=_poll_live_results,
+            args=(_sid,),
+            name=f'crack-poll-{_sid}',
+            daemon=True,
+        ).start()
+        print(f'[crack] resumed poll thread for running session {_sid}')
+
 
 def _liveness_monitor_loop() -> None:
     """Background thread: probes every 15 s whether each running session's
@@ -3932,9 +3939,10 @@ def _poll_live_results(session_id: str) -> None:
     Emits a stats_update socket event whenever new rows land, giving the
     dashboard near-real-time hits without waiting for session completion."""
     import time as _time
-    POLL_INTERVAL = 60
+    POLL_INTERVAL = 30
     while True:
-        _time.sleep(POLL_INTERVAL)
+        # Poll immediately (no leading sleep) so backend restarts pick up
+        # progress right away instead of waiting a full interval.
         with _crack_lock:
             _reload_crack_state_if_changed()
             sess = dict(_crack_sessions.get(session_id) or {})
@@ -3946,9 +3954,11 @@ def _poll_live_results(session_id: str) -> None:
             or list(sess.get('worker_ips') or [])
         )
         if not remote_dir or not worker_ips:
+            _time.sleep(POLL_INTERVAL)
             continue
         mgr = get_ssh_manager()
         if not mgr:
+            _time.sleep(POLL_INTERVAL)
             continue
         inserted_total = 0
         for ip in worker_ips:
@@ -3969,11 +3979,6 @@ def _poll_live_results(session_id: str) -> None:
                     if not mapping:
                         continue
                     cred_type, db_status = mapping
-                    # Previously 'hit' files were skipped entirely, meaning
-                    # Discord Webhook, JWT, SMTP hits etc. never landed in the
-                    # DB during live polling.  Insert them as status='hit' so
-                    # the stats total_hits counter stays accurate and the
-                    # credential row exists for audit purposes.
                     import tempfile as _tmpmod
                     with _tmpmod.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
                         tmp_path = tf.name
@@ -3994,9 +3999,9 @@ def _poll_live_results(session_id: str) -> None:
                                 metadata = key_parts[1].strip() if len(key_parts) > 1 else ''
                                 cursor.execute(
                                     'INSERT OR IGNORE INTO credentials '
-                                    '(type, key_value, source_url, metadata, status) '
-                                    'VALUES (?, ?, ?, ?, ?)',
-                                    (cred_type, key_value, source_url, metadata, db_status),
+                                    '(type, key_value, source_url, metadata, status, session_id) '
+                                    'VALUES (?, ?, ?, ?, ?, ?)',
+                                    (cred_type, key_value, source_url, metadata, db_status, session_id),
                                 )
                                 if cursor.rowcount > 0:
                                     inserted_total += 1
@@ -4011,19 +4016,28 @@ def _poll_live_results(session_id: str) -> None:
                 conn.close()
                 sftp.close()
                 # Parse crack.log progress while ssh is still open.
+                # The log is at {remote_dir}/crack.log (scanner runs cd {remote_dir}).
+                # Strip pterm ANSI codes before grep so "[000021/642885]" is parseable.
                 try:
+                    prev_progress = int(sess.get('last_progress', 0))
+                    prev_ts = float(sess.get('last_progress_time', 0))
                     log_out = mgr.ssh_exec(
                         ip,
-                        f"tail -1 {remote_dir}/crack_{session_id}/crack.log 2>/dev/null"
+                        f"tail -1 {remote_dir}/crack.log 2>/dev/null"
+                        f" | sed 's/\\x1b\\[[0-9;]*[mK]//g'"
                         f" | grep -oP '\\[\\K[0-9]+(?=/)' || echo 0",
                         10,
                     )
                     progress = int((log_out or '0').strip() or 0)
+                    now = _time.time()
+                    elapsed = now - prev_ts if prev_ts > 0 else POLL_INTERVAL
+                    speed = round((progress - prev_progress) / elapsed, 1) if elapsed > 0 and progress >= prev_progress else 0
                     _update_crack_session(
                         session_id,
-                        lambda s, _p=progress: s.update({
+                        lambda s, _p=progress, _t=now, _sp=speed: s.update({
                             'last_progress': _p,
-                            'last_progress_time': time.time(),
+                            'last_progress_time': _t,
+                            'last_speed': _sp,
                         }),
                     )
                 except Exception as _pe:
@@ -4037,6 +4051,7 @@ def _poll_live_results(session_id: str) -> None:
                 socketio.emit('stats_update', get_statistics())
             except Exception:
                 pass
+        _time.sleep(POLL_INTERVAL)
 
 
 def _collect_crack_results(sess: dict) -> None:
