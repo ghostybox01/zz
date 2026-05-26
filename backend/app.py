@@ -91,6 +91,14 @@ FILE_MAPPING = {
     'Postmark_Server_Token_found.txt': ('Postmark',      'valid'),
     'Mailjet_API_Key_found.txt':       ('Mailjet',       'valid'),
     'AWS_SNS_Topic_ARN_found.txt':     ('AWS SNS',       'hit'),
+    # nonValidatedChecks entry missing from original map
+    'Azure_SAS_Token_found.txt':       ('Azure',         'valid'),
+    # Validated-API finds written by detector_*.go files
+    'valid_tencent.txt':               ('Tencent',       'valid'),
+    'valid_xsmtp.txt':                 ('XSMTP',         'valid'),
+    # AWS sub-scans: potential (STS failed) and deep-scan info dumps
+    'aws_ses_potential_unverified.txt': ('AWS',          'valid'),
+    'aws_deep_scan.txt':               ('AWS',           'hit'),
     # HITS - Only count
     'smtp_found.txt': ('SMTP', 'hit'),
 }
@@ -3613,7 +3621,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
         # never blocks waiting for the scanner to finish.
         remote_cmd = (
             f"cd {remote_dir} && "
-            f"setsid nohup ./reconx-scanner targets.txt </dev/null > crack.log 2>&1 &"
+            f"nice -n 10 setsid nohup ./reconx-scanner targets.txt </dev/null > crack.log 2>&1 &"
             f"echo $!"
         )
         out = mgr.ssh_spawn_bg(ip, remote_cmd, 120) if hasattr(mgr, 'ssh_spawn_bg') else mgr.ssh_exec(ip, remote_cmd, 120)
@@ -3847,9 +3855,12 @@ def _poll_live_results(session_id: str) -> None:
                     mapping = FILE_MAPPING.get(fname)
                     if not mapping:
                         continue
-                    cred_type, status = mapping
-                    if status == 'hit':
-                        continue
+                    cred_type, db_status = mapping
+                    # Previously 'hit' files were skipped entirely, meaning
+                    # Discord Webhook, JWT, SMTP hits etc. never landed in the
+                    # DB during live polling.  Insert them as status='hit' so
+                    # the stats total_hits counter stays accurate and the
+                    # credential row exists for audit purposes.
                     import tempfile as _tmpmod
                     with _tmpmod.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
                         tmp_path = tf.name
@@ -3872,7 +3883,7 @@ def _poll_live_results(session_id: str) -> None:
                                     'INSERT OR IGNORE INTO credentials '
                                     '(type, key_value, source_url, metadata, status) '
                                     'VALUES (?, ?, ?, ?, ?)',
-                                    (cred_type, key_value, source_url, metadata, 'valid'),
+                                    (cred_type, key_value, source_url, metadata, db_status),
                                 )
                                 if cursor.rowcount > 0:
                                     inserted_total += 1
@@ -3886,6 +3897,24 @@ def _poll_live_results(session_id: str) -> None:
                 conn.commit()
                 conn.close()
                 sftp.close()
+                # Parse crack.log progress while ssh is still open.
+                try:
+                    log_out = mgr.ssh_exec(
+                        ip,
+                        f"tail -1 {remote_dir}/crack_{session_id}/crack.log 2>/dev/null"
+                        f" | grep -oP '\\[\\K[0-9]+(?=/)' || echo 0",
+                        10,
+                    )
+                    progress = int((log_out or '0').strip() or 0)
+                    _update_crack_session(
+                        session_id,
+                        lambda s, _p=progress: s.update({
+                            'last_progress': _p,
+                            'last_progress_time': time.time(),
+                        }),
+                    )
+                except Exception as _pe:
+                    print(f'[live-poll] progress parse {ip}: {_pe}')
                 ssh.close()
             except Exception as e:
                 print(f'[live-poll] {ip}: {e}')

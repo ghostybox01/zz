@@ -239,7 +239,7 @@ export function FleetPanel({
             Recalculate shards
           </button>
           <span className={`flt__sim${scanning ? ' flt__sim--on' : ''}`}>
-            {scanning ? 'Sim active' : 'Sim paused'}
+            {scanning ? 'Scanner active' : 'Scanner idle'}
           </span>
           <span className="flt__pill flt__pill--ok">
             <span className="flt__pill-dot" />
@@ -301,8 +301,8 @@ export function FleetPanel({
         <div className="flt__kpi">
           <div className="flt__kpi-label">MODE</div>
           <div className="flt__kpi-value">
-            {scanning ? 'Simulated' : 'Paused'}
-            <span>data source</span>
+            {scanning ? 'Cracking' : 'Idle'}
+            <span>{scanning ? 'active scan' : 'no active scan'}</span>
           </div>
         </div>
       </div>

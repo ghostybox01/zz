@@ -86,6 +86,7 @@ function mapServer(s: ReconServerStatus): VpsNode {
     uptimeMin: (s.sys_uptime_sec ?? 0) > 0
       ? Math.floor((s.sys_uptime_sec ?? 0) / 60)
       : uptimeStringToMin(s.uptime),
+    activeListName: s.active_list_name ?? undefined,
     lastEvent: s.error
       ? `Error: ${s.error}`
       : s.last_good_update

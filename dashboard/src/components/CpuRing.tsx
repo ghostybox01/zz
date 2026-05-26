@@ -6,7 +6,7 @@ type Props = {
   color?: string
 }
 
-/** Radial CPU load gauge. Color shifts by load: green < 40 < yellow < 65 < orange < 85 < red. */
+/** Radial CPU load gauge. Color shifts by load: green < 70 < yellow/orange < 90 < red. */
 export function CpuRing({ percent, size = 56, thickness = 5, color }: Props) {
   const p = Math.max(0, Math.min(100, percent))
   const r = (size - thickness) / 2
@@ -14,13 +14,11 @@ export function CpuRing({ percent, size = 56, thickness = 5, color }: Props) {
   const offset = c * (1 - p / 100)
   const tone =
     color ??
-    (p >= 85
+    (p >= 90
       ? 'var(--danger)'
-      : p >= 65
+      : p >= 70
         ? '#ff8a3d'
-        : p >= 40
-          ? 'var(--warn)'
-          : 'var(--ok)')
+        : 'var(--ok)')
 
   return (
     <div className="cpuring" style={{ width: size, height: size }} aria-label={`CPU ${Math.round(p)}%`}>

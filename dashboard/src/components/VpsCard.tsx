@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { TargetList, VpsNode } from '../types'
 import { VPS_MAX_RECONNECT_TRIES } from '../types'
-import { scanningListLabel, scanListCaption, vpsWorkloadState, workloadLabel } from '../lib/vpsWorkload'
+import { hasScanBacklog, scanningListLabel, scanListCaption, vpsWorkloadState, workloadLabel } from '../lib/vpsWorkload'
 import { CpuRing } from './CpuRing'
 import { CpuSparkline } from './CpuSparkline'
 import { ProgressBar } from './ProgressBar'
@@ -39,6 +39,9 @@ export function VpsCard({ node, lists = [], onForceOutage, onAction }: Props) {
   const workload = vpsWorkloadState(node, lists)
   const scanList = scanningListLabel(node, lists)
   const scanCaption = scanList ? scanListCaption(node, lists) : null
+  // If backend overlays a crack session name onto activeListName but there's no WARC scan
+  // backlog, the worker is cracking (not scanning). Show a distinct label.
+  const isCracking = workload === 'busy' && !!node.activeListName && !hasScanBacklog(node)
   const ramRatio = node.ramTotalGb > 0 ? node.ramUsedGb / node.ramTotalGb : 0
   const ramTone = ramRatio >= 0.85 ? 'danger' : ramRatio >= 0.7 ? 'orange' : 'ok'
   const diskTotal = node.diskTotalGb ?? Math.max(node.diskUsedGb * 4, 80)
@@ -89,15 +92,17 @@ export function VpsCard({ node, lists = [], onForceOutage, onAction }: Props) {
       <div className="fnode__workload" aria-label="Worker load">
         <span className={`fnode__load fnode__load--${workload}`}>
           <span className="fnode__load-dot" aria-hidden />
-          {workloadLabel(workload)}
+          {isCracking ? 'CRACKING' : workloadLabel(workload)}
         </span>
         {workload === 'busy' && scanList ? (
           <span className="fnode__scan-list" title={scanList}>
-            <span className="fnode__scan-list-k">{scanCaption}</span>
+            <span className="fnode__scan-list-k">{isCracking ? 'Cracking' : scanCaption}</span>
             <span className="fnode__scan-list-name mono">{scanList}</span>
           </span>
         ) : workload === 'free' ? (
-          <span className="fnode__scan-list fnode__scan-list--idle muted">No active list</span>
+          <span className="fnode__scan-list fnode__scan-list--idle muted">
+            {node.activeListName ?? 'No active list'}
+          </span>
         ) : null}
       </div>
 
@@ -110,7 +115,7 @@ export function VpsCard({ node, lists = [], onForceOutage, onAction }: Props) {
                 <span className="muted">CPU trend</span>
                 <span className="mono">{node.scansPerSecond.toFixed(1)} probes/s</span>
               </div>
-              <div className="fnode__cpu-spark" style={{ color: node.cpuPercent >= 85 ? 'var(--danger)' : node.cpuPercent >= 65 ? '#ff8a3d' : 'var(--accent)' }}>
+              <div className="fnode__cpu-spark" style={{ color: node.cpuPercent >= 90 ? 'var(--danger)' : node.cpuPercent >= 70 ? '#ff8a3d' : 'var(--accent)' }}>
                 <CpuSparkline values={node.cpuHistory ?? [node.cpuPercent]} />
               </div>
             </div>

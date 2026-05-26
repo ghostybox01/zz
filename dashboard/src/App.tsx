@@ -42,7 +42,7 @@ import { loadLists, saveLists, makeListId, hashContent } from './lib/listsStorag
 import { loadFleetControl, deployListViaApi, type FleetControlConfig } from './lib/fleetControl'
 import { clearFleetCredentials, getFleetCredential } from './lib/fleetCredStore'
 import { deleteListBody, getListBody, clearListBodies } from './lib/listBodyCache'
-import { stats as reconStatsApi, vps as reconVps, r2 as reconR2, lists as reconLists } from './lib/reconApi'
+import { stats as reconStatsApi, vps as reconVps, r2 as reconR2, lists as reconLists, crack as reconCrack, type CrackSession } from './lib/reconApi'
 import { pushCpuSample } from './lib/vpsHistory'
 import { allocateChunks } from './lib/splitWorkload'
 import type { Finding, Scan, ScanShard, TargetList, VpsNode } from './types'
@@ -77,6 +77,22 @@ export default function App() {
   const reconStats = useReconStats()
   const reconFleet = useReconFleet()
   const backendLive = reconStats.state === 'connected' || reconFleet.isLive
+
+  // ── Crack session polling — drives the Fleet panel's scanning indicator ──
+  const [crackSessions, setCrackSessions] = useState<CrackSession[]>([])
+  useEffect(() => {
+    if (!backendLive) return
+    let alive = true
+    const refresh = async () => {
+      try {
+        const r = await reconCrack.list()
+        if (alive && Array.isArray(r?.sessions)) setCrackSessions(r.sessions)
+      } catch { /* backend not yet live — keep previous value */ }
+    }
+    void refresh()
+    const timer = window.setInterval(() => { void refresh() }, 5_000)
+    return () => { alive = false; window.clearInterval(timer) }
+  }, [backendLive])
 
   // When real backend findings arrive, replace the mock findings entirely.
   useEffect(() => {
@@ -697,7 +713,7 @@ export default function App() {
                 fleet={fleet}
                 lists={lists}
                 totalTargets={targets.count}
-                scanning={false}
+                scanning={crackSessions.some((s) => s.status === 'running')}
                 onRedeploySplit={assignShards}
                 onForceOutage={forceOutage}
                 onAction={backendLive ? onVpsAction : undefined}

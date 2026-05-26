@@ -63,6 +63,8 @@ export type ReconServerStatus = {
   disk_total_gb?: number
   sys_uptime_sec?: number
   last_good_update?: string
+  /** Overlaid by backend when a crack session is actively running on this worker. */
+  active_list_name?: string
 }
 
 export type ReconGlobalStats = {
