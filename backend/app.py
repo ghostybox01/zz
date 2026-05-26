@@ -3365,17 +3365,18 @@ def _liveness_monitor_loop() -> None:
                                         _crack_sessions[sid].setdefault('remote_pids', {})[ip] = actual_pid
                                         mutated = True
                             # Ensure cpulimit is throttling to ≤90% CPU.
+                            # Only apply if cpulimit is already installed (fast
+                            # check); apt-get install is handled by the throttle
+                            # endpoint which uses a longer timeout.
                             try:
                                 mgr.ssh_exec(
                                     ip,
+                                    f'command -v cpulimit >/dev/null 2>&1 || exit 0 ; '
+                                    f'pgrep -x cpulimit >/dev/null 2>&1 && exit 0 ; '
                                     f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
-                                    f'command -v cpulimit >/dev/null 2>&1 || '
-                                    f'  apt-get install -y cpulimit -qq 2>/dev/null || true ; '
-                                    f'pgrep -f "cpulimit.*{actual_pid}" >/dev/null 2>&1 || '
-                                    f'( command -v cpulimit >/dev/null 2>&1 && '
-                                    f'setsid nohup cpulimit -p {actual_pid} -l $_lim -q '
-                                    f'</dev/null >/dev/null 2>&1 & )',
-                                    20,  # allow time for apt-get if needed
+                                    f'nohup cpulimit -p {actual_pid} -l $_lim -q '
+                                    f'>>/tmp/cpulimit.log 2>&1 &',
+                                    8,
                                 )
                             except Exception:
                                 pass
@@ -4273,7 +4274,8 @@ def api_crack_reattach(sid):
 @app.route('/api/crack/<sid>/throttle', methods=['POST'])
 def api_crack_throttle(sid):
     """Force-install cpulimit on each worker and (re-)apply it to the scanner
-    PID so CPU stays ≤90%.  Idempotent — kills stale cpulimit first."""
+    PID so CPU stays ≤90%.  Runs two SSH calls per worker: one to install
+    (longer timeout), one to apply (short timeout)."""
     with _crack_lock:
         _reload_crack_state_if_changed()
         raw = _crack_sessions.get(sid)
@@ -4287,29 +4289,34 @@ def api_crack_throttle(sid):
 
     results = {}
     for ip, pid in worker_pids.items():
+        detail = {}
         try:
-            out = mgr.ssh_exec(
+            # Step 1: install cpulimit if missing (90s timeout for apt-get)
+            install_out = (mgr.ssh_exec(
                 ip,
-                # 1. find actual live scanner PID (pgrep -of handles stale stored pid)
+                'command -v cpulimit >/dev/null 2>&1 && echo already_installed || '
+                '( DEBIAN_FRONTEND=noninteractive apt-get install -y cpulimit -qq 2>&1 | tail -1 && echo installed ) || '
+                '( yum install -y cpulimit -q 2>&1 | tail -1 && echo installed ) || echo install_failed',
+                90,
+            ) or '').strip()
+            detail['install'] = install_out
+
+            # Step 2: apply cpulimit (fresh start, kill stale first)
+            apply_out = (mgr.ssh_exec(
+                ip,
                 f'_p=$(pgrep -of reconx-scanner 2>/dev/null) ; '
                 f'[ -z "$_p" ] && _p={int(pid)} ; '
-                # 2. install cpulimit if missing
-                f'command -v cpulimit >/dev/null 2>&1 || '
-                f'  apt-get install -y cpulimit -qq 2>/dev/null || '
-                f'  yum install -y cpulimit -q 2>/dev/null || true ; '
-                # 3. kill any existing cpulimit for this process (stale or wrong)
-                f'pkill -f "cpulimit.*-p.*$_p" 2>/dev/null || true ; '
-                # 4. compute limit (nproc * 90) and apply
                 f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
+                f'pkill -x cpulimit 2>/dev/null ; '
                 f'command -v cpulimit >/dev/null 2>&1 && '
-                f'setsid nohup cpulimit -p $_p -l $_lim -q '
-                f'</dev/null >/dev/null 2>&1 & '
-                f'echo "ok:$_p:$_lim"',
-                30,
-            )
-            results[ip] = (out or '').strip()
+                f'nohup cpulimit -p $_p -l $_lim -q >>/tmp/cpulimit.log 2>&1 & '
+                f'echo "applied:$_p:$_lim"',
+                15,
+            ) or '').strip()
+            detail['apply'] = apply_out
+            results[ip] = detail
         except Exception as e:
-            results[ip] = f'error:{e}'
+            results[ip] = {'error': str(e)}
 
     return jsonify({'ok': True, 'results': results})
 
