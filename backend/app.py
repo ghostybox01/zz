@@ -3351,6 +3351,22 @@ def _liveness_monitor_loop() -> None:
                         )
                         if (out or '').strip().endswith('alive'):
                             alive_count += 1
+                            # Ensure cpulimit is throttling this PID at ≤90%
+                            # per core. Handles sessions started before the
+                            # launch-command fix, or workers where cpulimit
+                            # died and was never restarted.
+                            try:
+                                mgr.ssh_exec(
+                                    ip,
+                                    f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
+                                    f'pgrep -f "cpulimit.*{int(pid)}" >/dev/null 2>&1 || '
+                                    f'( command -v cpulimit >/dev/null 2>&1 && '
+                                    f'setsid nohup cpulimit -p {int(pid)} -l $_lim -q '
+                                    f'</dev/null >/dev/null 2>&1 & )',
+                                    5,
+                                )
+                            except Exception:
+                                pass
                     except Exception:
                         alive_count += 1  # transient SSH blip — stay alive
                 if alive_count == 0:
@@ -3730,14 +3746,18 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
         # so it returns as soon as the PID is written, never retries, and
         # never blocks waiting for the scanner to finish.
         # ionice -c 2 -n 7 + nice -n 15 keeps the scanner low-priority so
-        # the VPS stays responsive. cpulimit caps at 90% * nproc if available.
+        # the VPS stays responsive. cpulimit hard-caps at 90% * nproc.
+        # Install cpulimit if missing (best-effort apt/yum), then always apply.
         remote_cmd = (
             f"cd {remote_dir} && "
+            f"( command -v cpulimit >/dev/null 2>&1 || "
+            f"  apt-get install -y cpulimit -qq 2>/dev/null || "
+            f"  yum install -y cpulimit -q 2>/dev/null || true ) ; "
             f"setsid nohup ionice -c 2 -n 7 nice -n 15 "
             f"./reconx-scanner targets.txt </dev/null > crack.log 2>&1 & "
             f"_SP=$! ; "
+            f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; "
             f"( command -v cpulimit >/dev/null 2>&1 && "
-            f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) && "
             f"setsid nohup cpulimit -p $_SP -l $_LIM -q </dev/null >/dev/null 2>&1 & ) ; "
             f"echo $_SP"
         )
