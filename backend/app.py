@@ -3345,9 +3345,15 @@ def _liveness_monitor_loop() -> None:
                 alive_count = 0
                 for ip, pid in pids.items():
                     try:
+                        # Check by session directory name so we catch the
+                        # actual reconx-scanner even when the stored PID is
+                        # the bash wrapper that exits after echoing $!.
                         out = mgr.ssh_exec(
                             ip,
-                            f'kill -0 {int(pid)} 2>/dev/null && echo alive || echo dead',
+                            f'pgrep -f "reconx-scanner.*crack_{sid}" > /dev/null 2>&1'
+                            f' && echo alive'
+                            f' || kill -0 {int(pid)} 2>/dev/null && echo alive'
+                            f' || echo dead',
                             5,
                         )
                         if (out or '').strip().endswith('alive'):
