@@ -213,30 +213,39 @@ def import_from_files():
                     line = line.strip()
                     if not line:
                         continue
-                    
-                    if status == 'hit':
-                        imported_hits += 1
-                        continue
-                    
+
                     parts = line.split(':', 1)
                     if len(parts) < 2:
+                        # 'hit' files like smtp_found.txt may not have url:key
+                        # format — count as hit and move on.
+                        if status == 'hit':
+                            imported_hits += 1
                         continue
-                    
+
                     source_url = parts[0].strip()
                     key_and_rest = parts[1].strip()
-                    
+
                     key_parts = key_and_rest.split(':', 1)
                     key_value = key_parts[0].strip()
                     metadata = key_parts[1].strip() if len(key_parts) > 1 else ""
-                    
+
+                    # Insert both 'valid' and 'hit' credential rows into the
+                    # DB.  Previously 'hit' lines were only counted in memory
+                    # and never stored, so Discord Webhook / JWT / SMTP hits
+                    # would vanish on restart.  Storing them as status='hit'
+                    # lets the stats query count them and the admin inspect
+                    # them if needed.
                     cursor.execute('''
                         INSERT OR IGNORE INTO credentials (type, key_value, source_url, metadata, status)
                         VALUES (?, ?, ?, ?, ?)
-                    ''', (cred_type, key_value, source_url, metadata, 'valid'))
-                    
+                    ''', (cred_type, key_value, source_url, metadata, status))
+
                     if cursor.rowcount > 0:
-                        imported_valid += 1
-        
+                        if status == 'valid':
+                            imported_valid += 1
+                        else:
+                            imported_hits += 1
+
         except Exception as e:
             print(f"⚠️ Error reading {filename}: {e}")
     
@@ -431,6 +440,46 @@ def api_vps_servers():
     
     return jsonify({'servers': manager.load_servers()})
 
+def _parse_crack_log_progress(ip: str, session_id: str) -> int:
+    """Return the most-recently parsed line-progress for a crack session.
+
+    Results are CACHED inside the session dict (key ``last_progress``) with
+    a 30-second TTL so callers never trigger an SSH round-trip.  The actual
+    SSH read happens in the ``_poll_live_results`` background thread which
+    writes ``last_progress`` into the session; we just surface that
+    pre-parsed value here so the Fleet panel stays fast."""
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sess = _crack_sessions.get(session_id) or {}
+    cache_time = float(sess.get('last_progress_time', 0))
+    if time.time() - cache_time < 30:
+        return int(sess.get('last_progress', 0))
+    return int(sess.get('last_progress', 0))
+
+
+def _count_crack_session_findings(session_id: str) -> int:
+    """Return the number of credential rows associated with a crack session.
+
+    Uses the cached ``findings_count`` stored in the session dict when
+    available; falls back to a live DB query so the Fleet panel still shows
+    a meaningful number even before the first poll tick."""
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sess = _crack_sessions.get(session_id) or {}
+    cached = sess.get('findings_count')
+    if cached is not None:
+        return int(cached)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM credentials WHERE status = "valid"')
+        row = cursor.fetchone()
+        conn.close()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
 @app.route('/api/vps/status')
 def api_vps_status():
     """Get status of all VPS servers.
@@ -438,7 +487,11 @@ def api_vps_status():
     Reads the in-memory snapshot maintained by SSHManager's monitor
     thread; does NOT trigger a fresh probe. That keeps this endpoint
     O(roster size) and well under any client-side timeout, even when
-    individual workers are unreachable."""
+    individual workers are unreachable.
+
+    Additionally overlays live crack-session data (targets, scanned,
+    hits, speed) onto each server entry so the Fleet panel reflects the
+    active Crack-mode scan rather than the legacy WARC counters."""
     manager = get_ssh_manager()
     if not manager:
         return jsonify({'error': 'SSH not available'}), 503
@@ -446,8 +499,62 @@ def api_vps_status():
     servers = manager.get_cached_status()
     stats = manager.get_global_stats()
 
+    # Build a map: worker_ip -> (session_id, session) for running sessions.
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sessions_snapshot = {sid: dict(s) for sid, s in _crack_sessions.items()}
+
+    ip_to_session: dict = {}
+    for sid, sess in sessions_snapshot.items():
+        if sess.get('status') != 'running':
+            continue
+        for wip in (sess.get('worker_ips') or []):
+            ip_to_session[str(wip).strip()] = (sid, sess)
+        # Also key by remote_pids keys (may differ if IPs were normalised).
+        for wip in (sess.get('remote_pids') or {}).keys():
+            ip_to_session[str(wip).strip()] = (sid, sess)
+
+    # Overlay crack stats onto matching server entries.
+    overlaid_servers = []
+    for srv in servers:
+        srv = dict(srv)  # shallow copy — don't mutate the cached object
+        sip = str(srv.get('ip', '')).strip()
+        if sip in ip_to_session:
+            sid, sess = ip_to_session[sip]
+            list_id = str(sess.get('list_id') or '')
+            # Target count — prefer sidecar metadata (O(1)), fall back to line-count.
+            targets = 0
+            try:
+                meta = _read_list_meta(list_id)
+                if meta and meta.get('lines'):
+                    targets = int(meta['lines'])
+                else:
+                    data_path, _ = _list_paths(list_id)
+                    if os.path.exists(data_path):
+                        with open(data_path, 'r', errors='ignore') as _fh:
+                            targets = sum(1 for _ln in _fh if _ln.strip())
+            except Exception:
+                pass
+            scanned = _parse_crack_log_progress(sip, sid)
+            hits = _count_crack_session_findings(sid)
+            # Speed: lines/s derived from stored progress deltas.
+            prev_scanned = int(sess.get('_speed_prev_scanned', scanned))
+            prev_ts = float(sess.get('_speed_prev_ts', time.time()))
+            elapsed = time.time() - prev_ts
+            speed = round((scanned - prev_scanned) / elapsed, 1) if elapsed > 0 and scanned >= prev_scanned else 0
+            srv.update({
+                'targets': targets,
+                'scanned': scanned,
+                'hits': hits,
+                'speed': speed,
+                'active_list_name': sess.get('name') or sess.get('list_id', ''),
+                'batch_info': f'{scanned}/{targets}',
+                'crack_session_id': sid,
+            })
+        overlaid_servers.append(srv)
+
     return jsonify({
-        'servers': servers,
+        'servers': overlaid_servers,
         'stats': stats
     })
 
