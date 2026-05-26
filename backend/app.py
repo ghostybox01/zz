@@ -4349,19 +4349,26 @@ def api_crack_throttle(sid):
             detail['cpulimit_install'] = inst
 
             if inst in ('found', 'installed'):
-                # kill any stale cpulimit, start fresh with disown
+                # check PID comm to confirm it's really the scanner binary
+                comm = (mgr.ssh_exec(ip, f'cat /proc/{actual_pid}/comm 2>/dev/null || echo unknown', 5) or '').strip()
+                detail['pid_comm'] = comm
+                # kill stale cpulimit; use --include-children (-r) to limit scanner + any forks
+                cpulimit_has_r = (mgr.ssh_exec(ip, 'cpulimit --help 2>&1 | grep -q -- "-r" && echo yes || echo no', 5) or 'no').strip()
+                r_flag = '-r' if cpulimit_has_r == 'yes' else ''
                 cpu_start = (mgr.ssh_exec(
                     ip,
                     f'pkill -x cpulimit 2>/dev/null; '
-                    f'cpulimit -p {actual_pid} -l {limit_pct} -q >>/tmp/cpulimit.log 2>&1 & disown; '
-                    f'echo cpu_started',
+                    f'cpulimit {r_flag} -p {actual_pid} -l {limit_pct} -q >>/tmp/cpulimit.log 2>&1 & disown; '
+                    f'echo "cpu_started:{r_flag}"',
                     10,
                 ) or '').strip()
                 detail['cpulimit_start'] = cpu_start
 
-            # 5. verify cpulimit is actually running now
+            # 5. verify cpulimit is running, and read cpulimit.log for any error
             verify = (mgr.ssh_exec(ip, 'pgrep -x cpulimit >/dev/null && echo running || echo not_running', 5) or '').strip()
+            log_tail = (mgr.ssh_exec(ip, 'tail -5 /tmp/cpulimit.log 2>/dev/null || echo ""', 5) or '').strip()
             detail['cpulimit_verify'] = verify
+            detail['cpulimit_log'] = log_tail
 
             results[ip] = detail
         except Exception as e:
