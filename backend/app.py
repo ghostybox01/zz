@@ -3972,68 +3972,71 @@ def _poll_live_results(session_id: str) -> None:
             for ip in worker_ips:
                 try:
                     ssh = mgr._get_ssh_client(ip, 30)
-                    sftp = ssh.open_sftp()
-                    sftp.get_channel().settimeout(30)
-                    result_path = f'{remote_dir}/ResultJS'
+                    # ── SFTP result download (best-effort; skip if ResultJS missing) ──
                     try:
-                        remote_files = sftp.listdir(result_path)
-                    except Exception:
-                        sftp.close(); ssh.close()
-                        continue
-                    conn = sqlite3.connect(DB_PATH)
-                    cursor = conn.cursor()
-                    for fname in remote_files:
-                        mapping = FILE_MAPPING.get(fname)
-                        if not mapping:
-                            continue
-                        cred_type, db_status = mapping
-                        import tempfile as _tmpmod
-                        with _tmpmod.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
-                            tmp_path = tf.name
+                        sftp = ssh.open_sftp()
+                        sftp.get_channel().settimeout(30)
+                        result_path = f'{remote_dir}/ResultJS'
                         try:
-                            sftp.get(f'{result_path}/{fname}', tmp_path)
-                            with open(tmp_path, 'r', errors='ignore') as fh:
-                                for line in fh:
-                                    line = line.strip()
-                                    if not line:
-                                        continue
-                                    parts = line.split(':', 1)
-                                    if len(parts) < 2:
-                                        continue
-                                    source_url = parts[0].strip()
-                                    key_and_rest = parts[1].strip()
-                                    key_parts = key_and_rest.split(':', 1)
-                                    key_value = key_parts[0].strip()
-                                    metadata = key_parts[1].strip() if len(key_parts) > 1 else ''
-                                    cursor.execute(
-                                        'INSERT OR IGNORE INTO credentials '
-                                        '(type, key_value, source_url, metadata, status, session_id) '
-                                        'VALUES (?, ?, ?, ?, ?, ?)',
-                                        (cred_type, key_value, source_url, metadata, db_status, session_id),
-                                    )
-                                    if cursor.rowcount == 0:
-                                        # Already in DB; retro-attribute if session_id was never set.
-                                        cursor.execute(
-                                            'UPDATE credentials SET session_id = ? '
-                                            'WHERE type = ? AND key_value = ? AND session_id IS NULL',
-                                            (session_id, cred_type, key_value),
-                                        )
-                                    if cursor.rowcount > 0:
-                                        inserted_total += 1
-                        except Exception as e:
-                            print(f'[live-poll] {ip}/{fname}: {e}')
-                        finally:
-                            try:
-                                os.unlink(tmp_path)
-                            except Exception:
-                                pass
-                    conn.commit()
-                    conn.close()
-                    sftp.close()
-                    # Parse crack.log progress while ssh is still open.
-                    # The log is at {remote_dir}/crack.log (scanner cd {remote_dir}).
-                    # pterm writes \r-separated progress updates on one line; strip
-                    # \r and ANSI codes, then take the LAST grep match (most recent).
+                            remote_files = sftp.listdir(result_path)
+                        except Exception:
+                            remote_files = []
+                        if remote_files:
+                            conn = sqlite3.connect(DB_PATH)
+                            cursor = conn.cursor()
+                            for fname in remote_files:
+                                mapping = FILE_MAPPING.get(fname)
+                                if not mapping:
+                                    continue
+                                cred_type, db_status = mapping
+                                import tempfile as _tmpmod
+                                with _tmpmod.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
+                                    tmp_path = tf.name
+                                try:
+                                    sftp.get(f'{result_path}/{fname}', tmp_path)
+                                    with open(tmp_path, 'r', errors='ignore') as fh:
+                                        for line in fh:
+                                            line = line.strip()
+                                            if not line:
+                                                continue
+                                            parts = line.split(':', 1)
+                                            if len(parts) < 2:
+                                                continue
+                                            source_url = parts[0].strip()
+                                            key_and_rest = parts[1].strip()
+                                            key_parts = key_and_rest.split(':', 1)
+                                            key_value = key_parts[0].strip()
+                                            metadata = key_parts[1].strip() if len(key_parts) > 1 else ''
+                                            cursor.execute(
+                                                'INSERT OR IGNORE INTO credentials '
+                                                '(type, key_value, source_url, metadata, status, session_id) '
+                                                'VALUES (?, ?, ?, ?, ?, ?)',
+                                                (cred_type, key_value, source_url, metadata, db_status, session_id),
+                                            )
+                                            if cursor.rowcount == 0:
+                                                # Already in DB; retro-attribute if session_id was never set.
+                                                cursor.execute(
+                                                    'UPDATE credentials SET session_id = ? '
+                                                    'WHERE type = ? AND key_value = ? AND session_id IS NULL',
+                                                    (session_id, cred_type, key_value),
+                                                )
+                                            if cursor.rowcount > 0:
+                                                inserted_total += 1
+                                except Exception as e:
+                                    print(f'[live-poll] {ip}/{fname}: {e}')
+                                finally:
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except Exception:
+                                        pass
+                            conn.commit()
+                            conn.close()
+                        sftp.close()
+                    except Exception as _sftp_err:
+                        print(f'[live-poll] sftp {ip}: {_sftp_err}')
+                    # ── Progress: always read crack.log regardless of ResultJS ──
+                    # pterm writes \r-separated updates on one line; strip \r and
+                    # ANSI codes, take the LAST match (most recent progress count).
                     try:
                         prev_progress = int(sess.get('last_progress', 0))
                         prev_ts = float(sess.get('last_progress_time', 0))
@@ -4058,7 +4061,7 @@ def _poll_live_results(session_id: str) -> None:
                             }),
                         )
                     except Exception as _pe:
-                        print(f'[live-poll] progress parse {ip}: {_pe}')
+                        print(f'[live-poll] progress {ip}: {_pe}')
                     ssh.close()
                 except Exception as e:
                     print(f'[live-poll] {ip}: {e}')

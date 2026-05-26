@@ -23,19 +23,6 @@ function shortId(id: string): string {
   return `#${tail.padStart(6, '0').slice(-6)}`
 }
 
-function ptsForSeverity(s: Finding['severity']): number {
-  switch (s) {
-    case 'critical':
-      return 5
-    case 'high':
-      return 3
-    case 'medium':
-      return 2
-    default:
-      return 1
-  }
-}
-
 function vulnTag(rule: string): string {
   const u = rule.toUpperCase()
   if (u.includes('KEY') || u.includes('TOKEN') || u.includes('SECRET')) return 'CRED'
@@ -306,7 +293,6 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
                   <th>Credential</th>
                   <th className="th-narrow">Vuln</th>
                   <th className="th-narrow">Status</th>
-                  <th className="th-narrow th-right">Pts</th>
                   <th aria-sort={sortKey === 'severity' ? ariaDir(dir) : undefined}>
                     <button type="button" className="tbl-sort" onClick={() => toggle('severity')}>
                       Sev {hint(sortKey === 'severity', dir)}
@@ -322,7 +308,6 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
               </thead>
               <tbody>
                 {rows.map((f) => {
-                  const pts = ptsForSeverity(f.severity)
                   const pathish = f.path ?? (f.url ? f.url.replace(/^https?:\/\/[^/]+/, '') || '/' : '')
                   return (
                     <tr
@@ -366,7 +351,6 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
                           {f.details?.validated === false ? 'PENDING' : 'VALID'}
                         </span>
                       </td>
-                      <td className="mono-cell th-right pts-cell">{pts > 1 ? `+${pts}` : '—'}</td>
                       <td>
                         <span className={`severity-pill severity-pill--${f.severity}`}>{f.severity}</span>
                       </td>
