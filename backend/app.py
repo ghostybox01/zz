@@ -3737,12 +3737,19 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
         # setsid creates a new session so the scanner is fully detached from
         # the SSH channel — no inherited FDs keep the channel alive.
         # </dev/null closes stdin. ssh_spawn_bg uses readline() (not read())
-        # so it returns as soon as echo $! is written, never retries, and
+        # so it returns as soon as the PID is written, never retries, and
         # never blocks waiting for the scanner to finish.
+        # ionice -c 2 -n 7 + nice -n 15 keeps the scanner low-priority so
+        # the VPS stays responsive. cpulimit caps at 90% * nproc if available.
         remote_cmd = (
             f"cd {remote_dir} && "
-            f"nice -n 10 setsid nohup ./reconx-scanner targets.txt </dev/null > crack.log 2>&1 &"
-            f"echo $!"
+            f"setsid nohup ionice -c 2 -n 7 nice -n 15 "
+            f"./reconx-scanner targets.txt </dev/null > crack.log 2>&1 & "
+            f"_SP=$! ; "
+            f"( command -v cpulimit >/dev/null 2>&1 && "
+            f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) && "
+            f"setsid nohup cpulimit -p $_SP -l $_LIM -q </dev/null >/dev/null 2>&1 & ) ; "
+            f"echo $_SP"
         )
         out = mgr.ssh_spawn_bg(ip, remote_cmd, 120) if hasattr(mgr, 'ssh_spawn_bg') else mgr.ssh_exec(ip, remote_cmd, 120)
         pid = _extract_remote_pid(out or '')
