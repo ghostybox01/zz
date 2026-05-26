@@ -4311,17 +4311,21 @@ def api_crack_throttle(sid):
             detail['nproc'] = nproc
             detail['limit_pct'] = limit_pct
 
-            # 3. try cgroups v2 first (kernel-enforced, survives process restarts)
+            # 3. diagnose: read PID's actual cgroup path, then try to throttle it
             cg_out = (mgr.ssh_exec(
                 ip,
-                # cgroups v2: must enable cpu controller in parent BEFORE child cgroup can use it
+                # First: check what cgroup the scanner is actually in
+                f'PROC_CG=$(cat /proc/{actual_pid}/cgroup 2>/dev/null | head -3) ; '
+                f'echo "proc_cgroup:$PROC_CG" ; '
+                # cgroups v2: enable cpu controller in parent, then apply quota
                 f'if [ -f /sys/fs/cgroup/cgroup.controllers ]; then '
                 f'  echo "+cpu" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null ; '
                 f'  mkdir -p /sys/fs/cgroup/scanner 2>/dev/null ; '
                 f'  echo "+cpu" > /sys/fs/cgroup/scanner/cgroup.subtree_control 2>/dev/null ; '
                 f'  echo "{quota_us} 100000" > /sys/fs/cgroup/scanner/cpu.max 2>/dev/null ; '
                 f'  echo {actual_pid} > /sys/fs/cgroup/scanner/cgroup.procs 2>/dev/null && '
-                f'  echo "cgroupv2_ok:$(cat /sys/fs/cgroup/scanner/cpu.max 2>/dev/null)" ; '
+                f'  AFTER_CG=$(cat /proc/{actual_pid}/cgroup 2>/dev/null | head -1) ; '
+                f'  echo "cgroupv2_ok:$(cat /sys/fs/cgroup/scanner/cpu.max 2>/dev/null):pid_now_in:$AFTER_CG" ; '
                 f'elif [ -d /sys/fs/cgroup/cpu ]; then '
                 f'  mkdir -p /sys/fs/cgroup/cpu/scanner 2>/dev/null ; '
                 f'  echo "{quota_us}" > /sys/fs/cgroup/cpu/scanner/cpu.cfs_quota_us 2>/dev/null ; '
