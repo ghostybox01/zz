@@ -4273,8 +4273,8 @@ def api_crack_reattach(sid):
 
 @app.route('/api/crack/<sid>/throttle', methods=['POST'])
 def api_crack_throttle(sid):
-    """Force-install cpulimit on each worker and (re-)apply it to the scanner
-    PID so CPU stays ≤90%.  Uses one SSH call per step for clear diagnostics."""
+    """Force CPU throttling on each worker via cgroups (preferred) or cpulimit.
+    Caps scanner CPU to 90% of available cores. Idempotent."""
     with _crack_lock:
         _reload_crack_state_if_changed()
         raw = _crack_sessions.get(sid)
@@ -4290,39 +4290,73 @@ def api_crack_throttle(sid):
     for ip, stored_pid in worker_pids.items():
         detail = {}
         try:
-            # 1. find live PID (pgrep wins over stored PID for robustness)
+            # 1. find live PID
             pid_out = (mgr.ssh_exec(ip, 'pgrep -of reconx-scanner 2>/dev/null || echo ""', 8) or '').strip()
             actual_pid = int(pid_out) if pid_out.isdigit() else int(stored_pid)
             detail['pid'] = actual_pid
 
-            # 2. install cpulimit if missing (up to 90s for apt-get)
+            # verify PID is alive
+            check = (mgr.ssh_exec(ip, f'kill -0 {actual_pid} 2>/dev/null && echo alive || echo dead', 5) or '').strip()
+            detail['pid_status'] = check
+            if check != 'alive':
+                results[ip] = detail
+                continue
+
+            # 2. get nproc
+            nproc_s = (mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 2', 5) or '2').strip()
+            nproc = int(nproc_s) if nproc_s.isdigit() else 2
+            # 90% of total cores, expressed in cgroup quota microseconds (period=100ms)
+            quota_us = nproc * 90000  # 90% per core × nproc cores
+            limit_pct = nproc * 90    # for cpulimit (percentage = total% across all cores)
+            detail['nproc'] = nproc
+            detail['limit_pct'] = limit_pct
+
+            # 3. try cgroups v2 first (kernel-enforced, survives process restarts)
+            cg_out = (mgr.ssh_exec(
+                ip,
+                # cgroups v2: create scanner group, set quota, assign PID
+                f'if [ -f /sys/fs/cgroup/cgroup.controllers ]; then '
+                f'  mkdir -p /sys/fs/cgroup/scanner 2>/dev/null ; '
+                f'  echo "{quota_us} 100000" > /sys/fs/cgroup/scanner/cpu.max 2>/dev/null && '
+                f'  echo {actual_pid} > /sys/fs/cgroup/scanner/cgroup.procs 2>/dev/null && '
+                f'  echo "cgroupv2_ok" ; '
+                f'elif [ -d /sys/fs/cgroup/cpu ]; then '
+                f'  mkdir -p /sys/fs/cgroup/cpu/scanner 2>/dev/null ; '
+                f'  echo "{quota_us}" > /sys/fs/cgroup/cpu/scanner/cpu.cfs_quota_us 2>/dev/null && '
+                f'  echo "100000" > /sys/fs/cgroup/cpu/scanner/cpu.cfs_period_us 2>/dev/null && '
+                f'  echo {actual_pid} > /sys/fs/cgroup/cpu/scanner/cgroup.procs 2>/dev/null && '
+                f'  echo "cgroupv1_ok" ; '
+                f'else echo "no_cgroup" ; fi',
+                10,
+            ) or '').strip()
+            detail['cgroup'] = cg_out
+
+            # 4. regardless of cgroup result, also run cpulimit as belt-and-suspenders
+            # use disown so it survives SSH channel close without needing setsid/nohup
             inst = (mgr.ssh_exec(
                 ip,
                 'which cpulimit >/dev/null 2>&1 && echo found || '
                 '(DEBIAN_FRONTEND=noninteractive apt-get install -y cpulimit -qq 2>/dev/null && echo installed) || '
-                '(yum install -y cpulimit -q 2>/dev/null && echo installed) || echo missing',
+                'echo missing',
                 90,
             ) or '').strip()
-            detail['install'] = inst
+            detail['cpulimit_install'] = inst
 
-            # 3. kill any existing cpulimit
-            mgr.ssh_exec(ip, 'pkill -x cpulimit 2>/dev/null; true', 5)
+            if inst in ('found', 'installed'):
+                # kill any stale cpulimit, start fresh with disown
+                cpu_start = (mgr.ssh_exec(
+                    ip,
+                    f'pkill -x cpulimit 2>/dev/null; '
+                    f'cpulimit -p {actual_pid} -l {limit_pct} -q >>/tmp/cpulimit.log 2>&1 & disown; '
+                    f'echo cpu_started',
+                    10,
+                ) or '').strip()
+                detail['cpulimit_start'] = cpu_start
 
-            # 4. get nproc separately (avoids subshell expansion issues)
-            nproc_s = (mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 2', 5) or '2').strip()
-            nproc = int(nproc_s) if nproc_s.isdigit() else 2
-            limit = nproc * 90
-            detail['limit'] = limit
+            # 5. verify cpulimit is actually running now
+            verify = (mgr.ssh_exec(ip, 'pgrep -x cpulimit >/dev/null && echo running || echo not_running', 5) or '').strip()
+            detail['cpulimit_verify'] = verify
 
-            # 5. start cpulimit in background; echo runs in foreground
-            start = (mgr.ssh_exec(
-                ip,
-                f'which cpulimit >/dev/null 2>&1 || exit 0 ; '
-                f'cpulimit -p {actual_pid} -l {limit} -q >>/tmp/cpulimit.log 2>&1 & '
-                f'echo started',
-                10,
-            ) or '').strip()
-            detail['start'] = start
             results[ip] = detail
         except Exception as e:
             results[ip] = {'error': str(e)}
