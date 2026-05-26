@@ -4274,8 +4274,7 @@ def api_crack_reattach(sid):
 @app.route('/api/crack/<sid>/throttle', methods=['POST'])
 def api_crack_throttle(sid):
     """Force-install cpulimit on each worker and (re-)apply it to the scanner
-    PID so CPU stays ≤90%.  Runs two SSH calls per worker: one to install
-    (longer timeout), one to apply (short timeout)."""
+    PID so CPU stays ≤90%.  Uses one SSH call per step for clear diagnostics."""
     with _crack_lock:
         _reload_crack_state_if_changed()
         raw = _crack_sessions.get(sid)
@@ -4288,32 +4287,42 @@ def api_crack_throttle(sid):
         return jsonify({'ok': False, 'error': 'SSH not available'}), 503
 
     results = {}
-    for ip, pid in worker_pids.items():
+    for ip, stored_pid in worker_pids.items():
         detail = {}
         try:
-            # Step 1: install cpulimit if missing (90s timeout for apt-get)
-            install_out = (mgr.ssh_exec(
+            # 1. find live PID (pgrep wins over stored PID for robustness)
+            pid_out = (mgr.ssh_exec(ip, 'pgrep -of reconx-scanner 2>/dev/null || echo ""', 8) or '').strip()
+            actual_pid = int(pid_out) if pid_out.isdigit() else int(stored_pid)
+            detail['pid'] = actual_pid
+
+            # 2. install cpulimit if missing (up to 90s for apt-get)
+            inst = (mgr.ssh_exec(
                 ip,
-                'command -v cpulimit >/dev/null 2>&1 && echo already_installed || '
-                '( DEBIAN_FRONTEND=noninteractive apt-get install -y cpulimit -qq 2>&1 | tail -1 && echo installed ) || '
-                '( yum install -y cpulimit -q 2>&1 | tail -1 && echo installed ) || echo install_failed',
+                'which cpulimit >/dev/null 2>&1 && echo found || '
+                '(DEBIAN_FRONTEND=noninteractive apt-get install -y cpulimit -qq 2>/dev/null && echo installed) || '
+                '(yum install -y cpulimit -q 2>/dev/null && echo installed) || echo missing',
                 90,
             ) or '').strip()
-            detail['install'] = install_out
+            detail['install'] = inst
 
-            # Step 2: apply cpulimit (fresh start, kill stale first)
-            apply_out = (mgr.ssh_exec(
+            # 3. kill any existing cpulimit
+            mgr.ssh_exec(ip, 'pkill -x cpulimit 2>/dev/null; true', 5)
+
+            # 4. get nproc separately (avoids subshell expansion issues)
+            nproc_s = (mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 2', 5) or '2').strip()
+            nproc = int(nproc_s) if nproc_s.isdigit() else 2
+            limit = nproc * 90
+            detail['limit'] = limit
+
+            # 5. start cpulimit in background; echo runs in foreground
+            start = (mgr.ssh_exec(
                 ip,
-                f'_p=$(pgrep -of reconx-scanner 2>/dev/null) ; '
-                f'[ -z "$_p" ] && _p={int(pid)} ; '
-                f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
-                f'pkill -x cpulimit 2>/dev/null ; '
-                f'command -v cpulimit >/dev/null 2>&1 && '
-                f'nohup cpulimit -p $_p -l $_lim -q >>/tmp/cpulimit.log 2>&1 & '
-                f'echo "applied:$_p:$_lim"',
-                15,
+                f'which cpulimit >/dev/null 2>&1 || exit 0 ; '
+                f'cpulimit -p {actual_pid} -l {limit} -q >>/tmp/cpulimit.log 2>&1 & '
+                f'echo started',
+                10,
             ) or '').strip()
-            detail['apply'] = apply_out
+            detail['start'] = start
             results[ip] = detail
         except Exception as e:
             results[ip] = {'error': str(e)}
