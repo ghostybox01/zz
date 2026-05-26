@@ -3639,8 +3639,9 @@ def _crack_session_view(sess: dict) -> dict:
     """Project the on-disk session into the wire shape the dashboard
     expects (Contract B). Keeps the JSON schema stable even if internal
     bookkeeping grows extra fields later."""
+    sid = str(sess.get('id') or '')
     return {
-        'id':            str(sess.get('id') or ''),
+        'id':            sid,
         'name':          str(sess.get('name') or ''),
         'list_id':       str(sess.get('list_id') or ''),
         'list_name':     str(sess.get('list_name') or ''),
@@ -3651,6 +3652,9 @@ def _crack_session_view(sess: dict) -> dict:
         'remote_pids':   dict(sess.get('remote_pids') or {}),
         'finished_at':   sess.get('finished_at'),
         'last_error':    sess.get('last_error'),
+        'scanned':       int(sess.get('last_progress') or 0),
+        'speed':         float(sess.get('last_speed') or 0),
+        'hits':          _count_crack_session_findings(sid) if sid else 0,
     }
 
 
@@ -3999,15 +4003,15 @@ def _poll_live_results(session_id: str) -> None:
                                                 'VALUES (?, ?, ?, ?, ?, ?)',
                                                 (cred_type, key_value, source_url, metadata, db_status, session_id),
                                             )
-                                            if cursor.rowcount == 0:
+                                            if cursor.rowcount > 0:
+                                                inserted_total += 1
+                                            else:
                                                 # Already in DB; retro-attribute if session_id was never set.
                                                 cursor.execute(
                                                     'UPDATE credentials SET session_id = ? '
                                                     'WHERE type = ? AND key_value = ? AND session_id IS NULL',
                                                     (session_id, cred_type, key_value),
                                                 )
-                                            if cursor.rowcount > 0:
-                                                inserted_total += 1
                                 except Exception as e:
                                     print(f'[live-poll] {ip}/{fname}: {e}')
                                 finally:

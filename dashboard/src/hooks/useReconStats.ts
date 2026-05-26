@@ -123,6 +123,7 @@ export function useReconStats(): UseReconStatsResult {
     setRaw(payload)
     setFindings((payload.recent_findings ?? []).map((row, i) => mapRecent(row, i)))
     setLastError(null)
+    setState('connected')
   }
 
   const refresh = async (): Promise<ReconStats | null> => {
@@ -175,8 +176,9 @@ export function useReconStats(): UseReconStatsResult {
     socket.on('stats_update', onStatsUpdate)
 
     // Fallback poll every 10s in case the socket is wedged.
+    // Always fire — the `state` captured here is stale due to the empty dep array.
     pollIdRef.current = window.setInterval(() => {
-      if (state !== 'connected') void refresh()
+      void refresh()
     }, 10_000)
 
     return () => {

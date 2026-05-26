@@ -123,7 +123,7 @@ export function VpsCard({ node, lists = [], onForceOutage, onAction }: Props) {
             </div>
           </div>
 
-          {node.targetsAssigned > 0 && (
+          {(node.targetsAssigned > 0 || node.targetsDone > 0) && (
             <div className="fnode__block">
               <div className="fnode__row">
                 <span className="muted">Targets</span>

@@ -95,10 +95,12 @@ export default function App() {
   }, [backendLive])
 
   // When real backend findings arrive, replace the mock findings entirely.
+  // Guard on raw (non-null) rather than state==='connected': apply() sets
+  // raw whenever a payload arrives, even before onConnect fires.
   useEffect(() => {
-    if (reconStats.state !== 'connected') return
+    if (!reconStats.raw) return
     setFindings(reconStats.findings)
-  }, [reconStats.state, reconStats.findings])
+  }, [reconStats.raw, reconStats.findings])
 
   // When real backend fleet status arrives, replace the mock fleet (display-only — control
   // buttons hit the real backend; auto-enrollment of discovered nodes is intentionally NOT pushed).
