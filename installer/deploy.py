@@ -225,7 +225,13 @@ def build_dashboard(args: argparse.Namespace) -> None:
         if _f.exists():
             _f.unlink()
             log(f'  removed stale file: {_f.relative_to(INSTALL_DIR)}')
-    run(['npm', 'ci', '--no-audit', '--no-fund', '--prefer-offline'], user=SERVICE_USER, cwd=dash)
+    # Clear npm cache and wipe node_modules to avoid stale/corrupted tarballs
+    # from prior installs (--prefer-offline can serve broken cached packages).
+    run(['npm', 'cache', 'clean', '--force'], user=SERVICE_USER, cwd=dash, check=False)
+    nm = dash / 'node_modules'
+    if nm.exists():
+        shutil.rmtree(nm)
+    run(['npm', 'ci', '--no-audit', '--no-fund'], user=SERVICE_USER, cwd=dash)
     run(['npm', 'run', 'build'], user=SERVICE_USER, cwd=dash,
         env={'RECONX_REPO': REPO_SLUG})
 
