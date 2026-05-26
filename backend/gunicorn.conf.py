@@ -8,8 +8,12 @@ bind = "0.0.0.0:5000"
 backlog = 2048
 
 # Worker Processes
-workers = multiprocessing.cpu_count() * 2 + 1
-worker_class = "eventlet"  # For WebSocket support
+# gthread avoids 502 crashes from eventlet + background daemon threads.
+# SocketIO uses async_mode='threading' which is compatible with gthread.
+# Keep workers=2 so only two processes spawn poll/liveness threads per session.
+workers = 2
+worker_class = "gthread"
+threads = 4
 worker_connections = 1000
 max_requests = 1000
 max_requests_jitter = 50
