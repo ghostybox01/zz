@@ -4025,15 +4025,17 @@ def _poll_live_results(session_id: str) -> None:
                     sftp.close()
                     # Parse crack.log progress while ssh is still open.
                     # The log is at {remote_dir}/crack.log (scanner cd {remote_dir}).
-                    # Strip pterm ANSI codes with sed so "[000021/642885]" parses.
+                    # pterm writes \r-separated progress updates on one line; strip
+                    # \r and ANSI codes, then take the LAST grep match (most recent).
                     try:
                         prev_progress = int(sess.get('last_progress', 0))
                         prev_ts = float(sess.get('last_progress_time', 0))
                         log_out = mgr.ssh_exec(
                             ip,
                             f"tail -1 {remote_dir}/crack.log 2>/dev/null"
+                            f" | tr '\\r' '\\n'"
                             f" | sed 's/\\x1b\\[[0-9;]*[mK]//g'"
-                            f" | grep -oP '\\[\\K[0-9]+(?=/)' || echo 0",
+                            f" | grep -oP '\\[\\K[0-9]+(?=/)' | tail -1 || echo 0",
                             10,
                         )
                         progress = int((log_out or '0').strip() or 0)
