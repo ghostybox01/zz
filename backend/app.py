@@ -306,9 +306,12 @@ def get_statistics():
     conn.close()
     
     total_urls = stats[1] if stats else 0
-    total_hits = stats[2] if stats else 0
     total_valid = stats[3] if stats else 0
     smtp_servers = stats[4] if stats and len(stats) > 4 else 0
+
+    # Derive total_hits from the actual credential rows so it matches
+    # type_counts rather than a stale statistics-table counter.
+    total_hits = sum(type_counts.values()) if type_counts else 0
     
     elapsed_time = time.time() - scan_start_time
     scan_rate = total_urls / elapsed_time if elapsed_time > 0 and total_urls > 0 else 0
@@ -3366,11 +3369,13 @@ def _liveness_monitor_loop() -> None:
                                 mgr.ssh_exec(
                                     ip,
                                     f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
+                                    f'command -v cpulimit >/dev/null 2>&1 || '
+                                    f'  apt-get install -y cpulimit -qq 2>/dev/null || true ; '
                                     f'pgrep -f "cpulimit.*{actual_pid}" >/dev/null 2>&1 || '
                                     f'( command -v cpulimit >/dev/null 2>&1 && '
                                     f'setsid nohup cpulimit -p {actual_pid} -l $_lim -q '
                                     f'</dev/null >/dev/null 2>&1 & )',
-                                    5,
+                                    20,  # allow time for apt-get if needed
                                 )
                             except Exception:
                                 pass
@@ -3389,11 +3394,18 @@ def _liveness_monitor_loop() -> None:
             if mutated:
                 with _crack_lock:
                     for sid, sess in sessions_copy.items():
-                        if sid in _crack_sessions and sess.get('status') == 'completed':
+                        if sid not in _crack_sessions:
+                            continue
+                        # Bug-fix: only apply 'completed' from the snapshot if the
+                        # live dict hasn't already been healed back to 'running'
+                        # by the poll thread between the snapshot and this write.
+                        if (sess.get('status') == 'completed' and
+                                _crack_sessions[sid].get('status') != 'running'):
                             _crack_sessions[sid].update({
                                 'status': 'completed',
                                 'finished_at': sess.get('finished_at'),
                             })
+                    # Also persists any PID updates applied earlier in the loop.
                     _save_crack_sessions(_crack_sessions)
                 try:
                     global _crack_sessions_mtime
@@ -3977,7 +3989,7 @@ def _poll_live_results(session_id: str) -> None:
             # Exit only on explicit terminal states.  'completed' set by the
             # liveness monitor may be wrong (stale PID) — verify scanner is
             # really gone before giving up.
-            if status == 'stopped':
+            if status in ('stopped', 'failed'):
                 break
             if status not in ('running', 'queued'):
                 # Re-check: if a reconx-scanner is still live on any worker,
@@ -4214,9 +4226,10 @@ def api_crack_reattach(sid):
     resets status to 'running', and restarts the poll thread."""
     with _crack_lock:
         _reload_crack_state_if_changed()
-        sess = _crack_sessions.get(sid)
-        if sess is None:
+        raw = _crack_sessions.get(sid)
+        if raw is None:
             return jsonify({'ok': False, 'error': 'session not found'}), 404
+        sess = dict(raw)  # snapshot inside lock — avoids TOCTOU on worker_ips read
 
     mgr = get_ssh_manager()
     if mgr is None:

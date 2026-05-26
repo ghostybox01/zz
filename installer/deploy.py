@@ -555,7 +555,33 @@ def main() -> int:
     print(f'        journalctl -u reconx-fleet-api -f')
     print(f'{GREEN}━' * 73 + RESET)
 
+    # Send Telegram notification if configured.
+    _send_telegram_update_notification(public_ip)
+
     return 0
+
+
+def _send_telegram_update_notification(public_ip: str) -> None:
+    """Fire-and-forget Telegram message: 'reconx done - update' on success."""
+    import json as _json
+    import urllib.request as _urlreq
+    cfg_path = INSTALL_DIR / 'backend' / 'config.json'
+    try:
+        with open(cfg_path) as _f:
+            cfg = _json.load(_f)
+        tg = cfg.get('telegram') or {}
+        token = str(tg.get('bot_token') or '')
+        chat_id = str(tg.get('chat_id') or '')
+        if not token or not chat_id:
+            return
+        msg = f'✅ reconx done - update\n🌐 {public_ip}'
+        url = f'https://api.telegram.org/bot{token}/sendMessage'
+        data = _json.dumps({'chat_id': chat_id, 'text': msg}).encode()
+        req = _urlreq.Request(url, data=data, headers={'Content-Type': 'application/json'})
+        _urlreq.urlopen(req, timeout=8)
+        print('[reconx] Telegram notification sent.')
+    except Exception as _e:
+        print(f'[reconx] Telegram notification skipped: {_e}')
 
 
 if __name__ == '__main__':
