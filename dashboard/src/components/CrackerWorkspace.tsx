@@ -525,18 +525,39 @@ export function CrackerWorkspace({
                           </button>
                         )}
                         {(s.status === 'completed' || s.status === 'stopped' || s.status === 'failed') && (
-                          <button
-                            type="button"
-                            className="btn-glass btn-glass--xs"
-                            onClick={() => {
-                              crack.remove(s.id)
-                                .then(() => setSessions((prev) => prev.filter((x) => x.id !== s.id)))
-                                .catch(() => { /* swallow */ })
-                            }}
-                            style={{ marginLeft: '0.4rem' }}
-                          >
-                            Dismiss
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              className="btn-glass btn-glass--xs"
+                              title="Find running scanner on workers and resume this session"
+                              onClick={() => {
+                                crack.reattach(s.id)
+                                  .then((r) => {
+                                    if (r.ok) {
+                                      crack.list().then((rr) => { if (Array.isArray(rr?.sessions)) setSessions(rr.sessions) }).catch(() => { /* swallow */ })
+                                    } else {
+                                      alert(r.error ?? 'No running scanner found on workers')
+                                    }
+                                  })
+                                  .catch(() => alert('Reattach request failed'))
+                              }}
+                              style={{ marginLeft: '0.4rem' }}
+                            >
+                              Reattach
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-glass btn-glass--xs"
+                              onClick={() => {
+                                crack.remove(s.id)
+                                  .then(() => setSessions((prev) => prev.filter((x) => x.id !== s.id)))
+                                  .catch(() => { /* swallow */ })
+                              }}
+                              style={{ marginLeft: '0.4rem' }}
+                            >
+                              Dismiss
+                            </button>
+                          </>
                         )}
                       </li>
                     )

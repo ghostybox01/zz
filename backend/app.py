@@ -3338,37 +3338,44 @@ def _liveness_monitor_loop() -> None:
                 alive_count = 0
                 for ip, pid in pids.items():
                     try:
-                        # Check by session directory name so we catch the
-                        # actual reconx-scanner even when the stored PID is
-                        # the bash wrapper that exits after echoing $!.
+                        # Primary: find ANY reconx-scanner on this worker.
+                        # The stored PID is the setsid/nohup wrapper which may
+                        # differ after a gunicorn restart (PID recycled). Using
+                        # pgrep -of avoids relying on the stored value at all.
                         out = mgr.ssh_exec(
                             ip,
-                            f'pgrep -f "reconx-scanner.*crack_{sid}" > /dev/null 2>&1'
-                            f' && echo alive'
-                            f' || kill -0 {int(pid)} 2>/dev/null && echo alive'
-                            f' || echo dead',
-                            5,
+                            f'_p=$(pgrep -of reconx-scanner 2>/dev/null) ; '
+                            f'[ -n "$_p" ] && echo "alive:$_p" || '
+                            f'kill -0 {int(pid)} 2>/dev/null && echo "alive:{int(pid)}" || '
+                            f'echo dead',
+                            8,
                         )
-                        if (out or '').strip().endswith('alive'):
+                        result = (out or '').strip()
+                        if result.startswith('alive'):
                             alive_count += 1
-                            # Ensure cpulimit is throttling this PID at ≤90%
-                            # per core. Handles sessions started before the
-                            # launch-command fix, or workers where cpulimit
-                            # died and was never restarted.
+                            # Sync stored PID if scanner is on a different PID now.
+                            parts = result.split(':', 1)
+                            actual_pid = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else int(pid)
+                            if actual_pid != int(pid):
+                                with _crack_lock:
+                                    if sid in _crack_sessions:
+                                        _crack_sessions[sid].setdefault('remote_pids', {})[ip] = actual_pid
+                                        mutated = True
+                            # Ensure cpulimit is throttling to ≤90% CPU.
                             try:
                                 mgr.ssh_exec(
                                     ip,
                                     f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
-                                    f'pgrep -f "cpulimit.*{int(pid)}" >/dev/null 2>&1 || '
+                                    f'pgrep -f "cpulimit.*{actual_pid}" >/dev/null 2>&1 || '
                                     f'( command -v cpulimit >/dev/null 2>&1 && '
-                                    f'setsid nohup cpulimit -p {int(pid)} -l $_lim -q '
+                                    f'setsid nohup cpulimit -p {actual_pid} -l $_lim -q '
                                     f'</dev/null >/dev/null 2>&1 & )',
                                     5,
                                 )
                             except Exception:
                                 pass
                     except Exception:
-                        alive_count += 1  # transient SSH blip — stay alive
+                        alive_count += 1  # transient SSH blip — keep alive
                 if alive_count == 0:
                     sess['status'] = 'completed'
                     sess['finished_at'] = datetime.now().isoformat()
@@ -3964,8 +3971,40 @@ def _poll_live_results(session_id: str) -> None:
             with _crack_lock:
                 _reload_crack_state_if_changed()
                 sess = dict(_crack_sessions.get(session_id) or {})
-            if not sess or sess.get('status') not in ('running', 'queued'):
+            if not sess:
                 break
+            status = sess.get('status', '')
+            # Exit only on explicit terminal states.  'completed' set by the
+            # liveness monitor may be wrong (stale PID) — verify scanner is
+            # really gone before giving up.
+            if status == 'stopped':
+                break
+            if status not in ('running', 'queued'):
+                # Re-check: if a reconx-scanner is still live on any worker,
+                # reset status to 'running' so polling continues.
+                mgr_check = get_ssh_manager()
+                worker_ips_check = (
+                    list((sess.get('remote_pids') or {}).keys())
+                    or list(sess.get('worker_ips') or [])
+                )
+                scanner_alive = False
+                if mgr_check and worker_ips_check:
+                    for _ip in worker_ips_check:
+                        try:
+                            _p = (mgr_check.ssh_exec(_ip, 'pgrep -of reconx-scanner 2>/dev/null || echo ""', 5) or '').strip()
+                            if _p.isdigit():
+                                scanner_alive = True
+                                # Heal the session back to 'running' and update PID.
+                                _update_crack_session(session_id, lambda s, __p=int(_p), __ip=_ip: s.update({
+                                    'status': 'running',
+                                    'remote_pids': dict({**dict(s.get('remote_pids') or {}), __ip: __p}),
+                                }))
+                                print(f'[live-poll] {session_id}: healed to running (scanner pid {_p} on {_ip})')
+                                break
+                        except Exception:
+                            pass
+                if not scanner_alive:
+                    break
             remote_dir = sess.get('remote_dir') or ''
             worker_ips = (
                 list((sess.get('remote_pids') or {}).keys())
@@ -4166,6 +4205,56 @@ def api_crack_sessions():
     out = [_crack_session_view(s) for s in sessions]
     out.sort(key=lambda s: s.get('created_at') or '', reverse=True)
     return jsonify({'sessions': out})
+
+
+@app.route('/api/crack/<sid>/reattach', methods=['POST'])
+def api_crack_reattach(sid):
+    """Re-attach a session that was incorrectly marked completed/stopped.
+    Finds any running reconx-scanner on each worker, updates remote_pids,
+    resets status to 'running', and restarts the poll thread."""
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        sess = _crack_sessions.get(sid)
+        if sess is None:
+            return jsonify({'ok': False, 'error': 'session not found'}), 404
+
+    mgr = get_ssh_manager()
+    if mgr is None:
+        return jsonify({'ok': False, 'error': 'SSH manager not available'}), 503
+
+    worker_ips = (
+        list((sess.get('remote_pids') or {}).keys())
+        or list(sess.get('worker_ips') or [])
+    )
+    found_pids: dict = {}
+    for ip in worker_ips:
+        try:
+            out = (mgr.ssh_exec(ip, 'pgrep -of reconx-scanner 2>/dev/null || echo ""', 8) or '').strip()
+            if out.isdigit():
+                found_pids[ip] = int(out)
+        except Exception as e:
+            print(f'[reattach] {ip}: {e}')
+
+    if not found_pids:
+        return jsonify({'ok': False, 'error': 'no running reconx-scanner found on any worker'}), 409
+
+    _update_crack_session(sid, lambda s: s.update({
+        'status': 'running',
+        'remote_pids': dict({**dict(s.get('remote_pids') or {}), **found_pids}),
+        'last_error': None,
+    }))
+
+    # Restart poll thread if not already running.
+    existing = [t for t in threading.enumerate() if t.name == f'crack-poll-{sid}']
+    if not existing:
+        threading.Thread(
+            target=_poll_live_results,
+            args=(sid,),
+            name=f'crack-poll-{sid}',
+            daemon=True,
+        ).start()
+
+    return jsonify({'ok': True, 'found_pids': found_pids})
 
 
 @app.route('/api/crack/<sid>/stop', methods=['POST'])
