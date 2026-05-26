@@ -3941,116 +3941,119 @@ def _poll_live_results(session_id: str) -> None:
     import time as _time
     POLL_INTERVAL = 30
     while True:
-        # Poll immediately (no leading sleep) so backend restarts pick up
-        # progress right away instead of waiting a full interval.
-        with _crack_lock:
-            _reload_crack_state_if_changed()
-            sess = dict(_crack_sessions.get(session_id) or {})
-        if not sess or sess.get('status') not in ('running', 'queued'):
-            break
-        remote_dir = sess.get('remote_dir') or ''
-        worker_ips = (
-            list((sess.get('remote_pids') or {}).keys())
-            or list(sess.get('worker_ips') or [])
-        )
-        if not remote_dir or not worker_ips:
-            _time.sleep(POLL_INTERVAL)
-            continue
-        mgr = get_ssh_manager()
-        if not mgr:
-            _time.sleep(POLL_INTERVAL)
-            continue
-        inserted_total = 0
-        for ip in worker_ips:
-            try:
-                ssh = mgr._get_ssh_client(ip, 30)
-                sftp = ssh.open_sftp()
-                sftp.get_channel().settimeout(30)
-                result_path = f'{remote_dir}/ResultJS'
+        try:
+            # Poll immediately (no leading sleep) so backend restarts pick up
+            # progress right away instead of waiting a full interval.
+            with _crack_lock:
+                _reload_crack_state_if_changed()
+                sess = dict(_crack_sessions.get(session_id) or {})
+            if not sess or sess.get('status') not in ('running', 'queued'):
+                break
+            remote_dir = sess.get('remote_dir') or ''
+            worker_ips = (
+                list((sess.get('remote_pids') or {}).keys())
+                or list(sess.get('worker_ips') or [])
+            )
+            if not remote_dir or not worker_ips:
+                _time.sleep(POLL_INTERVAL)
+                continue
+            mgr = get_ssh_manager()
+            if not mgr:
+                _time.sleep(POLL_INTERVAL)
+                continue
+            inserted_total = 0
+            for ip in worker_ips:
                 try:
-                    remote_files = sftp.listdir(result_path)
-                except Exception:
-                    sftp.close(); ssh.close()
-                    continue
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                for fname in remote_files:
-                    mapping = FILE_MAPPING.get(fname)
-                    if not mapping:
-                        continue
-                    cred_type, db_status = mapping
-                    import tempfile as _tmpmod
-                    with _tmpmod.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
-                        tmp_path = tf.name
+                    ssh = mgr._get_ssh_client(ip, 30)
+                    sftp = ssh.open_sftp()
+                    sftp.get_channel().settimeout(30)
+                    result_path = f'{remote_dir}/ResultJS'
                     try:
-                        sftp.get(f'{result_path}/{fname}', tmp_path)
-                        with open(tmp_path, 'r', errors='ignore') as fh:
-                            for line in fh:
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                parts = line.split(':', 1)
-                                if len(parts) < 2:
-                                    continue
-                                source_url = parts[0].strip()
-                                key_and_rest = parts[1].strip()
-                                key_parts = key_and_rest.split(':', 1)
-                                key_value = key_parts[0].strip()
-                                metadata = key_parts[1].strip() if len(key_parts) > 1 else ''
-                                cursor.execute(
-                                    'INSERT OR IGNORE INTO credentials '
-                                    '(type, key_value, source_url, metadata, status, session_id) '
-                                    'VALUES (?, ?, ?, ?, ?, ?)',
-                                    (cred_type, key_value, source_url, metadata, db_status, session_id),
-                                )
-                                if cursor.rowcount > 0:
-                                    inserted_total += 1
-                    except Exception as e:
-                        print(f'[live-poll] {ip}/{fname}: {e}')
-                    finally:
+                        remote_files = sftp.listdir(result_path)
+                    except Exception:
+                        sftp.close(); ssh.close()
+                        continue
+                    conn = sqlite3.connect(DB_PATH)
+                    cursor = conn.cursor()
+                    for fname in remote_files:
+                        mapping = FILE_MAPPING.get(fname)
+                        if not mapping:
+                            continue
+                        cred_type, db_status = mapping
+                        import tempfile as _tmpmod
+                        with _tmpmod.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
+                            tmp_path = tf.name
                         try:
-                            os.unlink(tmp_path)
-                        except Exception:
-                            pass
-                conn.commit()
-                conn.close()
-                sftp.close()
-                # Parse crack.log progress while ssh is still open.
-                # The log is at {remote_dir}/crack.log (scanner runs cd {remote_dir}).
-                # Strip pterm ANSI codes before grep so "[000021/642885]" is parseable.
+                            sftp.get(f'{result_path}/{fname}', tmp_path)
+                            with open(tmp_path, 'r', errors='ignore') as fh:
+                                for line in fh:
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    parts = line.split(':', 1)
+                                    if len(parts) < 2:
+                                        continue
+                                    source_url = parts[0].strip()
+                                    key_and_rest = parts[1].strip()
+                                    key_parts = key_and_rest.split(':', 1)
+                                    key_value = key_parts[0].strip()
+                                    metadata = key_parts[1].strip() if len(key_parts) > 1 else ''
+                                    cursor.execute(
+                                        'INSERT OR IGNORE INTO credentials '
+                                        '(type, key_value, source_url, metadata, status, session_id) '
+                                        'VALUES (?, ?, ?, ?, ?, ?)',
+                                        (cred_type, key_value, source_url, metadata, db_status, session_id),
+                                    )
+                                    if cursor.rowcount > 0:
+                                        inserted_total += 1
+                        except Exception as e:
+                            print(f'[live-poll] {ip}/{fname}: {e}')
+                        finally:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                    conn.commit()
+                    conn.close()
+                    sftp.close()
+                    # Parse crack.log progress while ssh is still open.
+                    # The log is at {remote_dir}/crack.log (scanner cd {remote_dir}).
+                    # Strip pterm ANSI codes with sed so "[000021/642885]" parses.
+                    try:
+                        prev_progress = int(sess.get('last_progress', 0))
+                        prev_ts = float(sess.get('last_progress_time', 0))
+                        log_out = mgr.ssh_exec(
+                            ip,
+                            f"tail -1 {remote_dir}/crack.log 2>/dev/null"
+                            f" | sed 's/\\x1b\\[[0-9;]*[mK]//g'"
+                            f" | grep -oP '\\[\\K[0-9]+(?=/)' || echo 0",
+                            10,
+                        )
+                        progress = int((log_out or '0').strip() or 0)
+                        now = _time.time()
+                        elapsed = now - prev_ts if prev_ts > 0 else POLL_INTERVAL
+                        speed = round((progress - prev_progress) / elapsed, 1) if elapsed > 0 and progress >= prev_progress else 0
+                        _update_crack_session(
+                            session_id,
+                            lambda s, _p=progress, _t=now, _sp=speed: s.update({
+                                'last_progress': _p,
+                                'last_progress_time': _t,
+                                'last_speed': _sp,
+                            }),
+                        )
+                    except Exception as _pe:
+                        print(f'[live-poll] progress parse {ip}: {_pe}')
+                    ssh.close()
+                except Exception as e:
+                    print(f'[live-poll] {ip}: {e}')
+            if inserted_total > 0:
+                print(f'[live-poll] {session_id}: +{inserted_total} new credentials')
                 try:
-                    prev_progress = int(sess.get('last_progress', 0))
-                    prev_ts = float(sess.get('last_progress_time', 0))
-                    log_out = mgr.ssh_exec(
-                        ip,
-                        f"tail -1 {remote_dir}/crack.log 2>/dev/null"
-                        f" | sed 's/\\x1b\\[[0-9;]*[mK]//g'"
-                        f" | grep -oP '\\[\\K[0-9]+(?=/)' || echo 0",
-                        10,
-                    )
-                    progress = int((log_out or '0').strip() or 0)
-                    now = _time.time()
-                    elapsed = now - prev_ts if prev_ts > 0 else POLL_INTERVAL
-                    speed = round((progress - prev_progress) / elapsed, 1) if elapsed > 0 and progress >= prev_progress else 0
-                    _update_crack_session(
-                        session_id,
-                        lambda s, _p=progress, _t=now, _sp=speed: s.update({
-                            'last_progress': _p,
-                            'last_progress_time': _t,
-                            'last_speed': _sp,
-                        }),
-                    )
-                except Exception as _pe:
-                    print(f'[live-poll] progress parse {ip}: {_pe}')
-                ssh.close()
-            except Exception as e:
-                print(f'[live-poll] {ip}: {e}')
-        if inserted_total > 0:
-            print(f'[live-poll] {session_id}: +{inserted_total} new credentials')
-            try:
-                socketio.emit('stats_update', get_statistics())
-            except Exception:
-                pass
+                    socketio.emit('stats_update', get_statistics())
+                except Exception:
+                    pass
+        except Exception as _loop_err:
+            print(f'[live-poll] loop error for {session_id}: {_loop_err}')
         _time.sleep(POLL_INTERVAL)
 
 
