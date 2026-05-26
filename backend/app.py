@@ -4011,6 +4011,13 @@ def _poll_live_results(session_id: str) -> None:
                                         'VALUES (?, ?, ?, ?, ?, ?)',
                                         (cred_type, key_value, source_url, metadata, db_status, session_id),
                                     )
+                                    if cursor.rowcount == 0:
+                                        # Already in DB; retro-attribute if session_id was never set.
+                                        cursor.execute(
+                                            'UPDATE credentials SET session_id = ? '
+                                            'WHERE type = ? AND key_value = ? AND session_id IS NULL',
+                                            (session_id, cred_type, key_value),
+                                        )
                                     if cursor.rowcount > 0:
                                         inserted_total += 1
                         except Exception as e:
