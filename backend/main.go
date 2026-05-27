@@ -3738,8 +3738,6 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.SlackBotTokenPattern, "Slack Bot Token"},
 		{a.SlackUserTokenPattern, "Slack User Token"},
 		{a.SlackWebhookPattern, "Slack Webhook"},
-		{a.DiscordBotTokenPattern, "Discord Bot Token"},
-		{a.DiscordWebhookPattern, "Discord Webhook"},
 		{a.CloudflareGlobalPattern, "Cloudflare Global"},
 		{a.DigitalOceanPATPattern, "DigitalOcean PAT"},
 		{a.SentryDSNPattern, "Sentry DSN"},

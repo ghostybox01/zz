@@ -95,15 +95,6 @@ export const SCAN_FILES: readonly ScanFileSchema[] = [
     toDetail: (_u, [t]) => maskOne(t),
   },
   {
-    file: 'valid_discord_webhooks.txt',
-    provider: 'Discord',
-    severity: 'medium',
-    ruleLabel: 'Discord webhook URL',
-    hasSourceUrl: true,
-    trailingFields: 1,
-    toDetail: (_u, [w]) => w ?? '',
-  },
-  {
     file: 'valid_slack_webhooks.txt',
     provider: 'Slack',
     severity: 'medium',

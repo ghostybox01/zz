@@ -56,7 +56,6 @@ const PROVIDER_SEVERITY: Record<string, FindingSeverity> = {
   Sentry: 'medium',
   NPM: 'medium',
   PyPI: 'medium',
-  Discord: 'medium',
   Slack: 'medium',
   JWT: 'high',
   Azure: 'high',

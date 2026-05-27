@@ -77,8 +77,6 @@ FILE_MAPPING = {
     'Slack_Bot_Token_found.txt':       ('Slack',         'valid'),
     'Slack_User_Token_found.txt':      ('Slack',         'valid'),
     'Slack_Webhook_found.txt':         ('Slack',         'hit'),
-    'Discord_Bot_Token_found.txt':     ('Discord',       'valid'),
-    'Discord_Webhook_found.txt':       ('Discord',       'hit'),
     'Cloudflare_Global_found.txt':     ('Cloudflare',    'valid'),
     'DigitalOcean_PAT_found.txt':      ('DigitalOcean',  'valid'),
     'Heroku_API_Key_found.txt':        ('Heroku',        'valid'),
@@ -6105,7 +6103,6 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': f'filetype:env "SPARKPOST_API_KEY" {_NOISE_NO_GH}', 'notes': '.env with SparkPost key'},
                 {'query': f'filetype:json "private_key_id" "service_account" {_NOISE}', 'notes': 'GCP service-account JSON'},
                 {'query': f'intext:"slack_token" "xoxp-" {_NOISE_NO_GH}', 'notes': 'Slack tokens leaked'},
-                {'query': f'intext:"DISCORD_TOKEN" filetype:env {_NOISE_NO_GH}', 'notes': '.env with Discord token'},
             ],
             'shodan': [
                 {'query': 'http.html:"api_key" http.html:"sendgrid" http.status:200', 'notes': 'SendGrid keys'},
