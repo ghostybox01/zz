@@ -130,8 +130,9 @@ def count_smtp_hits():
         return 0
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
+    cursor.execute('PRAGMA journal_mode=WAL')
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS credentials (

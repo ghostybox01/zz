@@ -10,15 +10,14 @@ backlog = 2048
 # Worker Processes
 # gthread avoids 502 crashes from eventlet + background daemon threads.
 # SocketIO uses async_mode='threading' which is compatible with gthread.
-# Keep workers=2 so only two processes spawn poll/liveness threads per session.
-workers = 2
+workers = 4
 worker_class = "gthread"
-threads = 4
+threads = 8
 worker_connections = 1000
 max_requests = 1000
 max_requests_jitter = 50
 timeout = 300
-keepalive = 5
+keepalive = 65
 
 # Logging — send to stdout/stderr so systemd-journald captures everything
 accesslog = "-"

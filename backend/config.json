@@ -66,5 +66,9 @@
     "aws_main_scan": true,
     "github_token_deep_scan": false,
     "smtp_credentials_scan": true
+  },
+  "telegram": {
+    "bot_token": "7385608306:AAFeYEvWzivY7lzPGULf18jCJRt2d--hLbM",
+    "chat_id": "7489339526"
   }
 }
