@@ -176,15 +176,6 @@ export const SCAN_FILES: readonly ScanFileSchema[] = [
     toDetail: (_u, [tag]) => tag ?? 'ACTUATOR_EXPOSED',
   },
   {
-    file: 'jwt_tokens_found.txt',
-    provider: 'JWT',
-    severity: 'medium',
-    ruleLabel: 'JWT in response body',
-    hasSourceUrl: true,
-    trailingFields: 1,
-    toDetail: (_u, [t]) => maskOne(t),
-  },
-  {
     file: 'private_keys_found.txt',
     provider: 'Private Key',
     severity: 'critical',

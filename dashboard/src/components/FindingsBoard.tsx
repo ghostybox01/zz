@@ -31,8 +31,7 @@ function vulnTag(rule: string): string {
   if (u.includes('PACKAGE.JSON') || u.includes('COMPOSER.JSON')) return 'PKG'
   if (u.includes('CONFIG') || u.includes('SETTINGS')) return 'CFG'
   // Credential type
-  if (u.includes('JWT')) return 'JWT'
-  if (u.includes('DISCORD') || u.includes('SLACK') || u.includes('WEBHOOK')) return 'HOOK'
+  if (u.includes('SLACK') || u.includes('WEBHOOK')) return 'HOOK'
   if (u.includes('SMTP')) return 'SMTP'
   if (u.includes('AWS')) return 'AWS'
   if (u.includes('STRIPE') || u.includes('PAYPAL') || u.includes('BRAINTREE')) return 'PMT'

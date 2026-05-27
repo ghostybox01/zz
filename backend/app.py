@@ -85,7 +85,6 @@ FILE_MAPPING = {
     'NPM_Token_found.txt':             ('NPM',           'valid'),
     'PyPI_Token_found.txt':            ('PyPI',          'valid'),
     'GitLab_PAT_found.txt':            ('GitLab',        'valid'),
-    'JWT_found.txt':                   ('JWT',           'hit'),
     'Postmark_Server_Token_found.txt': ('Postmark',      'valid'),
     'Mailjet_API_Key_found.txt':       ('Mailjet',       'valid'),
     'AWS_SNS_Topic_ARN_found.txt':     ('AWS SNS',       'hit'),
@@ -246,7 +245,7 @@ def import_from_files():
 
                     # Insert both 'valid' and 'hit' credential rows into the
                     # DB.  Previously 'hit' lines were only counted in memory
-                    # and never stored, so Discord Webhook / JWT / SMTP hits
+                    # and never stored, so SMTP hits
                     # would vanish on restart.  Storing them as status='hit'
                     # lets the stats query count them and the admin inspect
                     # them if needed.
@@ -6138,7 +6137,6 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': f'filetype:env "DATABASE_URL" "mysql://" {_NOISE_NO_GH}', 'notes': '.env with MySQL URL'},
                 {'query': f'filetype:env "DATABASE_URL" "mongodb://" {_NOISE_NO_GH}', 'notes': '.env with MongoDB URL'},
                 {'query': f'filetype:env "SECRET_KEY" "DEBUG" {_NOISE_NO_GH}', 'notes': 'Django-style .env'},
-                {'query': f'filetype:env "JWT_SECRET" {_NOISE_NO_GH}', 'notes': '.env with JWT secret'},
                 {'query': f'filetype:env "REDIS_PASSWORD" {_NOISE_NO_GH}', 'notes': '.env with Redis password'},
                 {'query': f'filetype:env "APP_KEY" "APP_ENV=production" {_NOISE_NO_GH}', 'notes': 'Laravel prod .env'},
                 {'query': f'filetype:env "GITHUB_CLIENT_SECRET" {_NOISE_NO_GH}', 'notes': '.env with GitHub OAuth secret'},
@@ -6154,7 +6152,6 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
                 {'query': '"APP_KEY=" "APP_SECRET=" http.status:200', 'notes': 'App key/secret pairs'},
                 {'query': 'http.html:"DATABASE_URL" http.status:200', 'notes': 'Database URLs'},
                 {'query': 'http.title:"Laravel" http.html:".env" http.status:200', 'notes': 'Laravel env exposed'},
-                {'query': '"JWT_SECRET" http.html:"NODE_ENV" http.status:200', 'notes': 'Node.js env files'},
                 {'query': 'http.html:"REDIS_PASSWORD" http.status:200', 'notes': 'Redis auth in env'},
                 {'query': 'http.html:".env.production" http.status:200', 'notes': '.env.production served'},
                 {'query': 'http.html:"config/database.yml" http.status:200', 'notes': 'Rails db config served'},
@@ -6162,7 +6159,6 @@ def _template_dorks(category: str, platform: str, count: int) -> list:
             'fofa': [
                 {'query': 'body="DB_PASSWORD" && body="APP_KEY" && status_code=200', 'notes': '.env file content'},
                 {'query': 'body="DATABASE_URL" && status_code=200', 'notes': 'Database connection strings'},
-                {'query': 'body="JWT_SECRET" && status_code=200', 'notes': 'JWT secrets exposed'},
                 {'query': 'body="REDIS_PASSWORD" && status_code=200', 'notes': 'Redis passwords'},
                 {'query': 'body="APP_SECRET" && body="APP_KEY" && status_code=200', 'notes': 'App secrets'},
                 {'query': 'title=".env" && status_code=200', 'notes': 'Literal .env files served'},

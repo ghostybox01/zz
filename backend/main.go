@@ -202,8 +202,6 @@ type AWSScanner struct {
 	SlackBotTokenPattern    *regexp.Regexp
 	SlackUserTokenPattern   *regexp.Regexp
 	SlackWebhookPattern     *regexp.Regexp
-	DiscordBotTokenPattern  *regexp.Regexp
-	DiscordWebhookPattern   *regexp.Regexp
 	CloudflareTokenPattern  *regexp.Regexp
 	CloudflareGlobalPattern *regexp.Regexp
 	DigitalOceanPATPattern  *regexp.Regexp
@@ -213,7 +211,6 @@ type AWSScanner struct {
 	NpmTokenPattern         *regexp.Regexp
 	PyPITokenPattern        *regexp.Regexp
 	GitLabPATPattern        *regexp.Regexp
-	JWTPattern              *regexp.Regexp
 	PostmarkAPIKeyPattern   *regexp.Regexp
 	SparkPostAPIKeyPattern  *regexp.Regexp
 	MailtrapAPIKeyPattern   *regexp.Regexp
@@ -609,9 +606,6 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		SlackBotTokenPattern:  regexp.MustCompile(`xoxb-[0-9]{10,}-[0-9]{10,}-[A-Za-z0-9]{20,}`),
 		SlackUserTokenPattern: regexp.MustCompile(`xox[parsi]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{20,}`),
 		SlackWebhookPattern:   regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}`),
-		// Discord — bot token (3 base64 parts), webhook URLs
-		DiscordBotTokenPattern: regexp.MustCompile(`[MN][A-Za-z0-9_-]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}`),
-		DiscordWebhookPattern:  regexp.MustCompile(`https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{17,20}/[\w-]{60,80}`),
 		// Cloudflare — scoped tokens & legacy global keys
 		CloudflareTokenPattern:  regexp.MustCompile(`[A-Za-z0-9_-]{40}`), // narrow via context elsewhere (Bearer + cloudflare)
 		CloudflareGlobalPattern: regexp.MustCompile(`(?i)cloudflare[^\n]*[:=]([a-f0-9]{37})`),
@@ -629,8 +623,6 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		PyPITokenPattern: regexp.MustCompile(`pypi-[A-Za-z0-9_-]{50,}`),
 		// GitLab PAT (classic and personal)
 		GitLabPATPattern: regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`),
-		// JWT — three base64url-encoded parts
-		JWTPattern: regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
 		// Postmark server token (UUID format)
 		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)(?:POSTMARK_SERVER_TOKEN|postmark[^\n]*server[^\n]*token)[\s:="']+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
 		// SparkPost API key (40 hex chars)
@@ -3744,7 +3736,6 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.NpmTokenPattern, "NPM Token"},
 		{a.PyPITokenPattern, "PyPI Token"},
 		{a.GitLabPATPattern, "GitLab PAT"},
-		{a.JWTPattern, "JWT"},
 		{a.AWSSNSTopicARNPattern, "AWS SNS Topic ARN"},
 	}
 
@@ -3755,15 +3746,13 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 				a.logFound(check.Name, key, sourceURL)
 				a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), strings.ReplaceAll(check.Name, " ", "_")+"_found.txt")
 
-				if check.Name != "JWT" {
-					displayKey := key
-					if len(displayKey) > 100 {
-						displayKey = displayKey[:100] + "..."
-					}
-					msg := a.tgHit("🔍", check.Name, sourceURL) + fmt.Sprintf(
-						"Value : %s\n", displayKey)
-					go a.sendTelegram(msg)
+				displayKey := key
+				if len(displayKey) > 100 {
+					displayKey = displayKey[:100] + "..."
 				}
+				msg := a.tgHit("🔍", check.Name, sourceURL) + fmt.Sprintf(
+					"Value : %s\n", displayKey)
+				go a.sendTelegram(msg)
 
 				globalCounters.mu.Lock()
 				globalCounters.APIsFoundTotal++

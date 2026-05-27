@@ -57,7 +57,6 @@ const PROVIDER_SEVERITY: Record<string, FindingSeverity> = {
   NPM: 'medium',
   PyPI: 'medium',
   Slack: 'medium',
-  JWT: 'high',
   Azure: 'high',
   Tencent: 'medium',
   XSMTP: 'medium',
