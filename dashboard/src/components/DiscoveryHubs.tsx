@@ -34,7 +34,8 @@ const HUBS: readonly HubMeta[] = [
     match: (f) => f.provider === 'AWS',
     headline: (rs) => {
       const max = Math.max(0, ...rs.map((f) => f.details?.sesQuota?.max24h ?? 0))
-      return { k: 'MAX 24h QUOTA', v: max > 0 ? fmtInt(max) : '—' }
+      if (max > 0) return { k: 'MAX 24h QUOTA', v: fmtInt(max) }
+      return { k: 'ACCOUNTS', v: String(rs.length) }
     },
   },
   {
@@ -42,7 +43,8 @@ const HUBS: readonly HubMeta[] = [
     match: (f) => f.provider === 'Stripe',
     headline: (rs) => {
       const live = rs.filter((f) => f.details?.stripe?.livemode).length
-      return { k: 'LIVE-MODE KEYS', v: String(live) }
+      if (live > 0) return { k: 'LIVE-MODE KEYS', v: String(live) }
+      return { k: 'KEYS', v: String(rs.length) }
     },
   },
   {
@@ -50,20 +52,26 @@ const HUBS: readonly HubMeta[] = [
     match: (f) => f.provider === 'SendGrid',
     headline: (rs) => {
       const d = new Set(rs.flatMap((f) => f.details?.senderDomains ?? [])).size
-      return { k: 'VERIFIED DOMAINS', v: String(d) }
+      if (d > 0) return { k: 'VERIFIED DOMAINS', v: String(d) }
+      return { k: 'KEYS', v: String(rs.length) }
     },
   },
   {
     key: 'mailgun', label: 'Mailgun', accent: '#f06b66',
     match: (f) => f.provider === 'Mailgun',
-    headline: (rs) => ({ k: 'VALIDATED', v: String(rs.filter((f) => f.details?.validated).length) }),
+    headline: (rs) => {
+      const validated = rs.filter((f) => f.details?.validated).length
+      if (validated > 0) return { k: 'VALIDATED', v: String(validated) }
+      return { k: 'KEYS', v: String(rs.length) }
+    },
   },
   {
     key: 'brevo', label: 'Brevo', accent: '#0b996e',
     match: (f) => f.provider === 'Brevo',
     headline: (rs) => {
       const credits = rs.reduce((s, f) => s + (f.details?.monthlyCredits ?? 0), 0)
-      return { k: 'CREDITS / MO', v: credits > 0 ? fmtInt(credits) : '—' }
+      if (credits > 0) return { k: 'CREDITS / MO', v: fmtInt(credits) }
+      return { k: 'KEYS', v: String(rs.length) }
     },
   },
   {
@@ -71,7 +79,8 @@ const HUBS: readonly HubMeta[] = [
     match: (f) => f.provider === 'Twilio',
     headline: (rs) => {
       const nums = rs.reduce((s, f) => s + (f.details?.twilio?.numbers ?? 0), 0)
-      return { k: 'PHONE NUMBERS', v: String(nums) }
+      if (nums > 0) return { k: 'PHONE NUMBERS', v: String(nums) }
+      return { k: 'KEYS', v: String(rs.length) }
     },
   },
   {
@@ -79,18 +88,27 @@ const HUBS: readonly HubMeta[] = [
     match: (f) => f.provider === 'GitHub',
     headline: (rs) => {
       const repos = rs.reduce((s, f) => s + (f.details?.github?.repos ?? 0), 0)
-      return { k: 'REPOS', v: fmtInt(repos) }
+      if (repos > 0) return { k: 'REPOS', v: fmtInt(repos) }
+      return { k: 'TOKENS', v: String(rs.length) }
     },
   },
   {
     key: 'openai', label: 'OpenAI', accent: '#10a37f',
     match: (f) => f.provider === 'OpenAI',
-    headline: (rs) => ({ k: 'MODELS', v: String(rs.reduce((s, f) => s + (f.details?.modelsAvailable ?? 0), 0)) }),
+    headline: (rs) => {
+      const models = rs.reduce((s, f) => s + (f.details?.modelsAvailable ?? 0), 0)
+      if (models > 0) return { k: 'MODELS', v: String(models) }
+      return { k: 'KEYS', v: String(rs.length) }
+    },
   },
   {
     key: 'anthropic', label: 'Anthropic', accent: '#cd9d6c',
     match: (f) => f.provider === 'Anthropic',
-    headline: (rs) => ({ k: 'MODELS', v: String(rs.reduce((s, f) => s + (f.details?.modelsAvailable ?? 0), 0)) }),
+    headline: (rs) => {
+      const models = rs.reduce((s, f) => s + (f.details?.modelsAvailable ?? 0), 0)
+      if (models > 0) return { k: 'MODELS', v: String(models) }
+      return { k: 'KEYS', v: String(rs.length) }
+    },
   },
   {
     key: 'gcp', label: 'GCP', accent: '#4285f4',
@@ -100,7 +118,11 @@ const HUBS: readonly HubMeta[] = [
   {
     key: 'smtp', label: 'SMTP', accent: '#fbbf24',
     match: (f) => f.provider === 'SMTP',
-    headline: (rs) => ({ k: 'HOSTS', v: String(new Set(rs.map((f) => f.details?.smtp?.host).filter(Boolean)).size) }),
+    headline: (rs) => {
+      const hosts = new Set(rs.map((f) => f.details?.smtp?.host).filter(Boolean)).size
+      if (hosts > 0) return { k: 'HOSTS', v: String(hosts) }
+      return { k: 'SERVERS', v: String(rs.length) }
+    },
   },
 ]
 
