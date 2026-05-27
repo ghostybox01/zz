@@ -59,6 +59,7 @@ export function CrackerWorkspace({
   onToast,
 }: Props) {
   const [viewStats, setViewStats] = useState(false)
+  const [statusFilter, setStatusFilter] = useState<'all' | 'valid' | 'hit'>('all')
   const [config, setConfig] = useState<ReconScannerConfig | null>(null)
   const saveSeq = useRef(0)
 
@@ -314,6 +315,11 @@ export function CrackerWorkspace({
     }
   }
 
+  const filteredFindings = useMemo(() => {
+    if (statusFilter === 'all') return findings
+    return findings.filter((f) => f.status === statusFilter)
+  }, [findings, statusFilter])
+
   if (viewStats && activeScan) {
     return (
       <ScanDetail
@@ -372,7 +378,7 @@ export function CrackerWorkspace({
               onViewStats={() => setViewStats(true)}
             />
           ) : (
-            <p className="muted-callout">No active crack — start a session from the rail or configure scanners in Settings.</p>
+            <p className="muted-callout">No active scan sessions — upload a target list and start a crack session.</p>
           )}
         </div>
       </div>
@@ -380,7 +386,22 @@ export function CrackerWorkspace({
       <AddonsStrip config={config} onPatch={patchConfig} />
 
       <div className="cw__below">
-        <DiscoveryHubs findings={findings} />
+        <div className="status-tabs">
+          {(['all', 'valid', 'hit'] as const).map((tab) => (
+            <button
+              key={tab}
+              className={`status-tab${statusFilter === tab ? ' status-tab--active' : ''}`}
+              onClick={() => setStatusFilter(tab)}
+            >
+              {tab === 'all'
+                ? `All (${findings.length})`
+                : tab === 'valid'
+                  ? `Valid (${findings.filter((f) => f.status === 'valid').length})`
+                  : `Unvalidated (${findings.filter((f) => f.status === 'hit').length})`}
+            </button>
+          ))}
+        </div>
+        <DiscoveryHubs findings={filteredFindings} />
         {lists.length > 0 && (
           <section className="cw__lists">
             <header className="cw__lists-head">

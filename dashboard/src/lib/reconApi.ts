@@ -23,6 +23,7 @@ export type ReconRecentFinding = readonly [
   sourceUrl: string,
   timestamp: string,
   metadata: string | null,
+  status: string,
 ]
 
 export type ReconStats = {
@@ -296,6 +297,7 @@ export const lists = {
   },
   create: (name: string, lines: string[]) =>
     postJson<{ ok: boolean; id: string; name: string; lines: number }>('/lists/create', { name, lines }),
+  clearAll: () => postJson<{ ok: boolean; deleted: number }>('/lists/clear-all', {}),
 }
 
 /* ── Scanner config (live flags consumed by main.go) ─────────────── */

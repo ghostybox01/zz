@@ -310,7 +310,7 @@ def get_statistics():
     type_counts = dict(cursor.fetchall())
 
     cursor.execute('''
-        SELECT type, key_value, source_url, timestamp, metadata
+        SELECT type, key_value, source_url, timestamp, metadata, status
         FROM credentials
         ORDER BY id DESC LIMIT 500
     ''')
@@ -991,6 +991,26 @@ def api_lists_list():
     resolve — fixing the desync where the UI remembered uploaded lists
     that had been wiped from disk."""
     return jsonify({'lists': _list_all_lists()})
+
+
+@app.route('/api/lists/clear-all', methods=['POST'])
+def api_lists_clear_all():
+    """Delete every list from disk. Used by the dashboard's Clear All button."""
+    meta_list = _list_all_lists()
+    deleted = 0
+    for meta in meta_list:
+        safe = _safe_list_id(meta.get('id', ''))
+        if not safe:
+            continue
+        data_path, meta_path = _list_paths(safe)
+        for p in (data_path, meta_path):
+            try:
+                if os.path.exists(p):
+                    os.unlink(p)
+                    deleted += 1
+            except OSError:
+                pass
+    return jsonify({'ok': True, 'deleted': deleted})
 
 
 @app.route('/api/lists/<list_id>', methods=['DELETE'])

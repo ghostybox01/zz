@@ -146,6 +146,8 @@ export type Finding = {
   reportedByHost: string
   /** Which scan this finding belongs to (when known). */
   scanId?: string
+  /** Validation status: 'valid' = API-confirmed, 'hit' = pattern match only. */
+  status?: 'valid' | 'hit'
 }
 
 export type PathCategory = 'env' | 'config' | 'backup' | 'debug' | 'wp' | 'api' | 'cloud' | 'misc'

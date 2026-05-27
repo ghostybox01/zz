@@ -78,9 +78,9 @@ function pathFromUrl(url: string): string | undefined {
   }
 }
 
-/** [type, key_value, source_url, timestamp, metadata] from app.py's recent_findings tuple */
+/** [type, key_value, source_url, timestamp, metadata, status] from app.py's recent_findings tuple */
 function mapRecent(row: ReconRecentFinding, i: number): Finding {
-  const [type, keyValue, sourceUrl, ts, metadata] = row
+  const [type, keyValue, sourceUrl, ts, metadata, status] = row
   const provider = String(type ?? 'Unknown')
 
   // key_value holds "//hostname (module-name)" — strip leading // and (module) suffix
@@ -116,6 +116,7 @@ function mapRecent(row: ReconRecentFinding, i: number): Finding {
     },
     severity: severityFor(provider),
     reportedByHost: 'recon-backend',
+    status: (status as 'valid' | 'hit') || 'valid',
   }
 }
 
