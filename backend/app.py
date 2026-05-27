@@ -104,6 +104,13 @@ FILE_MAPPING = {
     'xsmtp_found.txt':      ('XSMTP',      'hit'),
     'mandrill_found.txt':   ('Mandrill',   'hit'),
     'mailersend_found.txt': ('MailerSend', 'hit'),
+    'postmark_found.txt':   ('Postmark',   'hit'),
+    'sparkpost_found.txt':  ('SparkPost',  'hit'),
+    'mailtrap_found.txt':   ('Mailtrap',   'hit'),
+    'mailjet_found.txt':    ('Mailjet',    'hit'),
+    'heroku_found.txt':     ('Heroku',     'hit'),
+    'datadog_found.txt':    ('Datadog',    'hit'),
+    'plivo_found.txt':      ('Plivo',      'hit'),
     # HITS - Only count
     'smtp_found.txt': ('SMTP', 'hit'),
 }
