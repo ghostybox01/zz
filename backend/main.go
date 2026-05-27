@@ -1190,7 +1190,6 @@ func (a *AWSScanner) sendTelegram(message string) {
 	data := url.Values{}
 	data.Set("chat_id", a.Config.Telegram.ChatID)
 	data.Set("text", message)
-	data.Set("parse_mode", "HTML")
 	http.PostForm(apiURL, data)
 
 	pterm.Debug.Printfln("[TELEGRAM SENT] Message hash: %s", messageHash[:16]+"...")
