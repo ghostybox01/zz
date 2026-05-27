@@ -25,9 +25,21 @@ function shortId(id: string): string {
 
 function vulnTag(rule: string): string {
   const u = rule.toUpperCase()
+  // Source/path-based vulnerability type (takes priority over credential type)
+  if (u.includes('.ENV')) return 'ENV'
+  if (u.includes('....//') || u.includes('../') || u.includes('TRAVERSAL')) return 'TRAV'
+  if (u.includes('PACKAGE.JSON') || u.includes('COMPOSER.JSON')) return 'PKG'
+  if (u.includes('CONFIG') || u.includes('SETTINGS')) return 'CFG'
+  // Credential type
+  if (u.includes('JWT')) return 'JWT'
+  if (u.includes('DISCORD') || u.includes('SLACK') || u.includes('WEBHOOK')) return 'HOOK'
+  if (u.includes('SMTP')) return 'SMTP'
+  if (u.includes('AWS')) return 'AWS'
+  if (u.includes('STRIPE') || u.includes('PAYPAL') || u.includes('BRAINTREE')) return 'PMT'
+  if (u.includes('GITHUB') || u.includes('GITLAB')) return 'GIT'
+  if (u.includes('OPENAI') || u.includes('ANTHROPIC') || u.includes('DATADOG') || u.includes('GOOGLE')) return 'API'
   if (u.includes('KEY') || u.includes('TOKEN') || u.includes('SECRET')) return 'CRED'
-  if (u.includes('SMTP') || u.includes('WEBHOOK')) return 'PATH'
-  return 'LIB'
+  return 'CRED'
 }
 
 export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props) {
@@ -358,7 +370,7 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
                         {new Date(f.at).toLocaleString()}
                       </td>
                       <td className="row-actions" onClick={(e) => e.stopPropagation()}>
-                        <span className="finding-chevron" aria-hidden>›</span>
+                        <span className="finding-chevron" style={{cursor:'pointer'}} onClick={() => openFinding(f.id)} title="View detail">›</span>
                         <button type="button" className="icon-btn" title="Copy row" onClick={() => void copyRow(f)}>
                           ⧉
                         </button>

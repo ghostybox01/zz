@@ -58,7 +58,7 @@ const PROVIDER_SEVERITY: Record<string, FindingSeverity> = {
   PyPI: 'medium',
   Discord: 'medium',
   Slack: 'medium',
-  JWT: 'medium',
+  JWT: 'high',
   Azure: 'high',
   Tencent: 'medium',
   XSMTP: 'medium',
@@ -68,15 +68,6 @@ function severityFor(provider: string): FindingSeverity {
   return PROVIDER_SEVERITY[provider] ?? 'medium'
 }
 
-function hostnameFromUrl(url: string): string {
-  if (!url) return ''
-  try {
-    return new URL(url).host
-  } catch {
-    const m = url.match(/^https?:\/\/([^/?#]+)/)
-    return m && m[1] ? m[1] : url
-  }
-}
 
 function pathFromUrl(url: string): string | undefined {
   if (!url) return undefined
@@ -91,19 +82,37 @@ function pathFromUrl(url: string): string | undefined {
 function mapRecent(row: ReconRecentFinding, i: number): Finding {
   const [type, keyValue, sourceUrl, ts, metadata] = row
   const provider = String(type ?? 'Unknown')
+
+  // key_value holds "//hostname (module-name)" — strip leading // and (module) suffix
+  const hostname = String(keyValue ?? '').replace(/^\/\//, '').replace(/\s*\(.*\)$/, '').trim()
+
+  // metadata format: "/path):credential" — split on first "):" to get path + credential
+  let extractedPath: string | undefined = pathFromUrl(sourceUrl ?? '')
+  let ruleLabel = `${provider} credential`
+  let credential = metadata ?? ''
+  if (metadata && metadata.includes('):')) {
+    const idx = metadata.indexOf('):')
+    const pathPart = metadata.slice(0, idx)
+    credential = metadata.slice(idx + 2)
+    if (pathPart.startsWith('/') || pathPart.startsWith('.')) {
+      extractedPath = pathPart
+      ruleLabel = `${provider} via ${pathPart}`
+    }
+  }
+
   return {
     id: `rs-${provider}-${i}-${ts}`,
     at: ts ?? new Date().toISOString(),
     provider,
-    ruleLabel: `${provider} credential`,
-    hostname: hostnameFromUrl(sourceUrl ?? ''),
+    ruleLabel,
+    hostname,
     url: sourceUrl ?? undefined,
-    path: pathFromUrl(sourceUrl ?? ''),
-    detail: keyValue ?? '',
+    path: extractedPath,
+    detail: credential,
     details: {
       validated: true,
-      raw: keyValue ?? '',
-      extra: metadata ? [{ key: 'Metadata', value: metadata }] : undefined,
+      raw: credential,
+      extra: [{ key: 'Source', value: `${hostname}${extractedPath ?? ''}` }],
     },
     severity: severityFor(provider),
     reportedByHost: 'recon-backend',
