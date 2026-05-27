@@ -3753,6 +3753,15 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 				a.logFound(check.Name, key, sourceURL)
 				a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), strings.ReplaceAll(check.Name, " ", "_")+"_found.txt")
 
+				if check.Name != "JWT" {
+					displayKey := key
+					if len(displayKey) > 100 {
+						displayKey = displayKey[:100] + "..."
+					}
+					msg := fmt.Sprintf("[FOUND] %s\nSource: %s\nValue: %s", check.Name, sourceURL, displayKey)
+					go a.sendTelegram(msg)
+				}
+
 				globalCounters.mu.Lock()
 				globalCounters.APIsFoundTotal++
 				globalCounters.mu.Unlock()
