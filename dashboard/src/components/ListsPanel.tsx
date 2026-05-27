@@ -13,6 +13,7 @@ type Props = {
   onUpdate: (list: TargetList) => void
   onDelete: (listId: string) => void
   onDeploy: (listId: string) => void
+  onClearAll?: () => Promise<void>
 }
 
 type UploadError = { kind: 'duplicate' | 'empty' | 'too-large' | 'read'; message: string } | null
@@ -31,7 +32,7 @@ function fmtSize(bytes: number): string {
   return `${Math.round(bytes / 1024)} KB`
 }
 
-export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeploy }: Props) {
+export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeploy, onClearAll }: Props) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const [error, setError] = useState<UploadError>(null)
@@ -40,6 +41,7 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
   // Effect D — bulk select + per-row trash + text filter.
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [textFilter, setTextFilter] = useState('')
+  const [clearingAll, setClearingAll] = useState(false)
 
   const filtered = useMemo(() => {
     const byStatus = (() => {
@@ -384,6 +386,17 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
     }
   }
 
+  const handleClearAll = async () => {
+    if (!onClearAll) return
+    if (!window.confirm('Delete all lists from server? This cannot be undone.')) return
+    setClearingAll(true)
+    try {
+      await onClearAll()
+    } finally {
+      setClearingAll(false)
+    }
+  }
+
   return (
     <section className="lists-panel">
       <header className="lists-panel__head">
@@ -397,6 +410,17 @@ export function ListsPanel({ lists, fleet, onUpload, onUpdate, onDelete, onDeplo
           <span className="pill pill--muted">{lists.length} list{lists.length === 1 ? '' : 's'}</span>
           <span className="pill pill--muted">{totalLines.toLocaleString()} total lines</span>
           <span className="pill pill--ok">{assignedFleet} VPS targeted</span>
+          {onClearAll && lists.length > 0 && (
+            <button
+              type="button"
+              className="btn-danger btn-sm"
+              disabled={clearingAll}
+              onClick={() => void handleClearAll()}
+              title="Remove all lists from the server and clear local state"
+            >
+              {clearingAll ? 'Clearing…' : 'Clear All'}
+            </button>
+          )}
         </div>
       </header>
 

@@ -446,6 +446,14 @@ export default function App() {
     })
   }, [])
 
+  const clearAllLists = useCallback(async () => {
+    await reconLists.clearAll()
+    clearListBodies()
+    setLists([])
+    saveLists([])
+    pushAlertToast('All lists cleared', 'Server disk and local cache wiped.', 'info')
+  }, [pushAlertToast])
+
   /** When the real Raven backend is up, deploy uses /api/vps/upload-targets + /api/vps/deploy
    *  against the operator's rostered VPSes (`server_ips.txt`). The chip selection in ListsPanel
    *  is treated as UI intent — backend deploys to its full roster as that's the only mode app.py supports. */
@@ -632,7 +640,10 @@ export default function App() {
               <HeroMetricTiles
                 totalHits={hitInsights.total}
                 cracks={hitInsights.cracks}
-                liveDomains={aggregates.liveHosts}
+                liveDomains={
+                  crackSessions.filter((s) => s.status === 'running').length ||
+                  aggregates.liveHosts
+                }
               />
 
               <section className="meta-bar meta-bar--tight meta-bar--glass">
@@ -707,6 +718,7 @@ export default function App() {
                 onUpdate={upsertList}
                 onDelete={deleteList}
                 onDeploy={(id) => void deployList(id)}
+                onClearAll={backendLive ? clearAllLists : undefined}
               />
             </section>
 
