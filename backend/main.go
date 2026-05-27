@@ -218,7 +218,9 @@ type AWSScanner struct {
 	SparkPostAPIKeyPattern  *regexp.Regexp
 	MailtrapAPIKeyPattern   *regexp.Regexp
 	MailjetAPIKeyPattern    *regexp.Regexp
+	MailjetSecretKeyPattern *regexp.Regexp
 	PlivoAuthIDPattern      *regexp.Regexp
+	PlivoAuthTokenPattern   *regexp.Regexp
 	AWSSNSTopicARNPattern   *regexp.Regexp
 
 	// SMTP Service Patterns
@@ -634,10 +636,12 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		SparkPostAPIKeyPattern: regexp.MustCompile(`(?i)(?:sparkpost[_-]?(?:api[_-]?)?key|SPARKPOST_API_KEY)["'\s:=]+([a-f0-9]{40})`),
 		// Mailtrap API token (32 hex chars)
 		MailtrapAPIKeyPattern: regexp.MustCompile(`(?i)(?:mailtrap[_-]?(?:api[_-]?)?(?:token|key)|MAILTRAP_API_TOKEN)["'\s:=]+([a-f0-9]{32})`),
-		// Mailjet — API key (32 hex chars)
-		MailjetAPIKeyPattern: regexp.MustCompile(`(?i)(?:MAILJET_API_KEY|MAILJET_PUBLIC_KEY|mailjet[^\n]*(?:api[_-]?key|public[_-]?key))[\s:="']+([0-9a-f]{32})`),
-		// Plivo Auth ID (starts with MA or SA, 20 chars)
-		PlivoAuthIDPattern: regexp.MustCompile(`(?i)(?:plivo[_-]?(?:auth[_-]?)?(?:id|sid))["'\s:=]+([MS]A[A-Z0-9]{18})`),
+		// Mailjet — API key and secret key (each 32 hex chars)
+		MailjetAPIKeyPattern:    regexp.MustCompile(`(?i)(?:MAILJET_API_KEY|MAILJET_PUBLIC_KEY|mailjet[^\n]*(?:api[_-]?key|public[_-]?key))[\s:="']+([0-9a-f]{32})`),
+		MailjetSecretKeyPattern: regexp.MustCompile(`(?i)(?:MAILJET_API_SECRET|MAILJET_SECRET_KEY|mailjet[^\n]*(?:api[_-]?secret|secret[_-]?key))[\s:="']+([0-9a-f]{32})`),
+		// Plivo Auth ID (starts with MA or SA, 20 chars) and Auth Token (40 alphanum)
+		PlivoAuthIDPattern:    regexp.MustCompile(`(?i)(?:plivo[_-]?(?:auth[_-]?)?(?:id|sid))["'\s:=]+([MS]A[A-Z0-9]{18})`),
+		PlivoAuthTokenPattern: regexp.MustCompile(`(?i)(?:PLIVO_AUTH_TOKEN|plivo[_-]?auth[_-]?token)["'\s:=]+([a-zA-Z0-9]{40})`),
 		// AWS SNS topic ARNs (intel — feeds the SNS limit check)
 		AWSSNSTopicARNPattern: regexp.MustCompile(`arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]+`),
 
@@ -3624,10 +3628,8 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.PostmarkAPIKeyPattern,  a.Config.APIValidation.Postmark,  "Postmark",  a.CheckPostmark},
 		{a.SparkPostAPIKeyPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
 		{a.MailtrapAPIKeyPattern,  a.Config.APIValidation.Mailtrap,  "Mailtrap",  a.CheckMailtrap},
-		{a.MailjetAPIKeyPattern,   a.Config.APIValidation.Mailjet,   "Mailjet",   a.CheckMailjet},
 		{a.HerokuAPIKeyPattern,    a.Config.APIValidation.Heroku,    "Heroku",    a.CheckHeroku},
 		{a.DatadogAPIKeyPattern,   a.Config.APIValidation.Datadog,   "Datadog",   a.CheckDatadog},
-		{a.PlivoAuthIDPattern,     a.Config.APIValidation.Plivo,     "Plivo",     a.CheckPlivo},
 	}
 
 	var wg sync.WaitGroup
@@ -3862,6 +3864,62 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 					defer func() { <-validationSem }()
 					a.CheckNexmo(k, s, u)
 				}(k, s, sourceURL)
+			}
+		}
+	}
+
+	// Mailjet: needs API key + secret key for Basic Auth
+	if a.Config.APIValidation.Mailjet {
+		apiKeys := make([]string, 0)
+		secretKeys := make([]string, 0)
+		for _, m := range a.MailjetAPIKeyPattern.FindAllStringSubmatch(contentToScan, -1) {
+			if len(m) > 1 {
+				apiKeys = append(apiKeys, m[1])
+			}
+		}
+		for _, m := range a.MailjetSecretKeyPattern.FindAllStringSubmatch(contentToScan, -1) {
+			if len(m) > 1 {
+				secretKeys = append(secretKeys, m[1])
+			}
+		}
+		for _, ak := range unique(apiKeys) {
+			for _, sk := range unique(secretKeys) {
+				a.logFound("Mailjet", fmt.Sprintf("%s:%s", ak, sk), sourceURL)
+				wg.Add(1)
+				validationSem <- struct{}{}
+				go func(k, s, u string) {
+					defer wg.Done()
+					defer func() { <-validationSem }()
+					a.CheckMailjet(k, s, u)
+				}(ak, sk, sourceURL)
+			}
+		}
+	}
+
+	// Plivo: needs auth ID + auth token for Basic Auth
+	if a.Config.APIValidation.Plivo {
+		authIDs := make([]string, 0)
+		authTokens := make([]string, 0)
+		for _, m := range a.PlivoAuthIDPattern.FindAllStringSubmatch(contentToScan, -1) {
+			if len(m) > 1 {
+				authIDs = append(authIDs, m[1])
+			}
+		}
+		for _, m := range a.PlivoAuthTokenPattern.FindAllStringSubmatch(contentToScan, -1) {
+			if len(m) > 1 {
+				authTokens = append(authTokens, m[1])
+			}
+		}
+		for _, aid := range unique(authIDs) {
+			for _, at := range unique(authTokens) {
+				a.logFound("Plivo", fmt.Sprintf("%s:%s", aid, at), sourceURL)
+				wg.Add(1)
+				validationSem <- struct{}{}
+				go func(id, t, u string) {
+					defer wg.Done()
+					defer func() { <-validationSem }()
+					a.CheckPlivo(id, t, u)
+				}(aid, at, sourceURL)
 			}
 		}
 	}

