@@ -3278,6 +3278,9 @@ func (a *AWSScanner) CheckTencent(key, sourceURL string) bool {
 
 // Fungsi untuk mengecek validitas Mandrill
 func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
+	if !a.Config.Features.Mandrill {
+		return false
+	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
 		return false
 	}

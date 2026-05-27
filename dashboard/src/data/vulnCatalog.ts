@@ -32,7 +32,7 @@ export const VULN_CATALOG: readonly VulnRule[] = [
   { id: 'mailtrap-key',    provider: 'Mailtrap',   label: 'API key',                        category: 'email',    wired: true  },
   { id: 'postmark',        provider: 'Postmark',   label: 'Server token',                   category: 'email',    wired: true  },
   { id: 'mailersend',      provider: 'MailerSend', label: 'mlsn.… API key',                 category: 'email',    wired: true  },
-  { id: 'tencent-ses',     provider: 'Tencent',    label: 'Tencent SES (AKID…)',            category: 'email',    wired: false },
+  { id: 'tencent-ses',     provider: 'Tencent',    label: 'Tencent SES (AKID…)',            category: 'email',    wired: true  },
 
   { id: 'mailjet-key',     provider: 'Mailjet',    label: 'API key + secret key',           category: 'email',    wired: true  },
   { id: 'datadog-key',     provider: 'Datadog',    label: 'API key + app key probe',        category: 'cloud',    wired: true  },
@@ -49,7 +49,7 @@ export const VULN_CATALOG: readonly VulnRule[] = [
   { id: 'nexmo-key',       provider: 'Nexmo',      label: 'Vonage API key + secret',        category: 'sms',      wired: true  },
   { id: 'telnyx-key',      provider: 'Telnyx',     label: 'API key',                        category: 'sms',      wired: true  },
   { id: 'plivo-auth',      provider: 'Plivo',      label: 'Auth ID + token',                category: 'sms',      wired: true  },
-  { id: 'messagebird-key', provider: 'MessageBird', label: 'AccessKey pattern',             category: 'sms',      wired: false },
+  { id: 'messagebird-key', provider: 'MessageBird', label: 'AccessKey pattern',             category: 'sms',      wired: true  },
 ]
 
 export type VulnSelection = Record<string, boolean>
