@@ -28,11 +28,15 @@ export const VULN_CATALOG: readonly VulnRule[] = [
   { id: 'mailgun-new',     provider: 'Mailgun',    label: 'New domain key format',          category: 'email',    wired: true  },
   { id: 'brevo-key',       provider: 'Brevo',      label: 'xkeysib API key',                category: 'email',    wired: false },
   { id: 'mandrill-key',    provider: 'Mandrill',   label: 'md-… API key',                   category: 'email',    wired: false },
-  { id: 'sparkpost-key',   provider: 'SparkPost',  label: 'API key',                        category: 'email',    wired: false },
-  { id: 'mailtrap-key',    provider: 'Mailtrap',   label: 'API key',                        category: 'email',    wired: false },
-  { id: 'postmark',        provider: 'Postmark',   label: 'Server token',                   category: 'email',    wired: false },
+  { id: 'sparkpost-key',   provider: 'SparkPost',  label: 'API key',                        category: 'email',    wired: true  },
+  { id: 'mailtrap-key',    provider: 'Mailtrap',   label: 'API key',                        category: 'email',    wired: true  },
+  { id: 'postmark',        provider: 'Postmark',   label: 'Server token',                   category: 'email',    wired: true  },
   { id: 'mailersend',      provider: 'MailerSend', label: 'mlsn.… API key',                 category: 'email',    wired: false },
   { id: 'tencent-ses',     provider: 'Tencent',    label: 'Tencent SES (AKID…)',            category: 'email',    wired: false },
+
+  { id: 'mailjet-key',     provider: 'Mailjet',    label: 'API key + secret key',           category: 'email',    wired: true  },
+  { id: 'datadog-key',     provider: 'Datadog',    label: 'API key + app key probe',        category: 'cloud',    wired: true  },
+  { id: 'heroku-key',      provider: 'Heroku',     label: 'Heroku API key',                 category: 'cloud',    wired: true  },
 
   // ── Generic SMTP catch-all ──────────────────────────────────────
   { id: 'smtp-plain',      provider: 'SMTP',       label: 'SMTP user:pass in plaintext',    category: 'email',    wired: true  },
@@ -44,7 +48,7 @@ export const VULN_CATALOG: readonly VulnRule[] = [
   { id: 'twilio-sid',      provider: 'Twilio',     label: 'Account SID + auth token',       category: 'sms',      wired: true  },
   { id: 'nexmo-key',       provider: 'Nexmo',      label: 'Vonage API key + secret',        category: 'sms',      wired: true  },
   { id: 'telnyx-key',      provider: 'Telnyx',     label: 'API key',                        category: 'sms',      wired: true  },
-  { id: 'plivo-auth',      provider: 'Plivo',      label: 'Auth ID + token',                category: 'sms',      wired: false },
+  { id: 'plivo-auth',      provider: 'Plivo',      label: 'Auth ID + token',                category: 'sms',      wired: true  },
   { id: 'messagebird-key', provider: 'MessageBird', label: 'AccessKey pattern',             category: 'sms',      wired: false },
 ]
 
