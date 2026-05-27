@@ -237,6 +237,9 @@ export default function App() {
               note:           'On controller — preview unavailable in this session',
             })
           }
+          // Persist the pruned list so stale entries don't reappear on
+          // the next page load (before the next backend sync fires).
+          saveLists(kept)
           return kept
         })
       } catch {

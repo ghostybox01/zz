@@ -33,7 +33,7 @@ export function HeroMetricTiles({ totalHits, cracks, liveDomains }: Props) {
         <div className="hero-tile__body">
           <span className="hero-tile__label">Total hits</span>
           <span className="hero-tile__value">{totalHits.toLocaleString()}</span>
-          <span className="hero-tile__sub">Inbox + live poll merge</span>
+          <span className="hero-tile__sub">All scanned credentials</span>
         </div>
       </article>
       <article className="hero-tile hero-tile--accent">
@@ -43,7 +43,7 @@ export function HeroMetricTiles({ totalHits, cracks, liveDomains }: Props) {
         <div className="hero-tile__body">
           <span className="hero-tile__label">Cracks</span>
           <span className="hero-tile__value">{cracks.toLocaleString()}</span>
-          <span className="hero-tile__sub">Critical + high severity</span>
+          <span className="hero-tile__sub">API-validated hits</span>
         </div>
       </article>
       <article className="hero-tile hero-tile--teal">
