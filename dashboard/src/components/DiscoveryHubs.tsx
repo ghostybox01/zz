@@ -31,7 +31,7 @@ type HubMeta = {
 const HUBS: readonly HubMeta[] = [
   {
     key: 'aws-ses', label: 'AWS SES', accent: '#ff9900',
-    match: (f) => f.provider === 'AWS',
+    match: (f) => f.provider === 'AWS' || f.provider === 'AWS SNS',
     headline: (rs) => {
       const max = Math.max(0, ...rs.map((f) => f.details?.sesQuota?.max24h ?? 0))
       if (max > 0) return { k: 'MAX 24h QUOTA', v: fmtInt(max) }
@@ -123,6 +123,14 @@ const HUBS: readonly HubMeta[] = [
       if (hosts > 0) return { k: 'HOSTS', v: String(hosts) }
       return { k: 'SERVERS', v: String(rs.length) }
     },
+  },
+  {
+    key: 'other', label: 'Other', accent: '#8b5cf6',
+    match: (f) => {
+      const covered = ['AWS', 'AWS SNS', 'Stripe', 'SendGrid', 'Mailgun', 'Brevo', 'Twilio', 'SMTP', 'GitHub', 'OpenAI', 'Anthropic', 'GCP']
+      return !covered.includes(f.provider)
+    },
+    headline: (rs) => ({ k: 'PROVIDERS', v: String(new Set(rs.map((f) => f.provider)).size) }),
   },
 ]
 

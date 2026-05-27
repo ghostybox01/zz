@@ -84,6 +84,7 @@ export function ListCard({
           ) : (
             <h3 className="tlist__name" onClick={() => setEditing(true)} title="Click to rename">
               {list.name}
+              <span className="tlist__name-count muted"> ({list.lineCount.toLocaleString()} lines)</span>
             </h3>
           )}
           <p className="tlist__meta">

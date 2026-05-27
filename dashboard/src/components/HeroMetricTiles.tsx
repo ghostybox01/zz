@@ -54,9 +54,9 @@ export function HeroMetricTiles({ totalHits, cracks, liveDomains }: Props) {
           </svg>
         </div>
         <div className="hero-tile__body">
-          <span className="hero-tile__label">Live hosts</span>
+          <span className="hero-tile__label">Active sessions</span>
           <span className="hero-tile__value">{liveDomains.toLocaleString()}</span>
-          <span className="hero-tile__sub">Active fleet nodes</span>
+          <span className="hero-tile__sub">Running crack sessions</span>
         </div>
       </article>
     </div>
