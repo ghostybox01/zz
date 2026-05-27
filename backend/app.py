@@ -319,13 +319,14 @@ def get_statistics():
     conn.close()
     
     total_urls = stats[1] if stats else 0
-    smtp_servers = stats[4] if stats and len(stats) > 4 else 0
 
     # Always count live from DB so dashboard never shows a stale snapshot.
     conn2 = sqlite3.connect(DB_PATH, timeout=30)
     cur2 = conn2.cursor()
     cur2.execute("SELECT COUNT(*) FROM credentials WHERE status='valid'")
     total_valid = cur2.fetchone()[0]
+    cur2.execute("SELECT COUNT(*) FROM credentials WHERE type='SMTP'")
+    smtp_servers = cur2.fetchone()[0]
     conn2.close()
 
     # Derive total_hits from the actual credential rows so it matches
