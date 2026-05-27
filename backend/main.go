@@ -3505,6 +3505,14 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 		}
 	}
 
+	// Fallback: try raw SMTP URL format (smtps://user:pass@host:port)
+	if host == "" || port == "" || user == "" || pass == "" || from == "" {
+		if urlMatches := a.extractSMTPFromURL(text); len(urlMatches) > 0 {
+			m := urlMatches[0]
+			host = m["host"]; port = m["port"]; user = m["user"]; pass = m["pass"]; from = m["from"]
+		}
+	}
+
 	// Validasi: Semua field harus lengkap (host:port:user:pass:from)
 	// Jika tidak lengkap, anggap tidak valid dan abaikan
 	if host == "" || port == "" || user == "" || pass == "" || from == "" {
@@ -4496,6 +4504,9 @@ func (a *AWSScanner) extractSMTPFromMultipleFormats(code, sourceURL string) []ma
 		configs = append(configs, a.extractSMTPFromJSON(code)...)
 	}
 
+	// Format 0: Raw SMTP URLs (smtps://user:pass@host:port) — checked first
+	configs = append(configs, a.extractSMTPFromURL(code)...)
+
 	// Format 2: Environment Variables (.env style) - SAFE untuk semua file
 	configs = append(configs, a.extractSMTPFromEnv(code)...)
 
@@ -4750,6 +4761,55 @@ func (a *AWSScanner) extractSMTPByProximity(code string) []map[string]string {
 		}
 	}
 
+	return configs
+}
+
+// extractSMTPFromURL parses raw SMTP URLs: smtps://user@domain:pass@host:port
+// Handles email-format usernames (two @ chars) by splitting on the LAST @.
+func (a *AWSScanner) extractSMTPFromURL(code string) []map[string]string {
+	re := regexp.MustCompile(`(?i)(smtps?://[^\s"'<>]+)`)
+	var configs []map[string]string
+	for _, m := range re.FindAllString(code, -1) {
+		raw := m
+		secure := "No"
+		if strings.HasPrefix(strings.ToLower(raw), "smtps://") {
+			secure = "Yes"
+			raw = raw[len("smtps://"):]
+		} else {
+			raw = raw[len("smtp://"):]
+		}
+		// Port: last :digits
+		portRe := regexp.MustCompile(`:(\d{1,5})$`)
+		pm := portRe.FindStringSubmatchIndex(raw)
+		if pm == nil {
+			continue
+		}
+		port := raw[pm[2]:pm[3]]
+		raw = raw[:pm[0]]
+		// Host: after last @
+		lastAt := strings.LastIndex(raw, "@")
+		if lastAt < 0 {
+			continue
+		}
+		host := raw[lastAt+1:]
+		userpart := raw[:lastAt]
+		// User:pass — split on first colon
+		firstColon := strings.Index(userpart, ":")
+		if firstColon < 0 {
+			continue
+		}
+		user := userpart[:firstColon]
+		pass := userpart[firstColon+1:]
+		if host == "" || user == "" || pass == "" || port == "" {
+			continue
+		}
+		from := user // SMTP from = username by default
+		configs = append(configs, map[string]string{
+			"host": host, "port": port,
+			"user": user, "pass": pass,
+			"from": from, "secure": secure,
+		})
+	}
 	return configs
 }
 
