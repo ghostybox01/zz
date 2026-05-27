@@ -43,12 +43,21 @@ function shortId(id: string): string {
   return `#${(h % 99_999_999).toString().padStart(8, '0')}`
 }
 
-function vulnTag(rule: string): 'CRED' | 'PATH' | 'LIB' | 'GPL' {
+function vulnTag(rule: string): string {
   const u = rule.toUpperCase()
-  if (u.includes('STRIPE') || u.includes('GPL')) return 'GPL'
-  if (u.includes('SMTP') || u.includes('WEBHOOK') || u.includes('BACKUP') || u.includes('ACTUATOR')) return 'PATH'
+  if (u.includes('.ENV')) return 'ENV'
+  if (u.includes('../') || u.includes('TRAVERSAL')) return 'TRAV'
+  if (u.includes('PACKAGE.JSON') || u.includes('COMPOSER.JSON')) return 'PKG'
+  if (u.includes('CONFIG') || u.includes('SETTINGS')) return 'CFG'
+  if (u.includes('JWT')) return 'JWT'
+  if (u.includes('STRIPE') || u.includes('GPL')) return 'PMT'
+  if (u.includes('DISCORD') || u.includes('SLACK') || u.includes('WEBHOOK')) return 'HOOK'
+  if (u.includes('SMTP')) return 'SMTP'
+  if (u.includes('AWS')) return 'AWS'
+  if (u.includes('GITHUB') || u.includes('GITLAB')) return 'GIT'
+  if (u.includes('OPENAI') || u.includes('ANTHROPIC') || u.includes('DATADOG') || u.includes('GOOGLE')) return 'API'
   if (u.includes('KEY') || u.includes('TOKEN') || u.includes('SECRET') || u.includes('CRED')) return 'CRED'
-  return 'LIB'
+  return 'CRED'
 }
 
 function fmtMoney(cents: number | undefined, currency = 'USD'): string {
