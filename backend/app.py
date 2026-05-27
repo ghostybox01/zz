@@ -3929,6 +3929,7 @@ def api_crack_start():
 
     session_id = uuid.uuid4().hex[:12]
     config_snapshot = _build_crack_config_snapshot([str(a) for a in addon_ids])
+    config_snapshot['session_name'] = session_name  # passed to scanner for Telegram headers
     work_dir = mgr.config.get('work_dir', '/root/python_job') if hasattr(mgr, 'config') else '/root/python_job'
     remote_dir = f'{work_dir}/crack_{session_id}'
 

