@@ -720,6 +720,12 @@ export type CrackSession = {
   remote_pids?: Record<string, number>
   finished_at?: string
   last_error?: string
+  /** Lines scanned so far (from last_progress on the backend). */
+  scanned?: number
+  /** Current scan speed in lines/sec. */
+  speed?: number
+  /** Credential hits attributed to this session. */
+  hits?: number
 }
 
 export const crack = {

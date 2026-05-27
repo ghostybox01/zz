@@ -138,11 +138,44 @@ export function CrackerWorkspace({
     return () => { cancelled = true; window.clearInterval(timer) }
   }, [])
 
+  // Map live CrackSessions → minimal Scan-compatible objects so the
+  // existing CrackerSessionRail and CrackerSessionPanel components can
+  // display real backend data without a full prop-type overhaul.
+  // `scans` is kept in props for legacy/mock flows but is always empty
+  // in live mode — sessions from the crack poller is the source of truth.
+  const sessionScans = useMemo(() => {
+    const mapped = sessions.map((s): import('../types').Scan => ({
+      id:            s.id,
+      label:         s.name,
+      // Map CrackSession status → ScanStatus (Scan doesn't have 'completed'/'stopped')
+      status:        s.status === 'completed' ? 'done'
+                   : s.status === 'stopped'   ? 'done'
+                   : s.status === 'failed'    ? 'failed'
+                   : s.status === 'queued'    ? 'queued'
+                   : 'running',
+      startedAt:     s.created_at,
+      endedAt:       s.finished_at,
+      targetCount:   0,
+      validHosts:    s.scanned ?? 0,
+      invalidHosts:  0,
+      hitsFound:     s.hits ?? 0,
+      validHits:     s.hits ?? 0,
+      parsingPerSec: 0,
+      requestsPerSec: s.speed ?? 0,
+      rpsHistory:    [],
+      snapshots:     [],
+      shardVpsIds:   s.worker_ips,
+      lastEvent:     s.last_error ?? (s.status === 'running' ? 'Scanning…' : s.status),
+    }))
+    // Fall back to legacy scans prop (mock / offline mode) when backend sessions are empty.
+    return mapped.length > 0 ? mapped : scans
+  }, [sessions, scans])
+
   const activeScan = useMemo(() => {
-    const pick = activeScanId ? scans.find((s) => s.id === activeScanId) : null
+    const pick = activeScanId ? sessionScans.find((s) => s.id === activeScanId) : null
     if (pick) return pick
-    return scans.find((s) => s.status === 'running') ?? scans[0] ?? null
-  }, [scans, activeScanId])
+    return sessionScans.find((s) => s.status === 'running') ?? sessionScans[0] ?? null
+  }, [sessionScans, activeScanId])
 
   const activeShards = activeScan ? shards.filter((sh) => sh.scanId === activeScan.id) : []
 
@@ -151,8 +184,12 @@ export function CrackerWorkspace({
   // remote spawn complete. Excluding queued made the "Active cracks"
   // tile read 0 during the seconds-to-minutes window a session is
   // actually being dispatched.
-  const activeCracks = scans.filter(
-    (s) => s.status === 'running' || s.status === 'paused' || s.status === 'queued',
+  //
+  // Count from the live crack sessions polled from /api/crack/sessions,
+  // not from `scans` (which is a legacy UI-only array that is never
+  // populated from the backend and is always empty in live mode).
+  const activeCracks = sessions.filter(
+    (s) => s.status === 'running' || s.status === 'queued',
   ).length
   // ── Catalog-driven composer addon list ─────────────────────────────
   const composerAddons = useMemo(() => getEnabledAddons(enabledMap), [enabledMap])
@@ -319,7 +356,7 @@ export function CrackerWorkspace({
 
       <div className="cw__body">
         <CrackerSessionRail
-          scans={scans}
+          scans={sessionScans}
           activeId={activeScan?.id ?? null}
           onSelect={(id) => onSelectScan(id)}
           onNew={openComposer}
