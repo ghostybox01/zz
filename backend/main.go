@@ -248,6 +248,7 @@ type AWSScanner struct {
 
 	ValidKeyLimits sync.Map
 	KnownKeys      sync.Map
+	SeenLines      sync.Map // Dedup for saveIntoFile — seeded from existing ResultJS on restart
 	SentTelegrams  sync.Map // Tracking pesan telegram yang sudah dikirim
 	VisitedURLs    sync.Map // Tracking URL yang sudah di-scan untuk prevent duplicate
 	TempDir        string
@@ -1162,6 +1163,9 @@ func loadEnvPaths() []string {
 }
 
 func (a *AWSScanner) saveIntoFile(line, filename string) {
+	if _, loaded := a.SeenLines.LoadOrStore(line, true); loaded {
+		return // already written in a previous run — skip duplicate
+	}
 	os.MkdirAll("ResultJS", 0755)
 	f, err := os.OpenFile(filepath.Join("ResultJS", filename), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -1169,6 +1173,38 @@ func (a *AWSScanner) saveIntoFile(line, filename string) {
 	}
 	defer f.Close()
 	f.WriteString(line + "\n")
+}
+
+// seedKnownKeysFromResultJS reads all existing ResultJS output files and
+// pre-populates SeenLines so saveIntoFile skips lines already written in
+// a prior run. Prevents duplicate output lines and duplicate Telegram
+// notifications when the scanner binary is hot-swapped mid-session.
+func (a *AWSScanner) seedKnownKeysFromResultJS() {
+	files, err := filepath.Glob(filepath.Join("ResultJS", "*.txt"))
+	if err != nil || len(files) == 0 {
+		return
+	}
+	count := 0
+	for _, fp := range files {
+		f, err := os.Open(fp)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
+			}
+			a.SeenLines.Store(line, true)
+			count++
+		}
+		f.Close()
+	}
+	if count > 0 {
+		pterm.Info.Printfln("Seeded %d lines from existing ResultJS files (dedup across restarts)", count)
+	}
 }
 
 func (a *AWSScanner) sendTelegram(message string) {
@@ -5484,5 +5520,6 @@ func main() {
 		f.Close()
 	}
 
+	scanner.seedKnownKeysFromResultJS()
 	scanner.runBatched(listFile)
 }
