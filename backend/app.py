@@ -99,6 +99,11 @@ FILE_MAPPING = {
     # AWS sub-scans: potential (STS failed) and deep-scan info dumps
     'aws_ses_potential_unverified.txt': ('AWS',          'valid'),
     'aws_deep_scan.txt':               ('AWS',           'hit'),
+    # Pre-validation finds — saved immediately on pattern match regardless of API result
+    'brevo_found.txt':      ('Brevo',      'hit'),
+    'xsmtp_found.txt':      ('XSMTP',      'hit'),
+    'mandrill_found.txt':   ('Mandrill',   'hit'),
+    'mailersend_found.txt': ('MailerSend', 'hit'),
     # HITS - Only count
     'smtp_found.txt': ('SMTP', 'hit'),
 }
@@ -307,8 +312,14 @@ def get_statistics():
     conn.close()
     
     total_urls = stats[1] if stats else 0
-    total_valid = stats[3] if stats else 0
     smtp_servers = stats[4] if stats and len(stats) > 4 else 0
+
+    # Always count live from DB so dashboard never shows a stale snapshot.
+    conn2 = sqlite3.connect(DB_PATH, timeout=30)
+    cur2 = conn2.cursor()
+    cur2.execute("SELECT COUNT(*) FROM credentials WHERE status='valid'")
+    total_valid = cur2.fetchone()[0]
+    conn2.close()
 
     # Derive total_hits from the actual credential rows so it matches
     # type_counts rather than a stale statistics-table counter.

