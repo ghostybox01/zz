@@ -334,6 +334,15 @@ def get_statistics():
     }
 
 def background_file_monitor():
+    import fcntl
+    lock_path = '/tmp/reconx_file_monitor.lock'
+    try:
+        lock_fd = open(lock_path, 'w')
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # Another gunicorn worker already holds the lock — this worker idles.
+        return
+
     last_count = 0
     while True:
         time.sleep(2)
@@ -341,7 +350,7 @@ def background_file_monitor():
             imported_valid, imported_hits = import_from_files()
             stats = get_statistics()
             current_count = stats['total_valid']
-            
+
             if current_count != last_count or imported_hits > 0:
                 socketio.emit('stats_update', stats)
                 last_count = current_count
