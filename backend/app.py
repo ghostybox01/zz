@@ -344,7 +344,7 @@ def get_statistics():
         'recent_findings': recent_findings,
         'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'progress_current': total_urls,
-        'progress_total': total_hits,
+        'progress_total': total_urls,
         'progress_percent': round(progress_percent, 1),
         'scan_rate': round(scan_rate, 2)
     }
@@ -491,14 +491,24 @@ def _parse_crack_log_progress(ip: str, session_id: str) -> int:
 
 
 def _count_crack_session_findings(session_id: str) -> int:
-    """Return the number of credential rows associated with a crack session.
-
-    Queries the DB directly by session_id (set on INSERT during live polling)
-    so each session gets its own accurate count instead of the global total."""
+    """Return the number of credential rows associated with a crack session."""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30)
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM credentials WHERE session_id = ?', (session_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def _count_crack_session_valid(session_id: str) -> int:
+    """Return the number of *valid* credential rows for a crack session."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM credentials WHERE session_id = ? AND status = 'valid'", (session_id,))
         row = cursor.fetchone()
         conn.close()
         return int(row[0]) if row else 0
@@ -3722,6 +3732,22 @@ def _crack_session_view(sess: dict) -> dict:
     expects (Contract B). Keeps the JSON schema stable even if internal
     bookkeeping grows extra fields later."""
     sid = str(sess.get('id') or '')
+    hits = _count_crack_session_findings(sid) if sid else 0
+    valid_hits = _count_crack_session_valid(sid) if sid else 0
+    # Target count: read once from the list file and cache in session dict.
+    targets = int(sess.get('targets_count') or 0)
+    if targets == 0 and sess.get('list_id'):
+        try:
+            data_path, _ = _list_paths(sess['list_id'])
+            if os.path.exists(data_path):
+                with open(data_path, 'r', errors='ignore') as _fh:
+                    targets = sum(1 for _ln in _fh if _ln.strip())
+                # Cache so subsequent calls are instant.
+                with _crack_lock:
+                    if sess.get('id') in _crack_sessions:
+                        _crack_sessions[sess['id']]['targets_count'] = targets
+        except Exception:
+            pass
     return {
         'id':            sid,
         'name':          str(sess.get('name') or ''),
@@ -3736,7 +3762,9 @@ def _crack_session_view(sess: dict) -> dict:
         'last_error':    sess.get('last_error'),
         'scanned':       int(sess.get('last_progress') or 0),
         'speed':         float(sess.get('last_speed') or 0),
-        'hits':          _count_crack_session_findings(sid) if sid else 0,
+        'targets':       targets,
+        'hits':          hits,
+        'valid_hits':    valid_hits,
     }
 
 

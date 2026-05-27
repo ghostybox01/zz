@@ -726,8 +726,12 @@ export type CrackSession = {
   scanned?: number
   /** Current scan speed in lines/sec. */
   speed?: number
-  /** Credential hits attributed to this session. */
+  /** Total targets in the list (may be 0 until first /crack/sessions fetch after session start). */
+  targets?: number
+  /** Total credential hits (valid + unvalidated) for this session. */
   hits?: number
+  /** Confirmed-valid credential hits for this session. */
+  valid_hits?: number
 }
 
 export const crack = {

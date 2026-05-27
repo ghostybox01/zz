@@ -280,6 +280,10 @@ type GitleaksResult struct {
 
 var base64CandidatePattern = regexp.MustCompile(`[a-zA-Z0-9+/=_-]{40,}`)
 
+// awsSkFPPattern rejects 40-char strings that are URL query-parameter values
+// rather than real AWS secret keys (e.g. "Signature=<hex>", "Algorithm=<str>").
+var awsSkFPPattern = regexp.MustCompile(`^[A-Za-z]{3,}=`)
+
 func tryDecodeBase64(s string) string {
 	re := regexp.MustCompile(`[^a-zA-Z0-9+/=_-]`)
 	cleaned := re.ReplaceAllString(s, "")
@@ -3771,6 +3775,11 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		for _, ak := range sesKeys {
 			for _, sk := range sks {
 				if len(sk) == 40 {
+					// Reject URL-parameter false positives: real AWS secrets are random
+					// base64, never start with a word followed by '=' (e.g. "Signature=…")
+					if awsSkFPPattern.MatchString(sk) {
+						continue
+					}
 					keyPair := fmt.Sprintf("%s:%s", ak, sk)
 
 					// Gunakan KnownKeys untuk mencegah API call ganda dari goroutine yang berbeda
