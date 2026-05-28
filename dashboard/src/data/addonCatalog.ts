@@ -18,7 +18,6 @@ export type AddonCategory =
   | 'sms'
   | 'vcs'
   | 'dev'
-  | 'crypto'
 
 export type AddonEntry = {
   /** Stable kebab-case slug — the wire format used in dispatch payloads. */
@@ -36,21 +35,21 @@ export type AddonEntry = {
 
 export const ADDON_CATALOG: readonly AddonEntry[] = [
   // ── ON by default ────────────────────────────────────────────────
-  { id: 'ai',           label: 'AI Keys',            category: 'ai',        scannerKey: 'api_validation.ai_all',          defaultOn: true },
-  { id: 'ses',          label: 'AWS SES',            category: 'cloud',     scannerKey: 'aws_checks.ses_quota_check',     defaultOn: true },
-  { id: 'aws-deep',     label: 'AWS Deep',           category: 'cloud',     scannerKey: 'scanning_features.aws_main_scan', defaultOn: true },
-  { id: 'aws-access',   label: 'AWS Access Keys',    category: 'cloud',     scannerKey: 'api_validation.aws_access',      defaultOn: true },
-  { id: 'sendgrid',     label: 'SendGrid',           category: 'email-api', scannerKey: 'api_validation.sendgrid',        defaultOn: true },
-  { id: 'mailgun',      label: 'Mailgun',            category: 'email-api', scannerKey: 'api_validation.mailgun',         defaultOn: true },
-  { id: 'brevo',        label: 'Brevo / Sendinblue', category: 'email-api', scannerKey: 'features.brevo',                 defaultOn: true },
-  { id: 'mandrill',     label: 'Mandrill',           category: 'email-api', scannerKey: 'features.mandrill',              defaultOn: true },
-  { id: 'mailersend',   label: 'MailerSend',         category: 'email-api', scannerKey: 'features.mailersend',            defaultOn: true },
-  { id: 'postmark',     label: 'Postmark',           category: 'email-api', scannerKey: 'api_validation.postmark',        defaultOn: true },
-  { id: 'sparkpost',    label: 'SparkPost',          category: 'email-api', scannerKey: 'api_validation.sparkpost',       defaultOn: true },
-  { id: 'mailtrap',     label: 'Mailtrap',           category: 'email-api', scannerKey: 'api_validation.mailtrap',        defaultOn: true },
-  { id: 'mailjet',      label: 'Mailjet',            category: 'email-api', scannerKey: 'api_validation.mailjet',         defaultOn: true },
-  { id: 'smtp',         label: 'Random SMTP',        category: 'smtp',      scannerKey: 'features.xsmtp',                 defaultOn: true },
-  { id: 'stripe',       label: 'Stripe',             category: 'payment',   scannerKey: 'api_validation.stripe',          defaultOn: true },
+  { id: 'ai',           label: 'AI Keys',            category: 'ai',        scannerKey: 'api_validation.ai_all',  defaultOn: true },
+  { id: 'ses',          label: 'AWS SES',            category: 'cloud',     scannerKey: 'aws_checks.ses',         defaultOn: true },
+  { id: 'aws-deep',     label: 'AWS Deep',           category: 'cloud',     scannerKey: 'aws_checks.deep',        defaultOn: true },
+  { id: 'aws-access',   label: 'AWS Access Keys',    category: 'cloud',     scannerKey: 'api_validation.aws_access', defaultOn: true },
+  { id: 'sendgrid',     label: 'SendGrid',           category: 'email-api', scannerKey: 'api_validation.sendgrid', defaultOn: true },
+  { id: 'mailgun',      label: 'Mailgun',            category: 'email-api', scannerKey: 'api_validation.mailgun',  defaultOn: true },
+  { id: 'brevo',        label: 'Brevo / Sendinblue', category: 'email-api', scannerKey: 'api_validation.brevo',    defaultOn: true },
+  { id: 'mandrill',     label: 'Mandrill',           category: 'email-api', scannerKey: 'api_validation.mandrill', defaultOn: true },
+  { id: 'mailersend',   label: 'MailerSend',         category: 'email-api', scannerKey: 'api_validation.mailersend', defaultOn: true },
+  { id: 'postmark',     label: 'Postmark',           category: 'email-api', scannerKey: 'api_validation.postmark', defaultOn: true },
+  { id: 'sparkpost',    label: 'SparkPost',          category: 'email-api', scannerKey: 'api_validation.sparkpost', defaultOn: true },
+  { id: 'mailtrap',     label: 'Mailtrap',           category: 'email-api', scannerKey: 'api_validation.mailtrap', defaultOn: true },
+  { id: 'mailjet',      label: 'Mailjet',            category: 'email-api', scannerKey: 'api_validation.mailjet',  defaultOn: true },
+  { id: 'smtp',         label: 'Random SMTP',        category: 'smtp',      scannerKey: 'api_validation.smtp',     defaultOn: true },
+  { id: 'stripe',       label: 'Stripe',             category: 'payment',   scannerKey: 'api_validation.stripe',   defaultOn: true },
 
   // ── OFF by default ───────────────────────────────────────────────
   { id: 'tencent-ses',  label: 'Tencent SES',        category: 'email-api', scannerKey: 'api_validation.tencent',  defaultOn: false },
@@ -62,11 +61,6 @@ export const ADDON_CATALOG: readonly AddonEntry[] = [
   { id: 'telnyx',       label: 'Telnyx',             category: 'sms',       scannerKey: 'api_validation.telnyx',   defaultOn: false },
   { id: 'plivo',        label: 'Plivo',              category: 'sms',       scannerKey: 'api_validation.plivo',    defaultOn: false },
   { id: 'messagebird',  label: 'MessageBird',        category: 'sms',       scannerKey: 'api_validation.messagebird', defaultOn: false },
-  { id: 'github',       label: 'GitHub PAT',         category: 'vcs',       scannerKey: 'api_validation.github',   defaultOn: false },
-  { id: 'heroku',       label: 'Heroku',             category: 'dev',       scannerKey: 'api_validation.heroku',   defaultOn: false },
-  { id: 'datadog',      label: 'Datadog',            category: 'dev',       scannerKey: 'api_validation.datadog',  defaultOn: false },
-  { id: 'crypto-wallet', label: 'Crypto Wallets',    category: 'crypto',    scannerKey: 'api_validation.crypto_wallet', defaultOn: true,
-    note: 'Detect ETH/BTC private keys + mnemonics, derive addresses, check on-chain balance' },
 ]
 
 /** Operator's persisted toggle dict — `{[id]: boolean}` — overlaid on

@@ -732,6 +732,8 @@ export type CrackSession = {
   hits?: number
   /** Confirmed-valid credential hits for this session. */
   valid_hits?: number
+  /** URLs that failed to fetch (timeout / connection refused / DNS failure). */
+  invalid_hosts?: number
 }
 
 export const crack = {

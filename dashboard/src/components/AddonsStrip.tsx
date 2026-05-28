@@ -15,7 +15,6 @@ import {
   GlyphAwsDeep,
   GlyphAwsSes,
   GlyphBrevo,
-  GlyphCrypto,
   GlyphGitHub,
   GlyphMailgun,
   GlyphMandrill,
@@ -56,10 +55,6 @@ const BRAND_BY_ID: Record<string, { domain: string; Glyph: Glyph }> = {
   telnyx:    { domain: 'telnyx.com',      Glyph: GlyphTwilio },
   plivo:     { domain: 'plivo.com',       Glyph: GlyphTwilio },
   messagebird:    { domain: 'messagebird.com', Glyph: GlyphTwilio },
-  github:    { domain: 'github.com',      Glyph: GlyphGitHub },
-  heroku:    { domain: 'heroku.com',      Glyph: GlyphGitHub },
-  datadog:   { domain: 'datadoghq.com',   Glyph: GlyphGitHub },
-  'crypto-wallet': { domain: '', Glyph: GlyphCrypto },
 }
 
 function fallbackGlyphForCategory(category: AddonCategory): Glyph {
@@ -72,7 +67,6 @@ function fallbackGlyphForCategory(category: AddonCategory): Glyph {
     case 'sms':        return GlyphTwilio
     case 'vcs':        return GlyphGitHub
     case 'dev':        return GlyphGitHub
-    case 'crypto':     return GlyphCrypto
   }
 }
 

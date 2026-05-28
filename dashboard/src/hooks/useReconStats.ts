@@ -23,16 +23,9 @@ export type UseReconStatsResult = {
 
 const PROVIDER_SEVERITY: Record<string, FindingSeverity> = {
   AWS: 'critical',
-  'AWS SNS': 'medium',
   Stripe: 'critical',
-  Mnemonic: 'critical',
-  Crypto: 'critical',
   TruffleHog: 'high',
   GitLeaks: 'high',
-  GitHub: 'high',
-  GitLab: 'high',
-  Heroku: 'high',
-  Datadog: 'high',
   OpenAI: 'high',
   Anthropic: 'high',
   SendGrid: 'high',
@@ -41,31 +34,26 @@ const PROVIDER_SEVERITY: Record<string, FindingSeverity> = {
   Brevo: 'medium',
   Mandrill: 'medium',
   MailerSend: 'medium',
-  Postmark: 'medium',
-  SparkPost: 'medium',
-  Mailtrap: 'medium',
-  Mailjet: 'medium',
   Nexmo: 'medium',
   Telnyx: 'medium',
   MessageBird: 'medium',
-  Plivo: 'medium',
   SMTP: 'high',
   GCP: 'critical',
-  Cloudflare: 'high',
-  DigitalOcean: 'medium',
-  Sentry: 'medium',
-  NPM: 'medium',
-  PyPI: 'medium',
-  Slack: 'medium',
-  Azure: 'high',
-  Tencent: 'medium',
-  XSMTP: 'medium',
 }
 
 function severityFor(provider: string): FindingSeverity {
   return PROVIDER_SEVERITY[provider] ?? 'medium'
 }
 
+function hostnameFromUrl(url: string): string {
+  if (!url) return ''
+  try {
+    return new URL(url).host
+  } catch {
+    const m = url.match(/^https?:\/\/([^/?#]+)/)
+    return m && m[1] ? m[1] : url
+  }
+}
 
 function pathFromUrl(url: string): string | undefined {
   if (!url) return undefined
@@ -76,45 +64,26 @@ function pathFromUrl(url: string): string | undefined {
   }
 }
 
-/** [type, key_value, source_url, timestamp, metadata, status] from app.py's recent_findings tuple */
+/** [type, key_value, source_url, timestamp, metadata] from app.py's recent_findings tuple */
 function mapRecent(row: ReconRecentFinding, i: number): Finding {
-  const [type, keyValue, sourceUrl, ts, metadata, status] = row
+  const [type, keyValue, sourceUrl, ts, metadata] = row
   const provider = String(type ?? 'Unknown')
-
-  // key_value holds "//hostname (module-name)" — strip leading // and (module) suffix
-  const hostname = String(keyValue ?? '').replace(/^\/\//, '').replace(/\s*\(.*\)$/, '').trim()
-
-  // metadata format: "/path):credential" — split on first "):" to get path + credential
-  let extractedPath: string | undefined = pathFromUrl(sourceUrl ?? '')
-  let ruleLabel = `${provider} credential`
-  let credential = metadata ?? ''
-  if (metadata && metadata.includes('):')) {
-    const idx = metadata.indexOf('):')
-    const pathPart = metadata.slice(0, idx)
-    credential = metadata.slice(idx + 2)
-    if (pathPart.startsWith('/') || pathPart.startsWith('.')) {
-      extractedPath = pathPart
-      ruleLabel = `${provider} via ${pathPart}`
-    }
-  }
-
   return {
     id: `rs-${provider}-${i}-${ts}`,
     at: ts ?? new Date().toISOString(),
     provider,
-    ruleLabel,
-    hostname,
+    ruleLabel: `${provider} credential`,
+    hostname: hostnameFromUrl(sourceUrl ?? ''),
     url: sourceUrl ?? undefined,
-    path: extractedPath,
-    detail: credential,
+    path: pathFromUrl(sourceUrl ?? ''),
+    detail: keyValue ?? '',
     details: {
       validated: true,
-      raw: credential,
-      extra: [{ key: 'Source', value: `${hostname}${extractedPath ?? ''}` }],
+      raw: keyValue ?? '',
+      extra: metadata ? [{ key: 'Metadata', value: metadata }] : undefined,
     },
     severity: severityFor(provider),
     reportedByHost: 'recon-backend',
-    status: (status as 'valid' | 'hit') || 'valid',
   }
 }
 
@@ -131,7 +100,6 @@ export function useReconStats(): UseReconStatsResult {
     setRaw(payload)
     setFindings((payload.recent_findings ?? []).map((row, i) => mapRecent(row, i)))
     setLastError(null)
-    setState('connected')
   }
 
   const refresh = async (): Promise<ReconStats | null> => {
@@ -184,9 +152,8 @@ export function useReconStats(): UseReconStatsResult {
     socket.on('stats_update', onStatsUpdate)
 
     // Fallback poll every 10s in case the socket is wedged.
-    // Always fire — the `state` captured here is stale due to the empty dep array.
     pollIdRef.current = window.setInterval(() => {
-      void refresh()
+      if (state !== 'connected') void refresh()
     }, 10_000)
 
     return () => {

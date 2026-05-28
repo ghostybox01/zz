@@ -47,7 +47,6 @@ FILE_MAPPING = {
     # VALID - Save full details
     'aws_valid.txt': ('AWS', 'valid'),
     'aws_credentials.txt': ('AWS', 'valid'),
-    'valid_github_token.txt': ('GitHub', 'valid'),
     'valid_sendgrid.txt': ('SendGrid', 'valid'),
     'valid_stripe.txt': ('Stripe', 'valid'),
     'valid_openai.txt': ('OpenAI', 'valid'),
@@ -62,14 +61,10 @@ FILE_MAPPING = {
     'valid_mandrill.txt': ('Mandrill', 'valid'),
     'valid_mailersend.txt': ('MailerSend', 'valid'),
     'valid_gcp_key.txt': ('GCP', 'valid'),
-    'mnemonic_seed_phrases.txt': ('Mnemonic', 'valid'),
-    'valid_crypto.txt': ('Crypto', 'valid'),
     'valid_postmark.txt': ('Postmark', 'valid'),
     'valid_sparkpost.txt': ('SparkPost', 'valid'),
     'valid_mailtrap.txt': ('Mailtrap', 'valid'),
     'valid_mailjet.txt': ('Mailjet', 'valid'),
-    'valid_heroku.txt': ('Heroku', 'valid'),
-    'valid_datadog.txt': ('Datadog', 'valid'),
     'valid_plivo.txt': ('Plivo', 'valid'),
     'trufflehog_secrets.txt': ('TruffleHog', 'valid'),
     'gitleaks_secrets.txt': ('GitLeaks', 'valid'),
@@ -79,12 +74,9 @@ FILE_MAPPING = {
     'Slack_Webhook_found.txt':         ('Slack',         'hit'),
     'Cloudflare_Global_found.txt':     ('Cloudflare',    'valid'),
     'DigitalOcean_PAT_found.txt':      ('DigitalOcean',  'valid'),
-    'Heroku_API_Key_found.txt':        ('Heroku',        'valid'),
-    'Datadog_API_Key_found.txt':       ('Datadog',       'valid'),
     'Sentry_DSN_found.txt':            ('Sentry',        'valid'),
     'NPM_Token_found.txt':             ('NPM',           'valid'),
     'PyPI_Token_found.txt':            ('PyPI',          'valid'),
-    'GitLab_PAT_found.txt':            ('GitLab',        'valid'),
     'Postmark_Server_Token_found.txt': ('Postmark',      'valid'),
     'Mailjet_API_Key_found.txt':       ('Mailjet',       'valid'),
     'AWS_SNS_Topic_ARN_found.txt':     ('AWS SNS',       'hit'),
@@ -105,8 +97,6 @@ FILE_MAPPING = {
     'sparkpost_found.txt':  ('SparkPost',  'hit'),
     'mailtrap_found.txt':   ('Mailtrap',   'hit'),
     'mailjet_found.txt':    ('Mailjet',    'hit'),
-    'heroku_found.txt':     ('Heroku',     'hit'),
-    'datadog_found.txt':    ('Datadog',    'hit'),
     'plivo_found.txt':      ('Plivo',      'hit'),
     # HITS - Only count
     'smtp_found.txt': ('SMTP', 'hit'),
@@ -3760,11 +3750,12 @@ def _crack_session_view(sess: dict) -> dict:
         'remote_pids':   dict(sess.get('remote_pids') or {}),
         'finished_at':   sess.get('finished_at'),
         'last_error':    sess.get('last_error'),
-        'scanned':       int(sess.get('last_progress') or 0),
-        'speed':         float(sess.get('last_speed') or 0),
-        'targets':       targets,
-        'hits':          hits,
-        'valid_hits':    valid_hits,
+        'scanned':          int(sess.get('last_progress') or 0),
+        'speed':            float(sess.get('last_speed') or 0),
+        'targets':          targets,
+        'hits':             hits,
+        'valid_hits':       valid_hits,
+        'invalid_hosts':    int(sess.get('last_invalid') or 0),
     }
 
 
@@ -4199,6 +4190,23 @@ def _poll_live_results(session_id: str) -> None:
                         )
                     except Exception as _pe:
                         print(f'[live-poll] progress {ip}: {_pe}')
+                    # ── crack_stats.json: read invalid/failed host count ──
+                    try:
+                        stats_out = mgr.ssh_exec(
+                            ip,
+                            f"cat {remote_dir}/ResultJS/crack_stats.json 2>/dev/null || echo '{{}}'",
+                            5,
+                        )
+                        import json as _json
+                        stats_obj = _json.loads((stats_out or '{}').strip() or '{}')
+                        failed = int(stats_obj.get('failed', 0))
+                        if failed > 0:
+                            _update_crack_session(
+                                session_id,
+                                lambda s, _f=failed: s.update({'last_invalid': _f}),
+                            )
+                    except Exception:
+                        pass
                     ssh.close()
                 except Exception as e:
                     print(f'[live-poll] {ip}: {e}')
