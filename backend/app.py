@@ -75,7 +75,6 @@ FILE_MAPPING = {
     'Cloudflare_Global_found.txt':     ('Cloudflare',    'valid'),
     'DigitalOcean_PAT_found.txt':      ('DigitalOcean',  'valid'),
     'Sentry_DSN_found.txt':            ('Sentry',        'valid'),
-    'NPM_Token_found.txt':             ('NPM',           'valid'),
     'PyPI_Token_found.txt':            ('PyPI',          'valid'),
     'Postmark_Server_Token_found.txt': ('Postmark',      'valid'),
     'Mailjet_API_Key_found.txt':       ('Mailjet',       'valid'),

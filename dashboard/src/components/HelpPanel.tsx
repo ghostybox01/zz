@@ -73,7 +73,7 @@ export function HelpPanel() {
               <tr><td>Payment</td><td>Stripe, PayPal</td><td>Read-only balance/account check only — no charges.</td></tr>
               <tr><td>SMS providers</td><td>Twilio, Nexmo, MessageBird, Plivo…</td><td>Balance lookup and account confirmation.</td></tr>
               <tr><td>Version control</td><td>GitHub PAT, GitLab PAT</td><td>Lists repos to confirm scope.</td></tr>
-              <tr><td>Developer tools</td><td>Heroku, Datadog, Sentry, NPM…</td><td>Account/org endpoint validation.</td></tr>
+              <tr><td>Developer tools</td><td>Sentry DSN, PyPI, DigitalOcean…</td><td>Account/org endpoint validation.</td></tr>
               <tr><td>Crypto wallets</td><td>Bitcoin, Ethereum, Solana private keys</td><td>Derives public address and fetches on-chain balance. Enable in Settings first.</td></tr>
             </tbody>
           </table>

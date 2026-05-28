@@ -193,7 +193,6 @@ type AWSScanner struct {
 	CloudflareGlobalPattern *regexp.Regexp
 	DigitalOceanPATPattern  *regexp.Regexp
 	SentryDSNPattern        *regexp.Regexp
-	NpmTokenPattern         *regexp.Regexp
 	PyPITokenPattern        *regexp.Regexp
 	PostmarkAPIKeyPattern   *regexp.Regexp
 	MailjetAPIKeyPattern    *regexp.Regexp
@@ -579,8 +578,6 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		DigitalOceanPATPattern: regexp.MustCompile(`\bdop_v1_[a-f0-9]{64}\b`),
 		// Sentry DSN
 		SentryDSNPattern: regexp.MustCompile(`https://[a-f0-9]{32}@(?:[a-z0-9.-]+\.)?ingest\.sentry\.io/\d+`),
-		// NPM token
-		NpmTokenPattern: regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`),
 		// PyPI token
 		PyPITokenPattern: regexp.MustCompile(`\bpypi-[A-Za-z0-9_-]{50,}\b`),
 		// Postmark server token (UUID-ish)
@@ -3451,7 +3448,6 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.CloudflareGlobalPattern, "Cloudflare Global"},
 		{a.DigitalOceanPATPattern, "DigitalOcean PAT"},
 		{a.SentryDSNPattern, "Sentry DSN"},
-		{a.NpmTokenPattern, "NPM Token"},
 		{a.PyPITokenPattern, "PyPI Token"},
 		{a.PostmarkAPIKeyPattern, "Postmark Server Token"},
 		{a.MailjetAPIKeyPattern, "Mailjet API Key"},
