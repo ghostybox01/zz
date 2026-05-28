@@ -85,9 +85,11 @@ FILE_MAPPING = {
     # Validated-API finds written by detector_*.go files
     'valid_tencent.txt':               ('Tencent',       'valid'),
     'valid_xsmtp.txt':                 ('XSMTP',         'valid'),
-    # AWS sub-scans: potential (STS failed) and deep-scan info dumps
+    # AWS sub-scans: potential (STS failed)
+    # aws_deep_scan.txt intentionally excluded — it is an unstructured log dump
+    # (format: "AWS AKIA...:secret SES: map[]...") that cannot be parsed cleanly
+    # into key_value/source_url fields. The valid keypairs are already in aws_valid.txt.
     'aws_ses_potential_unverified.txt': ('AWS',          'hit'),
-    'aws_deep_scan.txt':               ('AWS',           'hit'),
     # Pre-validation finds — saved immediately on pattern match regardless of API result
     'brevo_found.txt':      ('Brevo',      'hit'),
     'xsmtp_found.txt':      ('XSMTP',      'hit'),
@@ -5816,24 +5818,39 @@ def handle_vps_stop_monitoring():
         emit('vps_monitoring_stopped', {'success': True})
 
 def _cleanup_false_positive_credentials():
-    """Remove credential entries that are URL fragments (broken file parsing artifacts)."""
+    """Remove credential entries that are parsing artifacts, exploit side-effects,
+    or deep-scan log dumps rather than genuine discovered credentials."""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30)
         cursor = conn.cursor()
-        # Remove entries where key_value is a URL fragment (starts with //)
-        # or where source_url is the bare scheme 'http' or 'https'
         cursor.execute("""
             DELETE FROM credentials
-            WHERE key_value LIKE '//%'
-               OR source_url IN ('http', 'https')
-               OR key_value LIKE 'http://%'
-               OR key_value LIKE 'https://%'
+            WHERE
+                -- URL fragments from old http:// source_url parsing
+                key_value LIKE '//%'
+                OR key_value LIKE 'http://%'
+                OR key_value LIKE 'https://%'
+                OR key_value IN ('http', 'https', '')
+                OR source_url IN ('http', 'https', '')
+                -- Exploit-method side-effects written by old binary (SSRF/LFI/WAF/react2shell)
+                OR key_value LIKE '%(ssrf%'
+                OR key_value LIKE '%(lfi%'
+                OR key_value LIKE '%(rce%'
+                OR key_value LIKE '%(xss%'
+                OR key_value LIKE '%(ssti%'
+                OR key_value LIKE '%(bypass-waf%'
+                OR key_value LIKE '%(react2shell%'
+                OR key_value LIKE '%?phpinfo%'
+                OR key_value LIKE '%phpinfo.php%'
+                OR key_value LIKE '%_profiler%'
+                -- aws_deep_scan.txt entries: source_url = 'AWS AKIA...' (log dump, not structured cred)
+                OR source_url LIKE 'AWS AKIA%'
         """)
         deleted = cursor.rowcount
         conn.commit()
         conn.close()
         if deleted > 0:
-            print(f'[cleanup] Removed {deleted} false-positive credential rows (URL fragments)')
+            print(f'[cleanup] Removed {deleted} false-positive credential rows')
     except Exception as e:
         print(f'[cleanup] false positive cleanup failed: {e}')
 

@@ -64,9 +64,12 @@ function pathFromUrl(url: string): string | undefined {
   }
 }
 
-/** True when a string is an AWS AKIA access key ID. */
-function isAkiaKey(s: string | null | undefined): boolean {
-  return typeof s === 'string' && /^AKIA[A-Z0-9]{16}$/.test(s)
+/** Extract an AKIA access key ID from a string, or return null.
+ *  Handles bare "AKIA..." and prefixed "AWS AKIA..." (from aws_deep_scan.txt log format). */
+function extractAkiaKey(s: string | null | undefined): string | null {
+  if (typeof s !== 'string') return null
+  const m = s.match(/AKIA[A-Z0-9]{16}/)
+  return m ? m[0] : null
 }
 
 /** [type, key_value, source_url, timestamp, metadata, status, dbId?] from app.py's recent_findings tuple */
@@ -74,21 +77,25 @@ function mapRecent(row: ReconRecentFinding, i: number): Finding {
   const [type, keyValue, sourceUrl, ts, metadata, , dbId] = row
   const provider = String(type ?? 'Unknown')
 
-  // aws_valid.txt stores "access_key:secret_key" with no source domain,
-  // so after parsing: source_url = AKIA access key ID, key_value = secret key.
-  // Detect this pattern and display as a proper ACCESS:SECRET pair.
-  const akiaInSource = isAkiaKey(sourceUrl)
-  const displayUrl = akiaInSource ? undefined : (sourceUrl || undefined)
+  // aws_valid.txt (old format) stores "access_key:secret_key" with no domain,
+  // so source_url ends up as the AKIA key and key_value as the secret.
+  // aws_deep_scan.txt stores "AWS AKIA...:secret SES: ..." log lines.
+  // In both cases extract the AKIA key from source_url and strip log junk.
+  const akiaFromSource = extractAkiaKey(sourceUrl)
+  const displayUrl = akiaFromSource ? undefined : (sourceUrl || undefined)
+
+  // Strip " SES" / " SNS" log suffixes from key_value for deep-scan entries
+  const cleanSecret = (keyValue ?? '').replace(/\s+(SES|SNS|IAM|Fargate).*$/i, '').trim()
 
   // Combined credential text for display/copy
-  const credText = akiaInSource
-    ? `${sourceUrl}:${keyValue ?? ''}`  // ACCESS_KEY:SECRET_KEY
+  const credText = akiaFromSource
+    ? `${akiaFromSource}:${cleanSecret}`  // ACCESS_KEY:SECRET_KEY
     : (keyValue ?? '')
 
   const extra: Array<{ key: string; value: string }> = []
-  if (akiaInSource) {
-    extra.push({ key: 'ACCESS KEY ID', value: String(sourceUrl) })
-    extra.push({ key: 'SECRET KEY', value: String(keyValue ?? '') })
+  if (akiaFromSource) {
+    extra.push({ key: 'ACCESS KEY ID', value: akiaFromSource })
+    extra.push({ key: 'SECRET KEY', value: cleanSecret })
   } else if (metadata) {
     extra.push({ key: 'Metadata', value: metadata })
   }
@@ -101,7 +108,7 @@ function mapRecent(row: ReconRecentFinding, i: number): Finding {
     at: ts ?? new Date().toISOString(),
     provider,
     ruleLabel: `${provider} credential`,
-    hostname: akiaInSource ? 'aws-account' : hostnameFromUrl(sourceUrl ?? ''),
+    hostname: akiaFromSource ? 'aws-account' : hostnameFromUrl(sourceUrl ?? ''),
     url: displayUrl,
     path: displayUrl ? pathFromUrl(displayUrl) : undefined,
     detail: credText,
