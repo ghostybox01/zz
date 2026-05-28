@@ -189,16 +189,12 @@ type AWSScanner struct {
 	SlackBotTokenPattern    *regexp.Regexp
 	SlackUserTokenPattern   *regexp.Regexp
 	SlackWebhookPattern     *regexp.Regexp
-	DiscordBotTokenPattern  *regexp.Regexp
-	DiscordWebhookPattern   *regexp.Regexp
 	CloudflareTokenPattern  *regexp.Regexp
 	CloudflareGlobalPattern *regexp.Regexp
 	DigitalOceanPATPattern  *regexp.Regexp
 	SentryDSNPattern        *regexp.Regexp
 	NpmTokenPattern         *regexp.Regexp
 	PyPITokenPattern        *regexp.Regexp
-	GitLabPATPattern        *regexp.Regexp
-	JWTPattern              *regexp.Regexp
 	PostmarkAPIKeyPattern   *regexp.Regexp
 	MailjetAPIKeyPattern    *regexp.Regexp
 	AWSSNSTopicARNPattern   *regexp.Regexp
@@ -576,11 +572,9 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		SlackUserTokenPattern: regexp.MustCompile(`xox[parsi]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{20,}`),
 		SlackWebhookPattern:   regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}`),
 		// Discord — bot token (3 base64 parts), webhook URLs
-		DiscordBotTokenPattern: regexp.MustCompile(`[MN][A-Za-z0-9_-]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}`),
-		DiscordWebhookPattern:  regexp.MustCompile(`https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{17,20}/[\w-]{60,80}`),
 		// Cloudflare — scoped tokens & legacy global keys
-		CloudflareTokenPattern:  regexp.MustCompile(`\b[A-Za-z0-9_-]{40}\b`), // narrow via context elsewhere (Bearer + cloudflare)
-		CloudflareGlobalPattern: regexp.MustCompile(`(?i)cloudflare[^\n]*[\b:=]([a-f0-9]{37})\b`),
+		CloudflareTokenPattern:  regexp.MustCompile(`[A-Za-z0-9_-]{40}`), // narrowed via context elsewhere (Bearer + cloudflare)
+		CloudflareGlobalPattern: regexp.MustCompile(`(?i)cloudflare[^\n]*[:=]([a-f0-9]{37})`),
 		// DigitalOcean Personal Access Token
 		DigitalOceanPATPattern: regexp.MustCompile(`\bdop_v1_[a-f0-9]{64}\b`),
 		// Sentry DSN
@@ -589,10 +583,6 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		NpmTokenPattern: regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`),
 		// PyPI token
 		PyPITokenPattern: regexp.MustCompile(`\bpypi-[A-Za-z0-9_-]{50,}\b`),
-		// GitLab PAT (classic and personal)
-		GitLabPATPattern: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),
-		// JWT — three base64url-encoded parts
-		JWTPattern: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`),
 		// Postmark server token (UUID-ish)
 		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)postmark[^\n]*server[^\n]*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
 		// Mailjet — API key:secret pair
@@ -3473,15 +3463,11 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.SlackBotTokenPattern, "Slack Bot Token"},
 		{a.SlackUserTokenPattern, "Slack User Token"},
 		{a.SlackWebhookPattern, "Slack Webhook"},
-		{a.DiscordBotTokenPattern, "Discord Bot Token"},
-		{a.DiscordWebhookPattern, "Discord Webhook"},
 		{a.CloudflareGlobalPattern, "Cloudflare Global"},
 		{a.DigitalOceanPATPattern, "DigitalOcean PAT"},
 		{a.SentryDSNPattern, "Sentry DSN"},
 		{a.NpmTokenPattern, "NPM Token"},
 		{a.PyPITokenPattern, "PyPI Token"},
-		{a.GitLabPATPattern, "GitLab PAT"},
-		{a.JWTPattern, "JWT"},
 		{a.PostmarkAPIKeyPattern, "Postmark Server Token"},
 		{a.MailjetAPIKeyPattern, "Mailjet API Key"},
 		{a.AWSSNSTopicARNPattern, "AWS SNS Topic ARN"},
