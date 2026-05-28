@@ -463,6 +463,39 @@ def api_vps_servers():
     
     return jsonify({'servers': manager.load_servers()})
 
+def _parse_result_line(line: str):
+    """Return (source_url, key_value, metadata) from a result file line.
+
+    Standard format: source_url:key_value[:metadata]
+    The scanner now strips http:// from source_url before writing, but old files
+    may still have full URLs. Handle both.
+    """
+    line = line.strip()
+    if not line:
+        return None, None, None
+    # If line starts with http(s)://, the URL has a colon — handle specially
+    if line.startswith(('http://', 'https://')):
+        # Find the end of the URL: stop at the first colon NOT preceded by a slash
+        # Simpler: strip the scheme, find the rest
+        scheme_end = line.index('://') + 3
+        after_scheme = line[scheme_end:]  # e.g. "domain.com/path:AKIA:secret"
+        colon_in_rest = after_scheme.find(':')
+        if colon_in_rest == -1:
+            return line, '', ''
+        source_url = line[:scheme_end + colon_in_rest]
+        remainder = after_scheme[colon_in_rest + 1:]
+        key_parts = remainder.split(':', 1)
+        return source_url, key_parts[0].strip(), (key_parts[1].strip() if len(key_parts) > 1 else '')
+    # Standard case
+    parts = line.split(':', 1)
+    if len(parts) < 2:
+        return line, '', ''
+    source_url = parts[0].strip()
+    key_and_rest = parts[1].strip()
+    key_parts = key_and_rest.split(':', 1)
+    return source_url, key_parts[0].strip(), (key_parts[1].strip() if len(key_parts) > 1 else '')
+
+
 def _parse_crack_log_progress(ip: str, session_id: str) -> int:
     """Return the most-recently parsed line-progress for a crack session.
 
@@ -4127,14 +4160,10 @@ def _poll_live_results(session_id: str) -> None:
                                             line = line.strip()
                                             if not line:
                                                 continue
-                                            parts = line.split(':', 1)
-                                            if len(parts) < 2:
+                                            src_url, key_value, metadata = _parse_result_line(line)
+                                            if not src_url or not key_value:
                                                 continue
-                                            source_url = parts[0].strip()
-                                            key_and_rest = parts[1].strip()
-                                            key_parts = key_and_rest.split(':', 1)
-                                            key_value = key_parts[0].strip()
-                                            metadata = key_parts[1].strip() if len(key_parts) > 1 else ''
+                                            source_url = src_url
                                             cursor.execute(
                                                 'INSERT OR IGNORE INTO credentials '
                                                 '(type, key_value, source_url, metadata, status, session_id) '
@@ -5786,9 +5815,33 @@ def handle_vps_stop_monitoring():
         manager.stop_monitoring()
         emit('vps_monitoring_stopped', {'success': True})
 
+def _cleanup_false_positive_credentials():
+    """Remove credential entries that are URL fragments (broken file parsing artifacts)."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        cursor = conn.cursor()
+        # Remove entries where key_value is a URL fragment (starts with //)
+        # or where source_url is the bare scheme 'http' or 'https'
+        cursor.execute("""
+            DELETE FROM credentials
+            WHERE key_value LIKE '//%'
+               OR source_url IN ('http', 'https')
+               OR key_value LIKE 'http://%'
+               OR key_value LIKE 'https://%'
+        """)
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if deleted > 0:
+            print(f'[cleanup] Removed {deleted} false-positive credential rows (URL fragments)')
+    except Exception as e:
+        print(f'[cleanup] false positive cleanup failed: {e}')
+
+
 # ==================== STARTUP ====================
 # Run at module-load time so gunicorn workers (which import app:app, never hit __main__) initialize the DB.
 init_db()
+_cleanup_false_positive_credentials()
 
 # Kick the SSH monitor at boot. Previously this only started when the
 # frontend emitted `vps_start_monitoring` over socket.io, so a worker
