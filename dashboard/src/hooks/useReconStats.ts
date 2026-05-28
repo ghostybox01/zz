@@ -64,23 +64,51 @@ function pathFromUrl(url: string): string | undefined {
   }
 }
 
-/** [type, key_value, source_url, timestamp, metadata] from app.py's recent_findings tuple */
+/** True when a string is an AWS AKIA access key ID. */
+function isAkiaKey(s: string | null | undefined): boolean {
+  return typeof s === 'string' && /^AKIA[A-Z0-9]{16}$/.test(s)
+}
+
+/** [type, key_value, source_url, timestamp, metadata, status, dbId?] from app.py's recent_findings tuple */
 function mapRecent(row: ReconRecentFinding, i: number): Finding {
-  const [type, keyValue, sourceUrl, ts, metadata] = row
+  const [type, keyValue, sourceUrl, ts, metadata, , dbId] = row
   const provider = String(type ?? 'Unknown')
+
+  // aws_valid.txt stores "access_key:secret_key" with no source domain,
+  // so after parsing: source_url = AKIA access key ID, key_value = secret key.
+  // Detect this pattern and display as a proper ACCESS:SECRET pair.
+  const akiaInSource = isAkiaKey(sourceUrl)
+  const displayUrl = akiaInSource ? undefined : (sourceUrl || undefined)
+
+  // Combined credential text for display/copy
+  const credText = akiaInSource
+    ? `${sourceUrl}:${keyValue ?? ''}`  // ACCESS_KEY:SECRET_KEY
+    : (keyValue ?? '')
+
+  const extra: Array<{ key: string; value: string }> = []
+  if (akiaInSource) {
+    extra.push({ key: 'ACCESS KEY ID', value: String(sourceUrl) })
+    extra.push({ key: 'SECRET KEY', value: String(keyValue ?? '') })
+  } else if (metadata) {
+    extra.push({ key: 'Metadata', value: metadata })
+  }
+
+  // Use the DB row id as the Finding id so Recheck/Resend can target it
+  const id = dbId != null ? String(dbId) : `rs-${provider}-${i}-${ts}`
+
   return {
-    id: `rs-${provider}-${i}-${ts}`,
+    id,
     at: ts ?? new Date().toISOString(),
     provider,
     ruleLabel: `${provider} credential`,
-    hostname: hostnameFromUrl(sourceUrl ?? ''),
-    url: sourceUrl ?? undefined,
-    path: pathFromUrl(sourceUrl ?? ''),
-    detail: keyValue ?? '',
+    hostname: akiaInSource ? 'aws-account' : hostnameFromUrl(sourceUrl ?? ''),
+    url: displayUrl,
+    path: displayUrl ? pathFromUrl(displayUrl) : undefined,
+    detail: credText,
     details: {
       validated: true,
-      raw: keyValue ?? '',
-      extra: metadata ? [{ key: 'Metadata', value: metadata }] : undefined,
+      raw: credText,
+      extra: extra.length > 0 ? extra : undefined,
     },
     severity: severityFor(provider),
     reportedByHost: 'recon-backend',

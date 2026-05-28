@@ -3,6 +3,7 @@ import type { Finding } from '../types'
 import { findingCredentialText } from '../lib/findingCredential'
 import { FindingDetail } from './FindingDetail'
 import { TableToolbar } from './TableToolbar'
+import { credentials as credApi } from '../lib/reconApi'
 
 type SortKey = 'provider' | 'at' | 'severity'
 
@@ -185,12 +186,43 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
     }
   }
 
+  async function handleRecheck(f: Finding) {
+    const numId = parseInt(f.id, 10)
+    if (isNaN(numId)) return
+    try {
+      const res = await credApi.recheck(numId)
+      alert(res.live
+        ? `✅ LIVE — ${res.info || 'Credential is valid.'}`
+        : `❌ DEAD — ${res.info || 'Credential no longer valid.'}`)
+    } catch (e) {
+      alert(`Recheck failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  async function handleResend(f: Finding) {
+    const numId = parseInt(f.id, 10)
+    if (isNaN(numId)) return
+    try {
+      const res = await credApi.resend(numId)
+      if (res.ok) {
+        alert('✅ Sent to Telegram.')
+      } else {
+        alert(`❌ Resend failed: ${res.error ?? 'Unknown error'}`)
+      }
+    } catch (e) {
+      alert(`Resend failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   if (activeFinding) {
+    const numId = parseInt(activeFinding.id, 10)
     return (
       <section className="card-block card-block--hits card-block--detail">
         <FindingDetail
           finding={activeFinding}
           onBack={() => setActiveId(null)}
+          onRecheck={!isNaN(numId) ? handleRecheck : undefined}
+          onResend={!isNaN(numId) ? handleResend : undefined}
         />
       </section>
     )

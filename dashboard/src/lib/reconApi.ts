@@ -24,6 +24,7 @@ export type ReconRecentFinding = readonly [
   timestamp: string,
   metadata: string | null,
   status: string,
+  dbId?: number,
 ]
 
 export type ReconStats = {
@@ -854,6 +855,13 @@ export type StripeRefreshResult = {
   pending?: Array<{ amount: number; currency: string }>
   status?: number
   error?: string
+}
+
+export const credentials = {
+  recheck: (id: number) =>
+    postJson<{ ok: boolean; live: boolean; status: string; info: string }>(`/credentials/${id}/recheck`, {}),
+  resend: (id: number) =>
+    postJson<{ ok: boolean; error?: string }>(`/credentials/${id}/resend`, {}),
 }
 
 export const findings = {

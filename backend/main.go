@@ -4201,7 +4201,7 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 
 	a.logValid("AWS", fmt.Sprintf("%s (S3: %s)", keyLine, s3Status))
 	a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(sourceURL), keyLine, a.DefaultRegion), "aws_credentials.txt")
-	a.saveIntoFile(fmt.Sprintf("%s:%s", ak, sk), "aws_valid.txt")
+	a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(sourceURL), ak, sk), "aws_valid.txt")
 
 	globalCounters.mu.Lock()
 	globalCounters.AWSKeysValidated++

