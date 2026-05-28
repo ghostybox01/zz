@@ -60,27 +60,14 @@ FILE_MAPPING = {
     'valid_brevo.txt': ('Brevo', 'valid'),
     'valid_mandrill.txt': ('Mandrill', 'valid'),
     'valid_mailersend.txt': ('MailerSend', 'valid'),
-    'valid_gcp_key.txt': ('GCP', 'valid'),
     'valid_postmark.txt': ('Postmark', 'valid'),
     'valid_sparkpost.txt': ('SparkPost', 'valid'),
     'valid_mailtrap.txt': ('Mailtrap', 'valid'),
     'valid_mailjet.txt': ('Mailjet', 'valid'),
     'valid_plivo.txt': ('Plivo', 'valid'),
-    'trufflehog_secrets.txt': ('TruffleHog', 'valid'),
-    'gitleaks_secrets.txt': ('GitLeaks', 'valid'),
     # Wave-5 — pattern-only finds (saved by main.go's nonValidatedChecks loop)
-    'Slack_Bot_Token_found.txt':       ('Slack',         'hit'),
-    'Slack_User_Token_found.txt':      ('Slack',         'hit'),
-    'Slack_Webhook_found.txt':         ('Slack',         'hit'),
-    'Cloudflare_Global_found.txt':     ('Cloudflare',    'valid'),
-    'DigitalOcean_PAT_found.txt':      ('DigitalOcean',  'valid'),
-    'Sentry_DSN_found.txt':            ('Sentry',        'valid'),
-    'PyPI_Token_found.txt':            ('PyPI',          'valid'),
     'Postmark_Server_Token_found.txt': ('Postmark',      'valid'),
     'Mailjet_API_Key_found.txt':       ('Mailjet',       'valid'),
-    'AWS_SNS_Topic_ARN_found.txt':     ('AWS SNS',       'hit'),
-    # nonValidatedChecks entry missing from original map
-    'Azure_SAS_Token_found.txt':       ('Azure',         'hit'),
     # Validated-API finds written by detector_*.go files
     'valid_tencent.txt':               ('Tencent',       'valid'),
     'valid_xsmtp.txt':                 ('XSMTP',         'valid'),
@@ -1162,7 +1149,7 @@ SCANNER_CONFIG_SCHEMA = {
     'scanning_features': ['aws_main_scan', 'github_token_deep_scan', 'smtp_credentials_scan'],
     'aws_checks': ['ses_quota_check', 'sns_limit_check', 'fargate_limit_check', 'federation_console_url'],
     'api_validation': [
-        'openai', 'anthropic', 'ai_all', 'stripe', 'gcp_api_key', 'sendgrid', 'mailgun',
+        'openai', 'anthropic', 'ai_all', 'stripe', 'sendgrid', 'mailgun',
         'twilio', 'nexmo', 'telnyx', 'messagebird', 'github',
         'postmark', 'sparkpost', 'mailtrap', 'mailjet', 'heroku', 'datadog', 'plivo',
         # Aliases consumed by the dashboard's addon catalog. main.go may not

@@ -86,15 +86,6 @@ export const SCAN_FILES: readonly ScanFileSchema[] = [
     toDetail: (_u, [w]) => w ?? '',
   },
   {
-    file: 'valid_slack_webhooks.txt',
-    provider: 'Slack',
-    severity: 'medium',
-    ruleLabel: 'Slack webhook URL',
-    hasSourceUrl: true,
-    trailingFields: 1,
-    toDetail: (_u, [w]) => w ?? '',
-  },
-  {
     file: 'valid_twilio.txt',
     provider: 'Twilio',
     severity: 'high',
@@ -221,15 +212,6 @@ export const SCAN_FILES: readonly ScanFileSchema[] = [
     toDetail: (_u, [v]) => v ?? '',
   },
   {
-    file: 'sentry_dsns_found.txt',
-    provider: 'Sentry',
-    severity: 'low',
-    ruleLabel: 'Sentry DSN',
-    hasSourceUrl: true,
-    trailingFields: 1,
-    toDetail: (_u, [v]) => v ?? '',
-  },
-  {
     file: 'backup_files_found.txt',
     provider: 'Backup',
     severity: 'medium',
@@ -237,15 +219,6 @@ export const SCAN_FILES: readonly ScanFileSchema[] = [
     hasSourceUrl: true,
     trailingFields: 0,
     toDetail: (u) => u,
-  },
-  {
-    file: 'trufflehog_secrets.txt',
-    provider: 'TruffleHog',
-    severity: 'high',
-    ruleLabel: 'TruffleHog verified secret',
-    hasSourceUrl: true,
-    trailingFields: 2,
-    toDetail: (_u, [det, sec]) => `${det} · ${maskOne(sec)}`,
   },
 ]
 

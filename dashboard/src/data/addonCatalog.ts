@@ -16,8 +16,6 @@ export type AddonCategory =
   | 'cloud'
   | 'payment'
   | 'sms'
-  | 'vcs'
-  | 'dev'
 
 export type AddonEntry = {
   /** Stable kebab-case slug — the wire format used in dispatch payloads. */

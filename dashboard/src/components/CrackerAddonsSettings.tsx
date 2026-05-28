@@ -23,12 +23,10 @@ const CATEGORY_LABELS: Record<AddonCategory, string> = {
   smtp:       'SMTP senders',
   payment:    'Payment',
   sms:        'SMS providers',
-  vcs:        'Version control',
-  dev:        'Developer tools',
 }
 
 const CATEGORY_ORDER: readonly AddonCategory[] = [
-  'ai', 'cloud', 'email-api', 'smtp', 'payment', 'sms', 'vcs', 'dev',
+  'ai', 'cloud', 'email-api', 'smtp', 'payment', 'sms',
 ]
 
 export function CrackerAddonsSettings() {
@@ -56,7 +54,7 @@ export function CrackerAddonsSettings() {
 
   const grouped = useMemo(() => {
     const out: Record<AddonCategory, AddonEntry[]> = {
-      ai: [], cloud: [], 'email-api': [], smtp: [], payment: [], sms: [], vcs: [], dev: [],
+      ai: [], cloud: [], 'email-api': [], smtp: [], payment: [], sms: [],
     }
     for (const a of ADDON_CATALOG) out[a.category].push(a)
     return out

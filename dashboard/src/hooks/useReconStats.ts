@@ -24,8 +24,6 @@ export type UseReconStatsResult = {
 const PROVIDER_SEVERITY: Record<string, FindingSeverity> = {
   AWS: 'critical',
   Stripe: 'critical',
-  TruffleHog: 'high',
-  GitLeaks: 'high',
   OpenAI: 'high',
   Anthropic: 'high',
   SendGrid: 'high',
@@ -38,7 +36,6 @@ const PROVIDER_SEVERITY: Record<string, FindingSeverity> = {
   Telnyx: 'medium',
   MessageBird: 'medium',
   SMTP: 'high',
-  GCP: 'critical',
 }
 
 function severityFor(provider: string): FindingSeverity {
