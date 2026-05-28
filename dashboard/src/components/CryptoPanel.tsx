@@ -70,12 +70,25 @@ export function CryptoPanel({ onToast }: Props) {
     }
   }, [onToast])
 
-  const copy = useCallback(async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      onToast('Copied to clipboard')
-    } catch {
-      onToast('Copy failed', 'Browser blocked clipboard access', 'error')
+  const copy = useCallback((text: string) => {
+    function fallbackCopy(t: string) {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = t
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+        onToast('Copied to clipboard')
+      } catch {
+        onToast('Copy failed', 'Clipboard access denied', 'error')
+      }
+    }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(() => onToast('Copied to clipboard')).catch(() => fallbackCopy(text))
+    } else {
+      fallbackCopy(text)
     }
   }, [onToast])
 

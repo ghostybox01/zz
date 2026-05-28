@@ -419,9 +419,28 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   }, [bulkCollected, bulkListName, onToast])
 
   const copyBulkToClipboard = () => {
-    navigator.clipboard.writeText(bulkCollected.join('\n')).then(() => {
-      onToast('Copied', `${bulkCollected.length} lines copied to clipboard`)
-    }).catch(() => onToast('Copy failed', 'Clipboard access denied', 'error'))
+    const text = bulkCollected.join('\n')
+    function fallbackCopy() {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+        onToast('Copied', `${bulkCollected.length} lines copied to clipboard`)
+      } catch {
+        onToast('Copy failed', 'Clipboard access denied', 'error')
+      }
+    }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(() => {
+        onToast('Copied', `${bulkCollected.length} lines copied to clipboard`)
+      }).catch(() => fallbackCopy())
+    } else {
+      fallbackCopy()
+    }
   }
 
   const importBulkTocracker = () => {

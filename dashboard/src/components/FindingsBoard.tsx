@@ -120,12 +120,23 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
 
   const openFinding = (id: string) => setActiveId(id)
 
-  const copyRow = async (f: Finding) => {
+  const copyRow = (f: Finding) => {
     const line = [f.provider, f.hostname, f.ruleLabel, findingCredentialText(f), f.severity, f.at].join('\t')
-    try {
-      await navigator.clipboard.writeText(line)
-    } catch {
-      /* ignore */
+    function fallbackCopy() {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = line
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      } catch { /* ignore */ }
+    }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(line).catch(() => fallbackCopy())
+    } else {
+      fallbackCopy()
     }
   }
 

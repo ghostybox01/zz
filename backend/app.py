@@ -74,8 +74,8 @@ FILE_MAPPING = {
     'trufflehog_secrets.txt': ('TruffleHog', 'valid'),
     'gitleaks_secrets.txt': ('GitLeaks', 'valid'),
     # Wave-5 — pattern-only finds (saved by main.go's nonValidatedChecks loop)
-    'Slack_Bot_Token_found.txt':       ('Slack',         'valid'),
-    'Slack_User_Token_found.txt':      ('Slack',         'valid'),
+    'Slack_Bot_Token_found.txt':       ('Slack',         'hit'),
+    'Slack_User_Token_found.txt':      ('Slack',         'hit'),
     'Slack_Webhook_found.txt':         ('Slack',         'hit'),
     'Cloudflare_Global_found.txt':     ('Cloudflare',    'valid'),
     'DigitalOcean_PAT_found.txt':      ('DigitalOcean',  'valid'),
@@ -89,12 +89,12 @@ FILE_MAPPING = {
     'Mailjet_API_Key_found.txt':       ('Mailjet',       'valid'),
     'AWS_SNS_Topic_ARN_found.txt':     ('AWS SNS',       'hit'),
     # nonValidatedChecks entry missing from original map
-    'Azure_SAS_Token_found.txt':       ('Azure',         'valid'),
+    'Azure_SAS_Token_found.txt':       ('Azure',         'hit'),
     # Validated-API finds written by detector_*.go files
     'valid_tencent.txt':               ('Tencent',       'valid'),
     'valid_xsmtp.txt':                 ('XSMTP',         'valid'),
     # AWS sub-scans: potential (STS failed) and deep-scan info dumps
-    'aws_ses_potential_unverified.txt': ('AWS',          'valid'),
+    'aws_ses_potential_unverified.txt': ('AWS',          'hit'),
     'aws_deep_scan.txt':               ('AWS',           'hit'),
     # Pre-validation finds — saved immediately on pattern match regardless of API result
     'brevo_found.txt':      ('Brevo',      'hit'),

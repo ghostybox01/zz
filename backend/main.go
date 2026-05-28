@@ -284,6 +284,9 @@ var base64CandidatePattern = regexp.MustCompile(`[a-zA-Z0-9+/=_-]{40,}`)
 // rather than real AWS secret keys (e.g. "Signature=<hex>", "Algorithm=<str>").
 var awsSkFPPattern = regexp.MustCompile(`^[A-Za-z]{3,}=`)
 
+// repeatedCharPattern matches 5+ consecutive identical chars — catches fake/demo keys
+var repeatedCharPattern = regexp.MustCompile(`(.)\1{4,}`)
+
 func tryDecodeBase64(s string) string {
 	re := regexp.MustCompile(`[^a-zA-Z0-9+/=_-]`)
 	cleaned := re.ReplaceAllString(s, "")
@@ -3744,7 +3747,24 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 	}
 
 	for _, check := range nonValidatedChecks {
-		keys := unique(check.Pattern.FindAllString(contentToScan, -1))
+		var rawKeys []string
+		if check.Pattern.NumSubexp() > 0 {
+			for _, m := range check.Pattern.FindAllStringSubmatch(contentToScan, -1) {
+				if len(m) > 1 && m[1] != "" {
+					rawKeys = append(rawKeys, m[1])
+				}
+			}
+		} else {
+			rawKeys = check.Pattern.FindAllString(contentToScan, -1)
+		}
+		// Drop matches that contain URL/HTML characters — page content, not credentials
+		var validKeys []string
+		for _, k := range rawKeys {
+			if !strings.ContainsAny(k, "./\"'<>(){}[]|\\") {
+				validKeys = append(validKeys, k)
+			}
+		}
+		keys := unique(validKeys)
 		for _, key := range keys {
 			if _, loaded := a.KnownKeys.LoadOrStore(key, true); !loaded {
 				a.logFound(check.Name, key, sourceURL)
@@ -3778,6 +3798,10 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 					// Reject URL-parameter false positives: real AWS secrets are random
 					// base64, never start with a word followed by '=' (e.g. "Signature=…")
 					if awsSkFPPattern.MatchString(sk) {
+						continue
+					}
+					// Reject degenerate access keys (e.g. AKIAAQAAAAAABQALACQA has AAAAAA run)
+					if repeatedCharPattern.MatchString(ak[:16]) {
 						continue
 					}
 					keyPair := fmt.Sprintf("%s:%s", ak, sk)

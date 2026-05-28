@@ -32,15 +32,32 @@ export function SSHKeySettings() {
     void reload()
   }, [])
 
-  const onCopy = async () => {
+  const onCopy = () => {
     if (!data?.pubkey) return
-    try {
-      await navigator.clipboard.writeText(data.pubkey)
-      setCopyState('copied')
-      window.setTimeout(() => setCopyState('idle'), 1800)
-    } catch {
-      setCopyState('error')
-      window.setTimeout(() => setCopyState('idle'), 2500)
+    const text = data.pubkey
+    function fallbackCopy() {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+        setCopyState('copied')
+        window.setTimeout(() => setCopyState('idle'), 1800)
+      } catch {
+        setCopyState('error')
+        window.setTimeout(() => setCopyState('idle'), 2500)
+      }
+    }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(() => {
+        setCopyState('copied')
+        window.setTimeout(() => setCopyState('idle'), 1800)
+      }).catch(() => fallbackCopy())
+    } else {
+      fallbackCopy()
     }
   }
 

@@ -70,7 +70,24 @@ function fmtMoney(cents: number | undefined, currency = 'USD'): string {
 }
 
 function copy(text: string, onDone?: () => void) {
-  navigator.clipboard?.writeText(text).then(onDone).catch(() => undefined)
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(onDone).catch(() => fallbackCopy(text, onDone))
+  } else {
+    fallbackCopy(text, onDone)
+  }
+}
+
+function fallbackCopy(text: string, onDone?: () => void) {
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0'
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    onDone?.()
+  } catch { /* ignore */ }
 }
 
 function CopyCell({
