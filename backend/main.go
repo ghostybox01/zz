@@ -284,8 +284,24 @@ var base64CandidatePattern = regexp.MustCompile(`[a-zA-Z0-9+/=_-]{40,}`)
 // rather than real AWS secret keys (e.g. "Signature=<hex>", "Algorithm=<str>").
 var awsSkFPPattern = regexp.MustCompile(`^[A-Za-z]{3,}=`)
 
-// repeatedCharPattern matches 5+ consecutive identical chars — catches fake/demo keys
-var repeatedCharPattern = regexp.MustCompile(`(.)\1{4,}`)
+// hasRepeatedChar returns true if s contains a run of minRun or more identical bytes.
+func hasRepeatedChar(s string, minRun int) bool {
+	if len(s) == 0 {
+		return false
+	}
+	run := 1
+	for i := 1; i < len(s); i++ {
+		if s[i] == s[i-1] {
+			run++
+			if run >= minRun {
+				return true
+			}
+		} else {
+			run = 1
+		}
+	}
+	return false
+}
 
 func tryDecodeBase64(s string) string {
 	re := regexp.MustCompile(`[^a-zA-Z0-9+/=_-]`)
@@ -3801,7 +3817,7 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 						continue
 					}
 					// Reject degenerate access keys (e.g. AKIAAQAAAAAABQALACQA has AAAAAA run)
-					if repeatedCharPattern.MatchString(ak[:16]) {
+					if hasRepeatedChar(ak[:16], 5) {
 						continue
 					}
 					keyPair := fmt.Sprintf("%s:%s", ak, sk)
