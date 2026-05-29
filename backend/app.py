@@ -3876,7 +3876,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             f"( command -v cpulimit >/dev/null 2>&1 || "
             f"  apt-get install -y cpulimit -qq 2>/dev/null || "
             f"  yum install -y cpulimit -q 2>/dev/null || true ) ; "
-            f"setsid nohup ionice -c 2 -n 7 nice -n 15 "
+            f"setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 "
             f"./reconx-scanner targets.txt </dev/null > crack.log 2>&1 & "
             f"_SP=$! ; "
             f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; "
