@@ -755,6 +755,7 @@ export default function App() {
             >
               <FindingsBoard
                 findings={findings}
+                onToast={pushAlertToast}
                 onRemoveFindings={(ids) => {
                   const idSet = new Set(ids)
                   setFindings((prev) => prev.filter((f) => !idSet.has(f.id)))

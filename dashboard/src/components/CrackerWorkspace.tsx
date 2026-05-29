@@ -594,10 +594,10 @@ export function CrackerWorkspace({
                                     if (r.ok) {
                                       crack.list().then((rr) => { if (Array.isArray(rr?.sessions)) setSessions(rr.sessions) }).catch(() => { /* swallow */ })
                                     } else {
-                                      alert(r.error ?? 'No running scanner found on workers')
+                                      onToast({ kind: 'error', title: r.error ?? 'No running scanner found on workers' })
                                     }
                                   })
-                                  .catch(() => alert('Reattach request failed'))
+                                  .catch(() => onToast({ kind: 'error', title: 'Reattach request failed' }))
                               }}
                               style={{ marginLeft: '0.4rem' }}
                             >

@@ -17,6 +17,8 @@ type Props = {
    * pruning (the backend ledger is owned by /api/clear, not /remove).
    */
   onRemoveFindings?: (ids: readonly string[]) => void
+  /** Toast callback — replaces browser alert() calls. */
+  onToast?: (title: string, message?: string, kind?: 'error' | 'info') => void
 }
 
 function shortId(id: string): string {
@@ -42,7 +44,7 @@ function vulnTag(rule: string): string {
   return 'CRED'
 }
 
-export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props) {
+export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('provider')
   const [dir, setDir] = useState<'asc' | 'desc'>('asc')
   const [addon, setAddon] = useState<string>('all')
@@ -54,6 +56,7 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
   // wired so existing UI continues to work; both narrow the same row set.
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState('')
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null)
 
   const addonChoices = useMemo(() => {
     const s = new Set<string>()
@@ -175,15 +178,18 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
     setSelected(new Set())
   }
   const handleRowTrash = (f: Finding) => {
-    if (window.confirm(`Delete finding ${shortId(f.id)} (${f.provider} · ${f.hostname})?`)) {
-      onRemoveFindings?.([f.id])
-      setSelected((prev) => {
-        if (!prev.has(f.id)) return prev
-        const next = new Set(prev)
-        next.delete(f.id)
-        return next
-      })
-    }
+    setConfirmDialog({
+      message: `Delete finding ${shortId(f.id)} (${f.provider} · ${f.hostname})?`,
+      onConfirm: () => {
+        onRemoveFindings?.([f.id])
+        setSelected((prev) => {
+          if (!prev.has(f.id)) return prev
+          const next = new Set(prev)
+          next.delete(f.id)
+          return next
+        })
+      },
+    })
   }
 
   async function handleRecheck(f: Finding) {
@@ -191,11 +197,13 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
     if (isNaN(numId)) return
     try {
       const res = await credApi.recheck(numId)
-      alert(res.live
-        ? `✅ LIVE — ${res.info || 'Credential is valid.'}`
-        : `❌ DEAD — ${res.info || 'Credential no longer valid.'}`)
+      if (res.live) {
+        onToast?.('Credential LIVE', res.info || 'Credential is valid.', 'info')
+      } else {
+        onToast?.('Credential DEAD', res.info || 'Credential no longer valid.', 'error')
+      }
     } catch (e) {
-      alert(`Recheck failed: ${e instanceof Error ? e.message : String(e)}`)
+      onToast?.('Recheck failed', e instanceof Error ? e.message : String(e), 'error')
     }
   }
 
@@ -205,12 +213,12 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
     try {
       const res = await credApi.resend(numId)
       if (res.ok) {
-        alert('✅ Sent to Telegram.')
+        onToast?.('Sent to Telegram', undefined, 'info')
       } else {
-        alert(`❌ Resend failed: ${res.error ?? 'Unknown error'}`)
+        onToast?.('Resend failed', res.error ?? 'Unknown error', 'error')
       }
     } catch (e) {
-      alert(`Resend failed: ${e instanceof Error ? e.message : String(e)}`)
+      onToast?.('Resend failed', e instanceof Error ? e.message : String(e), 'error')
     }
   }
 
@@ -301,9 +309,10 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
             disabled={!onClearAll || findings.length === 0}
             onClick={() => {
               if (!onClearAll) return
-              if (window.confirm(`Clear all ${findings.length} findings? This calls /api/clear on the backend.`)) {
-                void onClearAll()
-              }
+              setConfirmDialog({
+                message: `Clear all ${findings.length} findings? This calls /api/clear on the backend.`,
+                onConfirm: () => void onClearAll(),
+              })
             }}
             title={onClearAll ? 'POST /api/clear — clears credentials + result files' : 'Needs live backend'}
           >
@@ -434,6 +443,26 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings }: Props)
           )}
         </div>
       </div>
+
+      {confirmDialog && (
+        <div className="confirm-overlay" onClick={() => setConfirmDialog(null)} role="dialog" aria-modal="true">
+          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+            <p className="confirm-dialog__msg">{confirmDialog.message}</p>
+            <div className="confirm-dialog__actions">
+              <button type="button" className="btn-glass btn-glass--sm" onClick={() => setConfirmDialog(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-danger-outline confirm-dialog__confirm"
+                onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null) }}
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }

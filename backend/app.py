@@ -231,7 +231,7 @@ def import_from_files():
                             or any(p in _kv_l for p in (
                                 '(ssrf', '(lfi', '(rce', '(xss', '(ssti',
                                 '(bypass-waf', '(react2shell',
-                                '?phpinfo', 'phpinfo.php', '_profiler'))
+                                '?phpinfo', 'phpinfo(', 'phpinfo.php', '_profiler'))
                             or source_url.startswith('AWS AKIA')):
                         continue
 
@@ -6051,6 +6051,7 @@ def _cleanup_false_positive_credentials():
                 OR key_value LIKE '%(bypass-waf%'
                 OR key_value LIKE '%(react2shell%'
                 OR key_value LIKE '%?phpinfo%'
+                OR key_value LIKE '%phpinfo(%'
                 OR key_value LIKE '%phpinfo.php%'
                 OR key_value LIKE '%_profiler%'
                 -- aws_deep_scan.txt entries: source_url = 'AWS AKIA...' (log dump, not structured cred)
