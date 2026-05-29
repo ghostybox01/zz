@@ -3341,9 +3341,12 @@ def _load_crack_sessions() -> dict:
 def _save_crack_sessions(sessions: dict) -> None:
     """Persist the session store atomically and chmod 600. Mirrors
     _save_warc_state — sessions can carry worker IPs and PIDs that we don't
-    want world-readable."""
+    want world-readable.
+
+    Uses a PID-specific temp file so concurrent gunicorn workers don't race
+    on the same .tmp path (which caused [Errno 2] rename failures)."""
     try:
-        tmp = CRACK_SESSIONS_FILE + '.tmp'
+        tmp = f"{CRACK_SESSIONS_FILE}.tmp.{os.getpid()}"
         with open(tmp, 'w') as f:
             json.dump(sessions, f, indent=2)
         os.replace(tmp, CRACK_SESSIONS_FILE)
@@ -4217,11 +4220,12 @@ def _poll_live_results(session_id: str) -> None:
                         import json as _json
                         stats_obj = _json.loads((stats_out or '{}').strip() or '{}')
                         failed = int(stats_obj.get('failed', 0))
-                        if failed > 0:
-                            _update_crack_session(
-                                session_id,
-                                lambda s, _f=failed: s.update({'last_invalid': _f}),
-                            )
+                        # Always update last_invalid (even when 0) so the UI
+                        # shows the real count rather than a stale non-zero.
+                        _update_crack_session(
+                            session_id,
+                            lambda s, _f=failed: s.update({'last_invalid': _f}),
+                        )
                     except Exception:
                         pass
                     ssh.close()
