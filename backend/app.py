@@ -3400,6 +3400,156 @@ try:
 except Exception:
     _crack_sessions_mtime = 0.0
 
+# Consecutive dead-probe counts per (session_id, ip). Cleared on
+# recovery or after redistribution fires. Not persisted; resets on restart.
+_dead_worker_counts: dict = {}  # {(session_id, ip): int}
+
+def _redistribute_dead_worker(session_id: str, dead_ip: str,
+                               sess_snapshot: dict, surviving_pids: dict) -> None:
+    """Redistribute the dead worker's unscanned target portion to the
+    surviving workers, re-upload merged targets.txt to each survivor,
+    and restart their scanners.  Called in its own thread after 6
+    consecutive dead probes (~90 s)."""
+    print(f'[redistribute] {session_id}: {dead_ip} → {list(surviving_pids.keys())}')
+    import tempfile as _tf_mod
+    mgr = get_ssh_manager()
+    if not mgr:
+        print(f'[redistribute] {session_id}: no SSH manager')
+        return
+
+    # ── 1. Resolve dead worker's slice boundaries ───────────────────────
+    worker_slices = sess_snapshot.get('worker_slices') or {}
+    dead_slice = worker_slices.get(dead_ip)
+    if not dead_slice:
+        print(f'[redistribute] {session_id}: no slice info for {dead_ip}; removing from session')
+        _update_crack_session(session_id, lambda s: s.get('remote_pids', {}).pop(dead_ip, None))
+        return
+
+    dead_start = dead_slice['start']
+    dead_end   = dead_slice['end']
+
+    # ── 2. Dead worker's last known progress ────────────────────────────
+    worker_progress = sess_snapshot.get('worker_progress') or {}
+    dead_progress = int(worker_progress.get(dead_ip, 0))
+
+    # ── 3. Load original target list from controller ────────────────────
+    list_id   = sess_snapshot.get('list_id') or ''
+    list_path = os.path.join('lists', f'{list_id}.txt')
+    if not os.path.exists(list_path):
+        print(f'[redistribute] {session_id}: list file missing: {list_path}')
+        return
+    try:
+        with open(list_path, 'r', errors='ignore') as _f:
+            all_lines = [_l.rstrip('\n') for _l in _f if _l.strip()]
+    except Exception as _re:
+        print(f'[redistribute] {session_id}: read list: {_re}')
+        return
+
+    # ── 4. Dead worker's remaining (unscanned) targets ──────────────────
+    remaining_start = dead_start + dead_progress
+    dead_remaining  = all_lines[remaining_start:dead_end]
+    print(f'[redistribute] {session_id}: {dead_ip} scanned {dead_progress}/{dead_end - dead_start}; '
+          f'{len(dead_remaining)} targets to redistribute')
+
+    if not dead_remaining:
+        print(f'[redistribute] {session_id}: {dead_ip} fully scanned — removing cleanly')
+        _update_crack_session(session_id, lambda s: (
+            s.get('remote_pids', {}).pop(dead_ip, None),
+            s.get('worker_slices', {}).pop(dead_ip, None),
+        ))
+        return
+
+    # ── 5. Distribute remaining across survivors ─────────────────────────
+    surviving_ips  = list(surviving_pids.keys())
+    extra_slices   = _slice_targets(dead_remaining, len(surviving_ips))
+    remote_dir     = sess_snapshot.get('remote_dir') or ''
+    new_pids: dict = {}
+
+    for idx, ip in enumerate(surviving_ips):
+        extra = extra_slices[idx] if idx < len(extra_slices) else []
+
+        # Surviving worker's own remaining (unscanned) lines
+        surv_slice    = worker_slices.get(ip) or {}
+        surv_start    = surv_slice.get('start', 0)
+        surv_end      = surv_slice.get('end', len(all_lines))
+        surv_progress = int(worker_progress.get(ip, 0))
+        surv_remaining = all_lines[surv_start + surv_progress : surv_end]
+
+        merged = surv_remaining + extra
+        print(f'[redistribute] {session_id}: {ip} gets {len(surv_remaining)} own + {len(extra)} extra = {len(merged)} total')
+
+        # Kill current scanner + cpulimit on survivor
+        cur_pid = surviving_pids.get(ip)
+        if cur_pid:
+            try:
+                mgr.ssh_exec(ip, f'kill {int(cur_pid)} 2>/dev/null; pkill -f cpulimit 2>/dev/null; true', 5)
+            except Exception as _ke:
+                print(f'[redistribute] kill {ip}: {_ke}')
+
+        # Upload merged targets.txt
+        try:
+            _tf = _tf_mod.NamedTemporaryFile(
+                mode='w', suffix='_merged.txt', delete=False
+            )
+            try:
+                _tf.write('\n'.join(merged))
+                if merged:
+                    _tf.write('\n')
+            finally:
+                _tf.close()
+            if not mgr.scp_upload(ip, _tf.name, f'{remote_dir}/targets.txt'):
+                print(f'[redistribute] scp to {ip} failed')
+                continue
+        except Exception as _ue:
+            print(f'[redistribute] upload {ip}: {_ue}')
+            continue
+        finally:
+            try:
+                os.unlink(_tf.name)
+            except Exception:
+                pass
+
+        # Restart scanner with GOMEMLIMIT
+        try:
+            _nproc = int((mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 2', 5) or '2').strip())
+            _lim   = _nproc * 90
+            restart_cmd = (
+                f'cd {remote_dir} && sleep 1 && '
+                f'setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 '
+                f'./reconx-scanner targets.txt -timeout 5 </dev/null > crack.log 2>&1 & '
+                f'_SP=$! ; '
+                f'setsid nohup cpulimit -p $_SP -l {_lim} -q </dev/null >/dev/null 2>&1 & '
+                f'echo $_SP'
+            )
+            _pid_out = mgr.ssh_exec(ip, restart_cmd, 30)
+            new_pid  = _extract_remote_pid(_pid_out or '')
+            if new_pid:
+                new_pids[ip] = new_pid
+                print(f'[redistribute] {ip} restarted as pid {new_pid}')
+            else:
+                print(f'[redistribute] {ip}: no PID returned: {_pid_out!r}')
+        except Exception as _re2:
+            print(f'[redistribute] restart {ip}: {_re2}')
+
+    # ── 6. Update session state ──────────────────────────────────────────
+    def _apply(s):
+        pids = s.setdefault('remote_pids', {})
+        slices = s.setdefault('worker_slices', {})
+        pids.pop(dead_ip, None)
+        slices.pop(dead_ip, None)
+        for ip, new_pid in new_pids.items():
+            pids[ip] = new_pid
+        # Reset worker_progress for restarted workers (they start from 0 of merged list)
+        wp = s.setdefault('worker_progress', {})
+        wp.pop(dead_ip, None)
+        for ip in new_pids:
+            wp[ip] = 0
+        s['last_error'] = f'{dead_ip} OOM-removed; redistributed to {surviving_ips}'
+
+    _update_crack_session(session_id, _apply)
+    print(f'[redistribute] {session_id}: done. new pids: {new_pids}')
+
+
 def _liveness_monitor_loop() -> None:
     """Background thread: probes every 15 s whether each running session's
     scanner PIDs are still alive on the worker. Updates _crack_sessions in
@@ -3440,6 +3590,8 @@ def _liveness_monitor_loop() -> None:
                         result = (out or '').strip()
                         if result.startswith('alive'):
                             alive_count += 1
+                            # Clear dead-probe counter on recovery.
+                            _dead_worker_counts.pop((sid, ip), None)
                             # Sync stored PID if scanner is on a different PID now.
                             parts = result.split(':', 1)
                             actual_pid = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else int(pid)
@@ -3464,6 +3616,21 @@ def _liveness_monitor_loop() -> None:
                                 )
                             except Exception:
                                 pass
+                        else:
+                            # Worker reported dead — increment consecutive count.
+                            _dead_worker_counts[(sid, ip)] = _dead_worker_counts.get((sid, ip), 0) + 1
+                            dead_count = _dead_worker_counts[(sid, ip)]
+                            surviving_pids = {k: v for k, v in pids.items() if k != ip}
+                            if dead_count >= 6 and surviving_pids:
+                                # ~90 s of confirmed dead probes: redistribute.
+                                _dead_worker_counts.pop((sid, ip), None)
+                                with _crack_lock:
+                                    sess_snap = dict(_crack_sessions.get(sid) or {})
+                                threading.Thread(
+                                    target=_redistribute_dead_worker,
+                                    args=(sid, ip, sess_snap, surviving_pids),
+                                    daemon=True,
+                                ).start()
                     except Exception:
                         alive_count += 1  # transient SSH blip — keep alive
                 if alive_count == 0:
@@ -3939,6 +4106,15 @@ def _run_crack_dispatch(session_id: str, norm_ips: list, all_targets: list,
     slices = _slice_targets(all_targets, len(norm_ips))
     config_bytes = json.dumps(config_snapshot, indent=2).encode('utf-8')
 
+    # Record absolute start/end offsets per worker so the redistribution
+    # logic can calculate how much of each slice was completed.
+    worker_slices: dict = {}
+    _slice_off = 0
+    for _i, _wip in enumerate(norm_ips):
+        _slen = len(slices[_i]) if _i < len(slices) else 0
+        worker_slices[_wip] = {'start': _slice_off, 'end': _slice_off + _slen}
+        _slice_off += _slen
+
     remote_pids: dict = {}
     dispatch_errors: list = []
     for idx, ip in enumerate(norm_ips):
@@ -3958,6 +4134,7 @@ def _run_crack_dispatch(session_id: str, norm_ips: list, all_targets: list,
     _update_crack_session(session_id, lambda s: s.update({
         'status': status,
         'remote_pids': remote_pids,
+        'worker_slices': worker_slices,
         'last_error': last_error,
         'finished_at': finished_at,
     }))
@@ -4142,6 +4319,7 @@ def _poll_live_results(session_id: str) -> None:
             prev_ts = float(sess.get('last_progress_time', 0))
             total_progress = 0
             total_invalid = 0
+            worker_progress_update: dict = {}
             for ip in worker_ips:
                 try:
                     ssh = mgr._get_ssh_client(ip, 30)
@@ -4217,6 +4395,7 @@ def _poll_live_results(session_id: str) -> None:
                         )
                         ip_progress = int((log_out or '0').strip() or 0)
                         total_progress += ip_progress
+                        worker_progress_update[ip] = ip_progress
                     except Exception as _pe:
                         print(f'[live-poll] progress {ip}: {_pe}')
                     # ── crack_stats.json: read invalid/failed host count ──
@@ -4240,11 +4419,12 @@ def _poll_live_results(session_id: str) -> None:
             speed = round((total_progress - prev_progress) / elapsed, 1) if elapsed > 0 and total_progress >= prev_progress else 0
             _update_crack_session(
                 session_id,
-                lambda s, _p=total_progress, _t=now, _sp=speed, _inv=total_invalid: s.update({
+                lambda s, _p=total_progress, _t=now, _sp=speed, _inv=total_invalid, _wp=dict(worker_progress_update): s.update({
                     'last_progress': _p,
                     'last_progress_time': _t,
                     'last_speed': _sp,
                     'last_invalid': _inv,
+                    'worker_progress': _wp,
                 }),
             )
             # Persist updated progress/invalid counts so other gunicorn
