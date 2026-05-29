@@ -4231,6 +4231,12 @@ def _poll_live_results(session_id: str) -> None:
                     ssh.close()
                 except Exception as e:
                     print(f'[live-poll] {ip}: {e}')
+            # Persist updated progress/invalid counts so other gunicorn
+            # workers (which have separate memory) pick up the new values
+            # via _reload_crack_state_if_changed().  PID-specific temp file
+            # prevents races between concurrent workers.
+            with _crack_lock:
+                _save_crack_sessions(_crack_sessions)
             if inserted_total > 0:
                 print(f'[live-poll] {session_id}: +{inserted_total} new credentials')
                 try:
