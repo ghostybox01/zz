@@ -3428,9 +3428,26 @@ def _redistribute_dead_worker(session_id: str, dead_ip: str,
     dead_start = dead_slice['start']
     dead_end   = dead_slice['end']
 
-    # ── 2. Dead worker's last known progress ────────────────────────────
+    # ── 2. Dead worker's progress — prefer checkpoint file over poll value ──
     worker_progress = sess_snapshot.get('worker_progress') or {}
     dead_progress = int(worker_progress.get(dead_ip, 0))
+
+    # Try reading checkpoint.txt from dead worker (written every 1000 lines by
+    # the binary; more accurate than the 30 s poll cycle).
+    remote_dir = sess_snapshot.get('remote_dir') or ''
+    try:
+        _cp_out = mgr.ssh_exec(
+            dead_ip,
+            f'cat {remote_dir}/checkpoint.txt 2>/dev/null || echo ""',
+            6,
+        )
+        _cp_val = int((_cp_out or '').strip() or 0)
+        if _cp_val > dead_progress:
+            print(f'[redistribute] {session_id}: checkpoint {_cp_val} > poll {dead_progress} '
+                  f'for {dead_ip} — using checkpoint')
+            dead_progress = _cp_val
+    except Exception as _cp_err:
+        print(f'[redistribute] {session_id}: checkpoint read {dead_ip}: {_cp_err}')
 
     # ── 3. Load original target list from controller ────────────────────
     list_id   = sess_snapshot.get('list_id') or ''
@@ -3514,9 +3531,9 @@ def _redistribute_dead_worker(session_id: str, dead_ip: str,
             _nproc = int((mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 2', 5) or '2').strip())
             _lim   = _nproc * 90
             restart_cmd = (
-                f'cd {remote_dir} && sleep 1 && '
+                f'cd {remote_dir} && rm -f checkpoint.txt && sleep 1 && '
                 f'setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 '
-                f'./reconx-scanner targets.txt -timeout 5 </dev/null > crack.log 2>&1 & '
+                f'./reconx-scanner targets.txt -timeout 5 -checkpoint checkpoint.txt </dev/null > crack.log 2>&1 & '
                 f'_SP=$! ; '
                 f'setsid nohup cpulimit -p $_SP -l {_lim} -q </dev/null >/dev/null 2>&1 & '
                 f'echo $_SP'
@@ -4044,7 +4061,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             f"  apt-get install -y cpulimit -qq 2>/dev/null || "
             f"  yum install -y cpulimit -q 2>/dev/null || true ) ; "
             f"setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 "
-            f"./reconx-scanner targets.txt </dev/null > crack.log 2>&1 & "
+            f"./reconx-scanner targets.txt -timeout 5 -checkpoint checkpoint.txt </dev/null > crack.log 2>&1 & "
             f"_SP=$! ; "
             f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; "
             f"( command -v cpulimit >/dev/null 2>&1 && "

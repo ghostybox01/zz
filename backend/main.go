@@ -46,6 +46,7 @@ const defaultConfigPath = "config.json"
 
 var requestTimeoutSeconds int
 var batchSize int
+var checkpointFile string
 
 type Counters struct {
 	mu               sync.Mutex
@@ -4247,6 +4248,19 @@ func (a *AWSScanner) processBatch(urls []string) {
 	wg.Wait()
 }
 
+// writeCheckpoint atomically writes the number of lines read so far to
+// checkpointFile.  Used by the backend's redistribution logic to determine
+// how much of a dead worker's slice has already been processed.
+func writeCheckpoint(path string, linesRead int) {
+	if path == "" {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(linesRead)), 0644); err == nil {
+		_ = os.Rename(tmp, path) // atomic replace
+	}
+}
+
 func (a *AWSScanner) runBatched(listFile string) {
 	renderBanner()
 
@@ -4276,8 +4290,10 @@ func (a *AWSScanner) runBatched(listFile string) {
 
 	scanner := bufio.NewScanner(file)
 	var batch []string
+	linesRead := 0
 
 	for scanner.Scan() {
+		linesRead++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
@@ -4287,10 +4303,14 @@ func (a *AWSScanner) runBatched(listFile string) {
 
 		if len(batch) >= batchSize {
 			a.processBatch(batch)
-
 			batch = nil
-
 			runtime.GC()
+			writeCheckpoint(checkpointFile, linesRead)
+		} else if linesRead%1000 == 0 {
+			// Fine-grained checkpoint: flush every 1 000 lines so the
+			// redistribution logic has a near-current position even if
+			// the scanner is killed mid-batch.
+			writeCheckpoint(checkpointFile, linesRead)
 		}
 	}
 
@@ -4299,6 +4319,7 @@ func (a *AWSScanner) runBatched(listFile string) {
 		batch = nil
 		runtime.GC()
 	}
+	writeCheckpoint(checkpointFile, linesRead) // final checkpoint
 
 	if err := scanner.Err(); err != nil {
 		pterm.Error.Printfln("Error reading file: %v", err)
@@ -4311,6 +4332,7 @@ func (a *AWSScanner) runBatched(listFile string) {
 func main() {
 	flag.IntVar(&requestTimeoutSeconds, "timeout", 20, "Global timeout for each HTTP request in seconds.")
 	flag.IntVar(&batchSize, "batch", 500000, "Number of URLs to process per batch before forcing GC.")
+	flag.StringVar(&checkpointFile, "checkpoint", "", "Write scan progress (lines read) to this file every 1000 lines for redistribution recovery.")
 
 	var ipOnlyMode bool
 	flag.BoolVar(&ipOnlyMode, "ip-only", false, "Extract only IP addresses from input and scan them.")
