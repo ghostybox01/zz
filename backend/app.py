@@ -225,6 +225,7 @@ def import_from_files():
                     # they reach the DB so the recurring cleanup thread has less
                     # work to do.
                     _kv_l = key_value.lower()
+                    _su_l = source_url.lower()
                     if (key_value.startswith(('//', 'http://', 'https://'))
                             or key_value in ('http', 'https', '')
                             or source_url in ('http', 'https', '')
@@ -232,6 +233,8 @@ def import_from_files():
                                 '(ssrf', '(lfi', '(rce', '(xss', '(ssti',
                                 '(bypass-waf', '(react2shell',
                                 '?phpinfo', 'phpinfo(', 'phpinfo.php', '_profiler'))
+                            or any(p in _su_l for p in (
+                                '?phpinfo', 'phpinfo(', 'phpinfo.php', '=phpinfo'))
                             or source_url.startswith('AWS AKIA')):
                         continue
 
@@ -6054,6 +6057,11 @@ def _cleanup_false_positive_credentials():
                 OR key_value LIKE '%phpinfo(%'
                 OR key_value LIKE '%phpinfo.php%'
                 OR key_value LIKE '%_profiler%'
+                -- Credentials scraped from phpinfo pages (source_url contains phpinfo call)
+                OR source_url LIKE '%?phpinfo%'
+                OR source_url LIKE '%phpinfo(%'
+                OR source_url LIKE '%phpinfo.php%'
+                OR source_url LIKE '%=phpinfo%'
                 -- aws_deep_scan.txt entries: source_url = 'AWS AKIA...' (log dump, not structured cred)
                 OR source_url LIKE 'AWS AKIA%'
               )
