@@ -221,6 +221,20 @@ def import_from_files():
                     key_value = key_parts[0].strip()
                     metadata = key_parts[1].strip() if len(key_parts) > 1 else ""
 
+                    # Pre-INSERT false-positive filter — skip junk lines before
+                    # they reach the DB so the recurring cleanup thread has less
+                    # work to do.
+                    _kv_l = key_value.lower()
+                    if (key_value.startswith(('//', 'http://', 'https://'))
+                            or key_value in ('http', 'https', '')
+                            or source_url in ('http', 'https', '')
+                            or any(p in _kv_l for p in (
+                                '(ssrf', '(lfi', '(rce', '(xss', '(ssti',
+                                '(bypass-waf', '(react2shell',
+                                '?phpinfo', 'phpinfo.php', '_profiler'))
+                            or source_url.startswith('AWS AKIA')):
+                        continue
+
                     # Insert both 'valid' and 'hit' credential rows into the
                     # DB.  Previously 'hit' lines were only counted in memory
                     # and never stored, so SMTP hits
@@ -5823,7 +5837,8 @@ def _cleanup_false_positive_credentials():
         cursor = conn.cursor()
         cursor.execute("""
             DELETE FROM credentials
-            WHERE
+            WHERE status != 'valid'
+              AND (
                 -- URL fragments from old http:// source_url parsing
                 key_value LIKE '//%'
                 OR key_value LIKE 'http://%'
@@ -5843,6 +5858,7 @@ def _cleanup_false_positive_credentials():
                 OR key_value LIKE '%_profiler%'
                 -- aws_deep_scan.txt entries: source_url = 'AWS AKIA...' (log dump, not structured cred)
                 OR source_url LIKE 'AWS AKIA%'
+              )
         """)
         deleted = cursor.rowcount
         conn.commit()
@@ -5857,6 +5873,18 @@ def _cleanup_false_positive_credentials():
 # Run at module-load time so gunicorn workers (which import app:app, never hit __main__) initialize the DB.
 init_db()
 _cleanup_false_positive_credentials()
+
+def _recurring_fp_cleanup():
+    """Background thread: delete false-positive credential rows every 60s.
+    Catches anything that slipped through the pre-INSERT filter (e.g. rows
+    written by a concurrent worker before the filter was deployed).
+    Never touches status='valid' rows — that guard lives in the DELETE."""
+    import time as _t
+    while True:
+        _t.sleep(60)
+        _cleanup_false_positive_credentials()
+
+threading.Thread(target=_recurring_fp_cleanup, daemon=True, name='fp-cleanup').start()
 
 # Kick the SSH monitor at boot. Previously this only started when the
 # frontend emitted `vps_start_monitoring` over socket.io, so a worker
