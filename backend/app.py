@@ -4121,6 +4121,13 @@ def _poll_live_results(session_id: str) -> None:
                 _time.sleep(POLL_INTERVAL)
                 continue
             inserted_total = 0
+            # Accumulators for multi-worker totals — collected across all
+            # workers and written once after the loop so a slow/failed worker
+            # never overwrites a faster worker's higher progress count.
+            prev_progress = int(sess.get('last_progress', 0))
+            prev_ts = float(sess.get('last_progress_time', 0))
+            total_progress = 0
+            total_invalid = 0
             for ip in worker_ips:
                 try:
                     ssh = mgr._get_ssh_client(ip, 30)
@@ -4186,8 +4193,6 @@ def _poll_live_results(session_id: str) -> None:
                     # pterm writes \r-separated updates on one line; strip \r and
                     # ANSI codes, take the LAST match (most recent progress count).
                     try:
-                        prev_progress = int(sess.get('last_progress', 0))
-                        prev_ts = float(sess.get('last_progress_time', 0))
                         log_out = mgr.ssh_exec(
                             ip,
                             f"tail -1 {remote_dir}/crack.log 2>/dev/null"
@@ -4196,18 +4201,8 @@ def _poll_live_results(session_id: str) -> None:
                             f" | grep -oP '\\[\\K[0-9]+(?=/)' | tail -1 || echo 0",
                             10,
                         )
-                        progress = int((log_out or '0').strip() or 0)
-                        now = _time.time()
-                        elapsed = now - prev_ts if prev_ts > 0 else POLL_INTERVAL
-                        speed = round((progress - prev_progress) / elapsed, 1) if elapsed > 0 and progress >= prev_progress else 0
-                        _update_crack_session(
-                            session_id,
-                            lambda s, _p=progress, _t=now, _sp=speed: s.update({
-                                'last_progress': _p,
-                                'last_progress_time': _t,
-                                'last_speed': _sp,
-                            }),
-                        )
+                        ip_progress = int((log_out or '0').strip() or 0)
+                        total_progress += ip_progress
                     except Exception as _pe:
                         print(f'[live-poll] progress {ip}: {_pe}')
                     # ── crack_stats.json: read invalid/failed host count ──
@@ -4219,18 +4214,25 @@ def _poll_live_results(session_id: str) -> None:
                         )
                         import json as _json
                         stats_obj = _json.loads((stats_out or '{}').strip() or '{}')
-                        failed = int(stats_obj.get('failed', 0))
-                        # Always update last_invalid (even when 0) so the UI
-                        # shows the real count rather than a stale non-zero.
-                        _update_crack_session(
-                            session_id,
-                            lambda s, _f=failed: s.update({'last_invalid': _f}),
-                        )
+                        total_invalid += int(stats_obj.get('failed', 0))
                     except Exception:
                         pass
                     ssh.close()
                 except Exception as e:
                     print(f'[live-poll] {ip}: {e}')
+            # Write summed progress + invalid once after all workers are polled.
+            now = _time.time()
+            elapsed = now - prev_ts if prev_ts > 0 else POLL_INTERVAL
+            speed = round((total_progress - prev_progress) / elapsed, 1) if elapsed > 0 and total_progress >= prev_progress else 0
+            _update_crack_session(
+                session_id,
+                lambda s, _p=total_progress, _t=now, _sp=speed, _inv=total_invalid: s.update({
+                    'last_progress': _p,
+                    'last_progress_time': _t,
+                    'last_speed': _sp,
+                    'last_invalid': _inv,
+                }),
+            )
             # Persist updated progress/invalid counts so other gunicorn
             # workers (which have separate memory) pick up the new values
             # via _reload_crack_state_if_changed().  PID-specific temp file
