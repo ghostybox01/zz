@@ -3536,7 +3536,7 @@ def _redistribute_dead_worker(session_id: str, dead_ip: str,
             restart_cmd = (
                 f'cd {remote_dir} && rm -f checkpoint.txt && sleep 1 && '
                 f'setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 '
-                f'./reconx-scanner targets.txt -timeout 5 -checkpoint checkpoint.txt </dev/null > crack.log 2>&1 & '
+                f'./reconx-scanner -timeout 5 -checkpoint checkpoint.txt targets.txt </dev/null > crack.log 2>&1 &'
                 f'_SP=$! ; '
                 f'setsid nohup cpulimit -p $_SP -l {_lim} -q </dev/null >/dev/null 2>&1 & '
                 f'echo $_SP'
@@ -4064,7 +4064,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             f"  apt-get install -y cpulimit -qq 2>/dev/null || "
             f"  yum install -y cpulimit -q 2>/dev/null || true ) ; "
             f"setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 "
-            f"./reconx-scanner targets.txt -timeout 5 -checkpoint checkpoint.txt </dev/null > crack.log 2>&1 & "
+            f"./reconx-scanner -timeout 5 -checkpoint checkpoint.txt targets.txt </dev/null > crack.log 2>&1 &"
             f"_SP=$! ; "
             f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; "
             f"( command -v cpulimit >/dev/null 2>&1 && "
