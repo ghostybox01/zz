@@ -226,9 +226,17 @@ def import_from_files():
                     # work to do.
                     _kv_l = key_value.lower()
                     _su_l = source_url.lower()
+                    _meta_l = metadata.lower()
+                    # ASIA-prefix keys (AWS STS temporary) found in front-end
+                    # library asset paths are always false positives — random
+                    # strings inside minified JS that match the pattern.
+                    _asia_fp = (key_value.startswith('ASIA') and any(p in _meta_l for p in (
+                        'owlcarousel', '/assets/', '/vendor/', '/node_modules/',
+                        '/bower_components/', '/dist/', '/static/', '/lib/')))
                     if (key_value.startswith(('//', 'http://', 'https://'))
                             or key_value in ('http', 'https', '')
                             or source_url in ('http', 'https', '')
+                            or _asia_fp
                             or any(p in _kv_l for p in (
                                 '(ssrf', '(lfi', '(rce', '(xss', '(ssti',
                                 '(bypass-waf', '(react2shell',
