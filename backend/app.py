@@ -4393,6 +4393,23 @@ def _poll_live_results(session_id: str) -> None:
                                             src_url, key_value, metadata = _parse_result_line(line)
                                             if not src_url or not key_value:
                                                 continue
+                                            # Shared false-positive filter (mirrors pre-INSERT check
+                                            # in the live log parser so both paths reject the same junk).
+                                            _kv_l2 = key_value.lower()
+                                            _su_l2 = src_url.lower()
+                                            _mt_l2 = metadata.lower()
+                                            _asia_fp2 = (key_value.startswith('ASIA') and any(
+                                                p in _mt_l2 for p in (
+                                                    'owlcarousel', '/assets/', '/vendor/',
+                                                    '/node_modules/', '/bower_components/',
+                                                    '/dist/', '/static/', '/lib/')))
+                                            if (_asia_fp2
+                                                    or any(p in _su_l2 for p in (
+                                                        '?phpinfo', 'phpinfo(', 'phpinfo.php', '=phpinfo'))
+                                                    or any(p in _kv_l2 for p in (
+                                                        '(ssrf', '(lfi', '(rce', '(xss',
+                                                        '?phpinfo', 'phpinfo('))):
+                                                continue
                                             source_url = src_url
                                             cursor.execute(
                                                 'INSERT OR IGNORE INTO credentials '
