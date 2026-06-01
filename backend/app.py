@@ -4005,6 +4005,32 @@ def _crack_session_view(sess: dict) -> dict:
     }
 
 
+def _push_dedup_to_worker(mgr, ip: str, remote_dir: str):
+    """Export all known credential keys from the DB to dedup.txt and SCP to
+    the worker. Called at dispatch time and on reattach/restart so KnownKeys
+    is pre-populated and the scanner skips re-validating already-seen keys."""
+    try:
+        import tempfile as _tf2, sqlite3 as _sq
+        conn_d = _sq.connect(DB_PATH, timeout=10)
+        cur_d = conn_d.cursor()
+        cur_d.execute("SELECT DISTINCT key_value FROM credentials WHERE key_value IS NOT NULL AND key_value != ''")
+        known_keys = [r[0] for r in cur_d.fetchall()]
+        conn_d.close()
+        if not known_keys:
+            return
+        tf_dedup = _tf2.NamedTemporaryFile(mode='w', suffix='_dedup.txt', delete=False)
+        try:
+            tf_dedup.write('\n'.join(known_keys) + '\n')
+        finally:
+            tf_dedup.close()
+        ok = mgr.scp_upload(ip, tf_dedup.name, f'{remote_dir}/dedup.txt')
+        os.unlink(tf_dedup.name)
+        if ok:
+            print(f'[dedup] pushed {len(known_keys)} known keys to {ip}')
+    except Exception as e:
+        print(f'[dedup] push to {ip} failed (non-fatal): {e}')
+
+
 def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
                            work_dir: str, slice_lines: list, config_bytes: bytes) -> tuple:
     """Ship targets + config to one worker and spawn the scanner. Returns
@@ -4061,6 +4087,27 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
         if not mgr.scp_upload(ip, tf_config.name, f'{remote_dir}/config.json'):
             real = mgr.last_error(ip) if hasattr(mgr, 'last_error') else ''
             return None, f'scp_upload(config.json) failed — {real}' if real else 'scp_upload(config.json) returned False'
+
+        # Upload dedup.txt — all credential keys already in the DB so the
+        # scanner pre-loads them into KnownKeys and skips re-validation.
+        # Covers both valid and hit status so we don't re-check dead keys either.
+        try:
+            import tempfile as _tf2, sqlite3 as _sq
+            conn_d = _sq.connect(DB_PATH, timeout=10)
+            cur_d = conn_d.cursor()
+            cur_d.execute("SELECT DISTINCT key_value FROM credentials WHERE key_value IS NOT NULL AND key_value != ''")
+            known_keys = [r[0] for r in cur_d.fetchall()]
+            conn_d.close()
+            if known_keys:
+                tf_dedup = _tf2.NamedTemporaryFile(mode='w', suffix='_dedup.txt', delete=False)
+                try:
+                    tf_dedup.write('\n'.join(known_keys) + '\n')
+                finally:
+                    tf_dedup.close()
+                mgr.scp_upload(ip, tf_dedup.name, f'{remote_dir}/dedup.txt')
+                os.unlink(tf_dedup.name)
+        except Exception as _e:
+            print(f'[dedup] export failed (non-fatal): {_e}')
 
         # Re-use the already-deployed reconx-scanner binary via a symlink so
         # the scanner's relative ./reconx-scanner invocation still works while

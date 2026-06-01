@@ -4346,6 +4346,24 @@ func main() {
 
 	scanner := NewAWSScanner(defaultConfigPath)
 
+	// Pre-load known credential keys from dedup.txt so we don't re-validate
+	// credentials that are already in the central DB. The controller exports
+	// this file (one key per line) and SCPs it before starting the scanner.
+	// This prevents: (a) re-validating the same key after a worker restart,
+	// (b) duplicate API calls when the same key appears on multiple domains.
+	dedupLoaded := 0
+	if dedupData, err := os.ReadFile("dedup.txt"); err == nil {
+		for _, line := range strings.Split(string(dedupData), "\n") {
+			if k := strings.TrimSpace(line); k != "" {
+				scanner.KnownKeys.Store(k, true)
+				dedupLoaded++
+			}
+		}
+		if dedupLoaded > 0 {
+			pterm.Info.Printf("Loaded %d known keys from dedup.txt — skipping re-validation\n", dedupLoaded)
+		}
+	}
+
 	if len(listArgs) < 1 {
 		listFile = interactiveMode()
 	} else {
