@@ -71,11 +71,13 @@ FILE_MAPPING = {
     # Validated-API finds written by detector_*.go files
     'valid_tencent.txt':               ('Tencent',       'valid'),
     'valid_xsmtp.txt':                 ('XSMTP',         'valid'),
-    # AWS sub-scans: potential (STS failed)
+    # aws_ses_potential_unverified.txt intentionally excluded — all entries are
+    # ASIA-prefix STS temporary credentials that the scanner already confirmed
+    # have failed STS validation (expired). Importing them creates persistent
+    # false-positive noise. Valid keypairs come from aws_credentials.txt.
     # aws_deep_scan.txt intentionally excluded — it is an unstructured log dump
     # (format: "AWS AKIA...:secret SES: map[]...") that cannot be parsed cleanly
     # into key_value/source_url fields. The valid keypairs are already in aws_valid.txt.
-    'aws_ses_potential_unverified.txt': ('AWS',          'hit'),
     # Pre-validation finds — saved immediately on pattern match regardless of API result
     'brevo_found.txt':      ('Brevo',      'hit'),
     'xsmtp_found.txt':      ('XSMTP',      'hit'),
