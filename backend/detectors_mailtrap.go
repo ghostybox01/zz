@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 )
@@ -12,7 +13,6 @@ var mailtrapPattern = regexp.MustCompile(`(?i)(?:mailtrap[_-]?(?:api[_-]?)?(?:to
 
 // CheckMailtrap validates a Mailtrap API token by listing accounts.
 // 200 = token is valid; anything else = not confirmed.
-// Uses do429Retry for rate-limit resilience.
 func (a *AWSScanner) CheckMailtrap(key, sourceURL string) bool {
 	req, err := http.NewRequest("GET", "https://mailtrap.io/api/accounts", nil)
 	if err != nil {
@@ -26,5 +26,12 @@ func (a *AWSScanner) CheckMailtrap(key, sourceURL string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == 200
+
+	if resp.StatusCode == 200 {
+		a.logValid("Mailtrap", fmt.Sprintf("Token: %s", key))
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_mailtrap.txt")
+		a.storeValidKeyLimit("Mailtrap", key, "Active")
+		return true
+	}
+	return false
 }

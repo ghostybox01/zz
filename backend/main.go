@@ -507,8 +507,10 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		// Stripe key formats: secret (sk_*), publishable (pk_*), restricted (rk_*) — live and test variants.
 		// Restricted-key variants rk_live_ and rk_test_ explicitly enumerated to keep coverage visible.
 		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|pk_live_|pk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
-		OpenAIAPIPattern:             regexp.MustCompile(`sk-[a-zA-Z0-9]{48}`),
-		AnthropicPattern:             regexp.MustCompile(`sk-ant-[a-zA-Z0-9]{32}-[a-zA-Z0-9]{64}`),
+		// OpenAI: legacy sk-<48> AND modern sk-proj-* / sk-o1-* / sk-<any prefix>-*
+		OpenAIAPIPattern:             regexp.MustCompile(`sk-(?:proj-|o1-|svcacct-)?[a-zA-Z0-9]{20,}(?:T3BlbkFJ[a-zA-Z0-9]{20,}|[a-zA-Z0-9_-]{28,})`),
+		// Anthropic: sk-ant-api03-<86 mixed chars>-<6 chars> (real key format)
+		AnthropicPattern:             regexp.MustCompile(`sk-ant-(?:api\d+-)?[A-Za-z0-9_-]{86,}`),
 		MessageBirdPattern:           regexp.MustCompile(`(AccessKey|TestKey)_[a-zA-Z0-9]{32}`),
 		PHPInfoPaths:                 phpinfoPaths,
 		EnvPaths:                     envPaths,

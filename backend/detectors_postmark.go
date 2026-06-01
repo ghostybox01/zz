@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 )
@@ -14,9 +15,6 @@ var postmarkPattern = regexp.MustCompile(`(?i)(?:postmark[_-]?(?:server[_-]?)?to
 // with the X-Postmark-Server-Token header. Returns true on 200 (token is
 // valid and active). 401/422 → false. Other statuses → false (treat as
 // not-confirmed rather than risk a false positive).
-//
-// Reuses the package-level do429Retry helper (defined in main.go by HMS
-// Frontline) for rate-limit resilience.
 func (a *AWSScanner) CheckPostmark(key, sourceURL string) bool {
 	req, err := http.NewRequest("GET", "https://api.postmarkapp.com/server", nil)
 	if err != nil {
@@ -30,5 +28,12 @@ func (a *AWSScanner) CheckPostmark(key, sourceURL string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == 200
+
+	if resp.StatusCode == 200 {
+		a.logValid("Postmark", fmt.Sprintf("Token: %s", key))
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_postmark.txt")
+		a.storeValidKeyLimit("Postmark", key, "Active")
+		return true
+	}
+	return false
 }

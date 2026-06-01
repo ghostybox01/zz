@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 )
@@ -12,7 +13,6 @@ var sparkpostPattern = regexp.MustCompile(`(?i)(?:sparkpost[_-]?(?:api[_-]?)?key
 
 // CheckSparkPost validates a SparkPost API key against the /account endpoint.
 // 200 = key is valid for the account; anything else = not confirmed.
-// Uses do429Retry for rate-limit resilience.
 func (a *AWSScanner) CheckSparkPost(key, sourceURL string) bool {
 	req, err := http.NewRequest("GET", "https://api.sparkpost.com/api/v1/account", nil)
 	if err != nil {
@@ -26,5 +26,12 @@ func (a *AWSScanner) CheckSparkPost(key, sourceURL string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == 200
+
+	if resp.StatusCode == 200 {
+		a.logValid("SparkPost", fmt.Sprintf("Key: %s", key))
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_sparkpost.txt")
+		a.storeValidKeyLimit("SparkPost", key, "Active")
+		return true
+	}
+	return false
 }
