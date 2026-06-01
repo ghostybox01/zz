@@ -239,17 +239,11 @@ def import_from_files():
                     _kv_l = key_value.lower()
                     _su_l = source_url.lower()
                     _meta_l = metadata.lower()
-                    # ASIA-prefix keys (AWS STS temporary) found in web-resource
-                    # paths are false positives — the scanner picks them up from
-                    # page HTML near image/CSS/JS links rather than from actual
-                    # config files. Match broadly: any image dir, library subdir,
-                    # or generic resource path strongly indicates page-scrape noise.
-                    _asia_fp = (key_value.startswith('ASIA') and any(p in _meta_l for p in (
-                        'owlcarousel', '/assets/', '/vendor/', '/node_modules/',
-                        '/bower_components/', '/dist/', '/static/', '/lib/',
-                        '/img/', 'img/', 'banner', 'features/', '/local/',
-                        '/css/', '/js/', '/fonts/', '/images/', '/media/',
-                        '/upload', '/thumb', '/photo', '/picture')))
+                    # ASIA-prefix keys are AWS STS temporary credentials. The scanner
+                    # writes them to aws_ses_potential_unverified.txt only when STS
+                    # validation has already failed, so they are expired by definition.
+                    # Drop all of them — permanent AKIA keys are what matter for reporting.
+                    _asia_fp = key_value.startswith('ASIA')
                     if (key_value.startswith(('//', 'http://', 'https://'))
                             or key_value in ('http', 'https', '')
                             or source_url in ('http', 'https', '')
@@ -4403,15 +4397,9 @@ def _poll_live_results(session_id: str) -> None:
                                             _kv_l2 = key_value.lower()
                                             _su_l2 = src_url.lower()
                                             _mt_l2 = metadata.lower()
-                                            _asia_fp2 = (key_value.startswith('ASIA') and any(
-                                                p in _mt_l2 for p in (
-                                                    'owlcarousel', '/assets/', '/vendor/',
-                                                    '/node_modules/', '/bower_components/',
-                                                    '/dist/', '/static/', '/lib/',
-                                                    '/img/', 'img/', 'banner', 'features/',
-                                                    '/local/', '/css/', '/js/', '/fonts/',
-                                                    '/images/', '/media/', '/upload',
-                                                    '/thumb', '/photo', '/picture')))
+                                            # All ASIA keys are expired STS tokens (scanner only
+                                            # writes them after STS validation has failed).
+                                            _asia_fp2 = key_value.startswith('ASIA')
                                             if (_asia_fp2
                                                     or any(p in _su_l2 for p in (
                                                         '?phpinfo', 'phpinfo(', 'phpinfo.php', '=phpinfo'))
