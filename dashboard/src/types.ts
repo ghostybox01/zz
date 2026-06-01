@@ -146,8 +146,10 @@ export type Finding = {
   reportedByHost: string
   /** Which scan this finding belongs to (when known). */
   scanId?: string
-  /** Validation status: 'valid' = API-confirmed, 'hit' = pattern match only. */
-  status?: 'valid' | 'hit'
+  /** Validation status: 'valid' = API-confirmed, 'hit' = pattern match only, 'dead' = was valid, now revoked. */
+  status?: 'valid' | 'hit' | 'dead'
+  /** Discovery path type — how the credential was exposed (e.g. '.env', 'phpinfo', '.git'). */
+  discoveryMethod?: string
 }
 
 export type PathCategory = 'env' | 'config' | 'backup' | 'debug' | 'wp' | 'api' | 'cloud' | 'misc'

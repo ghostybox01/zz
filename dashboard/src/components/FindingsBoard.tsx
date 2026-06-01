@@ -26,22 +26,34 @@ function shortId(id: string): string {
   return `#${tail.padStart(6, '0').slice(-6)}`
 }
 
-function vulnTag(rule: string): string {
+function vulnTag(rule: string, method?: string): string {
+  // Discovery method takes priority (this shows HOW the key leaked)
+  if (method) {
+    const m = method.toLowerCase()
+    if (m === '.env') return '.env'
+    if (m === 'phpinfo') return 'phpinfo'
+    if (m === '.git') return '.git'
+    if (m === 'wp-config') return 'wp-cfg'
+    if (m === 'config' || m === 'xml-config') return 'config'
+    if (m === 'settings') return 'settings'
+    if (m === 'spring') return 'spring'
+    if (m === 'db-config') return 'db.cfg'
+    if (m === 'docker') return 'docker'
+    if (m === 'backup') return 'backup'
+    if (m === 'debug') return 'debug'
+    if (m === 'api-endpoint') return 'api'
+    if (m === 'package') return 'pkg'
+    if (m === 'log') return 'log'
+  }
+  // Fall back to credential type from ruleLabel
   const u = rule.toUpperCase()
-  // Source/path-based vulnerability type (takes priority over credential type)
-  if (u.includes('.ENV')) return 'ENV'
-  if (u.includes('....//') || u.includes('../') || u.includes('TRAVERSAL')) return 'TRAV'
-  if (u.includes('PACKAGE.JSON') || u.includes('COMPOSER.JSON')) return 'PKG'
-  if (u.includes('CONFIG') || u.includes('SETTINGS')) return 'CFG'
-  // Credential type
-  if (u.includes('SLACK') || u.includes('WEBHOOK')) return 'HOOK'
   if (u.includes('SMTP')) return 'SMTP'
   if (u.includes('AWS')) return 'AWS'
-  if (u.includes('STRIPE') || u.includes('PAYPAL') || u.includes('BRAINTREE')) return 'PMT'
+  if (u.includes('STRIPE') || u.includes('PAYPAL')) return 'PMT'
   if (u.includes('GITHUB') || u.includes('GITLAB')) return 'GIT'
-  if (u.includes('OPENAI') || u.includes('ANTHROPIC') || u.includes('DATADOG') || u.includes('GOOGLE')) return 'API'
-  if (u.includes('KEY') || u.includes('TOKEN') || u.includes('SECRET')) return 'CRED'
-  return 'CRED'
+  if (u.includes('SLACK') || u.includes('WEBHOOK')) return 'HOOK'
+  if (u.includes('OPENAI') || u.includes('ANTHROPIC')) return 'AI'
+  return 'page'
 }
 
 export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast }: Props) {
@@ -371,7 +383,11 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
               </thead>
               <tbody>
                 {rows.map((f) => {
-                  const pathish = f.path ?? (f.url ? f.url.replace(/^https?:\/\/[^/]+/, '') || '/' : '')
+                  // Actual path portion of source URL (strip scheme+host)
+                  const rawPath = f.path ?? (f.url ? f.url.replace(/^https?:\/\/[^/]+/, '') || '' : '')
+                  // For pure-domain source_url (no path), check if discoveryMethod gives more context
+                  const pathish = rawPath && rawPath !== '/' ? rawPath
+                    : (f.discoveryMethod && f.discoveryMethod !== 'page' ? `[${f.discoveryMethod}]` : '')
                   return (
                     <tr
                       key={f.id}
@@ -406,13 +422,25 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
                         <code className="cred-cell__code">{findingCredentialText(f)}</code>
                       </td>
                       <td>
-                        <span className="vuln-pill">{vulnTag(f.ruleLabel)}</span>
+                        <span className="vuln-pill">{vulnTag(f.ruleLabel, f.discoveryMethod)}</span>
                       </td>
                       <td>
-                        <span className={`status-pill-valid${f.details?.validated === false ? ' status-pill-valid--pending' : ''}`}>
-                          <span className="status-pill-valid__dot" aria-hidden />
-                          {f.details?.validated === false ? 'PENDING' : 'VALID'}
-                        </span>
+                        {f.status === 'dead' ? (
+                          <span className="status-pill-dead">
+                            <span className="status-pill-dead__dot" aria-hidden />
+                            DEAD
+                          </span>
+                        ) : f.status === 'hit' ? (
+                          <span className="status-pill-hit">
+                            <span className="status-pill-hit__dot" aria-hidden />
+                            HIT
+                          </span>
+                        ) : (
+                          <span className="status-pill-valid">
+                            <span className="status-pill-valid__dot" aria-hidden />
+                            VALID
+                          </span>
+                        )}
                       </td>
                       <td>
                         <span className={`severity-pill severity-pill--${f.severity}`}>{f.severity}</span>

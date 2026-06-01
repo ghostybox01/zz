@@ -57,8 +57,34 @@ function pathFromUrl(url: string): string | undefined {
   try {
     return new URL(url).pathname
   } catch {
-    return undefined
+    // For bare "domain/path" strings without scheme
+    const slash = url.indexOf('/')
+    return slash > 0 ? url.slice(slash) : undefined
   }
+}
+
+/** Classify how the credential was discovered based on the source URL path. */
+function discoveryMethod(sourceUrl: string): string {
+  if (!sourceUrl) return 'page'
+  const u = sourceUrl.toLowerCase()
+  if (u.includes('.env')) return '.env'
+  if (u.includes('phpinfo')) return 'phpinfo'
+  if (u.includes('.git')) return '.git'
+  if (u.includes('wp-config')) return 'wp-config'
+  if (u.includes('config.php') || u.includes('config.yml') || u.includes('config.yaml') || u.includes('config.json')) return 'config'
+  if (u.includes('settings.py') || u.includes('settings.php') || u.includes('appsettings')) return 'settings'
+  if (u.includes('.xml') && (u.includes('web') || u.includes('app'))) return 'xml-config'
+  if (u.includes('docker-compose') || u.includes('dockerfile')) return 'docker'
+  if (u.includes('application.properties') || u.includes('application.yml')) return 'spring'
+  if (u.includes('database.php') || u.includes('db.php')) return 'db-config'
+  if (u.includes('backup') || u.includes('.bak') || u.includes('.sql')) return 'backup'
+  if (u.includes('debug') || u.includes('actuator') || u.includes('swagger')) return 'debug'
+  if (u.includes('/api/') || u.includes('/v1/') || u.includes('/v2/')) return 'api-endpoint'
+  if (u.includes('package.json') || u.includes('composer.json') || u.includes('requirements.txt')) return 'package'
+  if (u.includes('.log')) return 'log'
+  // If URL looks like just a domain (no path) or is an AKIA key → page scrape
+  if (!u.includes('/')) return 'page'
+  return 'page'
 }
 
 /** Extract an AKIA access key ID from a string, or return null.
@@ -71,7 +97,7 @@ function extractAkiaKey(s: string | null | undefined): string | null {
 
 /** [type, key_value, source_url, timestamp, metadata, status, dbId?] from app.py's recent_findings tuple */
 function mapRecent(row: ReconRecentFinding, i: number): Finding {
-  const [type, keyValue, sourceUrl, ts, metadata, , dbId] = row
+  const [type, keyValue, sourceUrl, ts, metadata, dbStatus, dbId] = row
   const provider = String(type ?? 'Unknown')
 
   // aws_valid.txt (old format) stores "access_key:secret_key" with no domain,
@@ -89,6 +115,13 @@ function mapRecent(row: ReconRecentFinding, i: number): Finding {
     ? `${akiaFromSource}:${cleanSecret}`  // ACCESS_KEY:SECRET_KEY
     : (keyValue ?? '')
 
+  // Discovery method — how/where the credential was exposed
+  const method = akiaFromSource ? 'page' : discoveryMethod(sourceUrl ?? '')
+
+  // Build a descriptive ruleLabel: "SendGrid API key via .env" etc.
+  const methodLabel = method !== 'page' ? ` via ${method}` : ''
+  const ruleLabel = `${provider} credential${methodLabel}`
+
   const extra: Array<{ key: string; value: string }> = []
   if (akiaFromSource) {
     extra.push({ key: 'ACCESS KEY ID', value: akiaFromSource })
@@ -96,26 +129,38 @@ function mapRecent(row: ReconRecentFinding, i: number): Finding {
   } else if (metadata) {
     extra.push({ key: 'Metadata', value: metadata })
   }
+  if (displayUrl) {
+    extra.push({ key: 'Source URL', value: displayUrl })
+  }
 
   // Use the DB row id as the Finding id so Recheck/Resend can target it
   const id = dbId != null ? String(dbId) : `rs-${provider}-${i}-${ts}`
+
+  // Map DB status to Finding status
+  const rawStatus = String(dbStatus ?? 'hit').toLowerCase()
+  const status: Finding['status'] =
+    rawStatus === 'valid' ? 'valid' :
+    rawStatus === 'dead' || rawStatus === 'invalid' ? 'dead' :
+    'hit'
 
   return {
     id,
     at: ts ?? new Date().toISOString(),
     provider,
-    ruleLabel: `${provider} credential`,
+    ruleLabel,
     hostname: akiaFromSource ? 'aws-account' : hostnameFromUrl(sourceUrl ?? ''),
     url: displayUrl,
     path: displayUrl ? pathFromUrl(displayUrl) : undefined,
     detail: credText,
     details: {
-      validated: true,
+      validated: status === 'valid',
       raw: credText,
       extra: extra.length > 0 ? extra : undefined,
     },
     severity: severityFor(provider),
     reportedByHost: 'recon-backend',
+    status,
+    discoveryMethod: method,
   }
 }
 

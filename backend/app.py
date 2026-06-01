@@ -6128,6 +6128,105 @@ def _recurring_fp_cleanup():
 
 threading.Thread(target=_recurring_fp_cleanup, daemon=True, name='fp-cleanup').start()
 
+
+def _recheck_one_credential(cred_id: int, cred_type: str, key_value: str, source_url: str, metadata: str) -> str:
+    """Re-validate a single credential. Returns 'valid', 'dead', or 'unchecked'."""
+    try:
+        if cred_type == 'AWS':
+            ak, sk = None, None
+            if source_url and source_url.startswith('AKIA'):
+                ak, sk = source_url, key_value
+            elif key_value and key_value.startswith('AKIA'):
+                ak, sk = key_value, metadata or ''
+            if ak and sk:
+                import boto3
+                sts = boto3.client('sts', aws_access_key_id=ak, aws_secret_access_key=sk,
+                                   region_name='us-east-1')
+                sts.get_caller_identity()
+                return 'valid'
+            return 'dead'
+        elif cred_type == 'Stripe':
+            import urllib.request as _ur
+            req = _ur.Request('https://api.stripe.com/v1/balance',
+                              headers={'Authorization': f'Bearer {key_value}'})
+            with _ur.urlopen(req, timeout=8) as r:
+                return 'valid' if r.status == 200 else 'dead'
+        elif cred_type == 'SendGrid':
+            import urllib.request as _ur
+            req = _ur.Request('https://api.sendgrid.com/v3/user/account',
+                              headers={'Authorization': f'Bearer {key_value}'})
+            try:
+                with _ur.urlopen(req, timeout=8) as r:
+                    return 'valid' if r.status == 200 else 'dead'
+            except Exception:
+                return 'dead'
+        elif cred_type == 'OpenAI':
+            import urllib.request as _ur
+            req = _ur.Request('https://api.openai.com/v1/models',
+                              headers={'Authorization': f'Bearer {key_value}'})
+            try:
+                with _ur.urlopen(req, timeout=8) as r:
+                    return 'valid' if r.status == 200 else 'dead'
+            except Exception:
+                return 'dead'
+        elif cred_type == 'Anthropic':
+            import urllib.request as _ur, json as _json
+            data = _json.dumps({'model':'claude-3-haiku-20240307','max_tokens':1,'messages':[{'role':'user','content':'hi'}]}).encode()
+            req = _ur.Request('https://api.anthropic.com/v1/messages',
+                              data=data, method='POST',
+                              headers={'x-api-key': key_value,
+                                       'anthropic-version': '2023-06-01',
+                                       'content-type': 'application/json'})
+            try:
+                with _ur.urlopen(req, timeout=10) as r:
+                    return 'valid' if r.status in (200, 400) else 'dead'
+            except Exception as e:
+                # 400 = bad request but key is real; 401 = dead
+                return 'dead' if '401' in str(e) else 'unchecked'
+    except Exception:
+        return 'dead'
+    return 'unchecked'
+
+
+def _auto_recheck_credentials():
+    """Background thread: re-validate all 'valid' credentials every 24 hours.
+    Marks stale credentials as 'dead' so the dashboard shows a red badge."""
+    import time as _t
+    _t.sleep(3600)  # Wait 1h after boot before first run
+    while True:
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=30)
+            c = conn.cursor()
+            # Select valid creds not checked in the last 24h
+            c.execute('''SELECT id, type, key_value, source_url, metadata
+                         FROM credentials
+                         WHERE status IN ('valid', 'hit')
+                           AND (last_verified IS NULL
+                                OR last_verified < datetime('now', '-24 hours'))
+                         ORDER BY id DESC LIMIT 500''')
+            rows = c.fetchall()
+            conn.close()
+            print(f'[auto-recheck] checking {len(rows)} credentials')
+            for (cred_id, cred_type, kv, su, meta) in rows:
+                new_status = _recheck_one_credential(cred_id, cred_type, kv, su, meta)
+                if new_status in ('valid', 'dead'):
+                    conn2 = sqlite3.connect(DB_PATH, timeout=30)
+                    c2 = conn2.cursor()
+                    c2.execute(
+                        'UPDATE credentials SET status=?, last_verified=CURRENT_TIMESTAMP WHERE id=?',
+                        (new_status, cred_id)
+                    )
+                    conn2.commit()
+                    conn2.close()
+                _t.sleep(0.5)  # Rate-limit API calls
+        except Exception as e:
+            print(f'[auto-recheck] error: {e}')
+        _t.sleep(86400)  # Run again in 24 hours
+
+
+threading.Thread(target=_auto_recheck_credentials, daemon=True, name='auto-recheck').start()
+
+
 # Kick the SSH monitor at boot. Previously this only started when the
 # frontend emitted `vps_start_monitoring` over socket.io, so a worker
 # that boots while no dashboard tab is open (or before the socket
@@ -7032,7 +7131,7 @@ def api_credentials_recheck(cred_id: int):
         except Exception as e:
             info = str(e)[:200]
 
-        new_status = 'valid' if live else 'invalid'
+        new_status = 'valid' if live else 'dead'
         c.execute(
             'UPDATE credentials SET status=?, last_verified=CURRENT_TIMESTAMP, verify_meta=? WHERE id=?',
             (new_status, info, cred_id)

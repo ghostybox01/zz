@@ -1973,12 +1973,36 @@
   border: 1px solid color-mix(in srgb, #34d399, transparent 55%);
   background: color-mix(in srgb, #34d399, transparent 90%);
 }
-
 .status-pill-valid__dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #34d399;
+  width: 5px; height: 5px; border-radius: 50%; background: #34d399;
+}
+
+/* HIT — unvalidated pattern match (amber) */
+.status-pill-hit {
+  display: inline-flex; align-items: center; gap: 0.28rem;
+  font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em;
+  color: #fbbf24;
+  padding: 0.15rem 0.45rem 0.15rem 0.35rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #fbbf24, transparent 55%);
+  background: color-mix(in srgb, #fbbf24, transparent 88%);
+}
+.status-pill-hit__dot {
+  width: 5px; height: 5px; border-radius: 50%; background: #fbbf24;
+}
+
+/* DEAD — was valid, credential revoked (red) */
+.status-pill-dead {
+  display: inline-flex; align-items: center; gap: 0.28rem;
+  font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em;
+  color: #f87171;
+  padding: 0.15rem 0.45rem 0.15rem 0.35rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #f87171, transparent 55%);
+  background: color-mix(in srgb, #f87171, transparent 88%);
+}
+.status-pill-dead__dot {
+  width: 5px; height: 5px; border-radius: 50%; background: #f87171;
 }
 
 .pts-cell {
