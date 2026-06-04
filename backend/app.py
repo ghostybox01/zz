@@ -704,22 +704,39 @@ def api_vps_status():
         sip = str(srv.get('ip', '')).strip()
         if sip in ip_to_session:
             sid, sess = ip_to_session[sip]
-            list_id = str(sess.get('list_id') or '')
-            # Target count — prefer sidecar metadata (O(1)), fall back to line-count.
-            targets = 0
-            try:
-                meta = _read_list_meta(list_id)
-                if meta and meta.get('lines'):
-                    targets = int(meta['lines'])
-                else:
-                    data_path, _ = _list_paths(list_id)
-                    if os.path.exists(data_path):
-                        with open(data_path, 'r', errors='ignore') as _fh:
-                            targets = sum(1 for _ln in _fh if _ln.strip())
-            except Exception:
-                pass
-            scanned = _parse_crack_log_progress(sip, sid)
-            hits = _count_crack_session_findings(sid)
+
+            # ── Per-worker targets: use recorded slice size, not total list ──
+            worker_slices = sess.get('worker_slices') or {}
+            ws = worker_slices.get(sip) or {}
+            if ws.get('start') is not None and ws.get('end') is not None:
+                targets = int(ws['end']) - int(ws['start'])
+            else:
+                # Fallback: total list size divided equally (old sessions without slice data)
+                list_id = str(sess.get('list_id') or '')
+                total_targets = 0
+                try:
+                    meta = _read_list_meta(list_id)
+                    if meta and meta.get('lines'):
+                        total_targets = int(meta['lines'])
+                    else:
+                        data_path, _ = _list_paths(list_id)
+                        if os.path.exists(data_path):
+                            with open(data_path, 'r', errors='ignore') as _fh:
+                                total_targets = sum(1 for _ln in _fh if _ln.strip())
+                except Exception:
+                    pass
+                n_workers = max(1, len(sess.get('worker_ips') or [sess.get('remote_pids') or {}]))
+                targets = total_targets // n_workers
+
+            # ── Per-worker scanned: use per-IP progress, not session total ──
+            worker_progress = sess.get('worker_progress') or {}
+            scanned = int(worker_progress.get(sip, 0))
+
+            # ── Per-worker hits: tracked by poll loop per worker IP ──
+            worker_hits = sess.get('worker_hits') or {}
+            hits = int(worker_hits.get(sip, _count_crack_session_findings(sid)
+                       if not worker_hits else 0))
+
             # Speed stored by _poll_live_results between two progress readings.
             speed = float(sess.get('last_speed', 0))
             srv.update({
@@ -4672,6 +4689,7 @@ def _poll_live_results(session_id: str) -> None:
             last_avg_pps = 0.0
             last_progression = 0.0
             worker_progress_update: dict = {}
+            worker_hits_update: dict = {}
             for ip in worker_ips:
                 try:
                     ssh = mgr._get_ssh_client(ip, 30)
@@ -4687,6 +4705,7 @@ def _poll_live_results(session_id: str) -> None:
                         if remote_files:
                             conn = sqlite3.connect(DB_PATH, timeout=30)
                             cursor = conn.cursor()
+                            ip_inserted = 0
                             for fname in remote_files:
                                 mapping = FILE_MAPPING.get(fname)
                                 if not mapping:
@@ -4729,6 +4748,7 @@ def _poll_live_results(session_id: str) -> None:
                                             )
                                             if cursor.rowcount > 0:
                                                 inserted_total += 1
+                                                ip_inserted += 1
                                             else:
                                                 # Already in DB; retro-attribute if session_id was never set.
                                                 cursor.execute(
@@ -4745,6 +4765,9 @@ def _poll_live_results(session_id: str) -> None:
                                         pass
                             conn.commit()
                             conn.close()
+                            # Accumulate per-worker hit count from this poll
+                            if ip_inserted > 0:
+                                worker_hits_update[ip] = worker_hits_update.get(ip, 0) + ip_inserted
                         sftp.close()
                     except Exception as _sftp_err:
                         print(f'[live-poll] sftp {ip}: {_sftp_err}')
@@ -4853,20 +4876,28 @@ def _poll_live_results(session_id: str) -> None:
                 session_id,
                 lambda s, _p=total_progress, _t=now, _sp=speed, _inv=total_invalid, _wp=dict(worker_progress_update),
                     _vh=total_valid_hosts, _ih=total_invalid_hosts,
-                    _r=total_rps, _pp=total_pps, _ar=last_avg_rps, _ap=last_avg_pps, _pg=last_progression: s.update({
-                    'last_progress': _p,
-                    'last_progress_time': _t,
-                    'last_speed': _sp,
-                    'last_invalid': _inv,
-                    'worker_progress': _wp,
-                    'last_valid_hosts': _vh,
-                    'last_invalid_hosts': _ih,
-                    'last_rps': _r,
-                    'last_pps': _pp,
-                    'last_avg_rps': _ar,
-                    'last_avg_pps': _ap,
-                    'last_progression': _pg,
-                }),
+                    _r=total_rps, _pp=total_pps, _ar=last_avg_rps, _ap=last_avg_pps, _pg=last_progression,
+                    _wh=dict(worker_hits_update): (
+                    s.update({
+                        'last_progress': _p,
+                        'last_progress_time': _t,
+                        'last_speed': _sp,
+                        'last_invalid': _inv,
+                        'worker_progress': _wp,
+                        'last_valid_hosts': _vh,
+                        'last_invalid_hosts': _ih,
+                        'last_rps': _r,
+                        'last_pps': _pp,
+                        'last_avg_rps': _ar,
+                        'last_avg_pps': _ap,
+                        'last_progression': _pg,
+                    }) or
+                    # Merge new hits into cumulative per-worker total
+                    s.update({'worker_hits': {
+                        k: s.get('worker_hits', {}).get(k, 0) + v
+                        for k, v in _wh.items()
+                    } if _wh else s.get('worker_hits', {})})
+                ),
             )
             # Persist updated progress/invalid counts so other gunicorn
             # workers (which have separate memory) pick up the new values
