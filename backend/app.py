@@ -4660,6 +4660,13 @@ def _poll_live_results(session_id: str) -> None:
             prev_ts = float(sess.get('last_progress_time', 0))
             total_progress = 0
             total_invalid = 0
+            total_valid_hosts = 0
+            total_invalid_hosts = 0
+            total_rps = 0.0
+            total_pps = 0.0
+            last_avg_rps = 0.0
+            last_avg_pps = 0.0
+            last_progression = 0.0
             worker_progress_update: dict = {}
             for ip in worker_ips:
                 try:
@@ -4775,26 +4782,20 @@ def _poll_live_results(session_id: str) -> None:
                         )
                         import json as _json2
                         scanner_stats = _json2.loads((scanner_stats_out or '{}').strip() or '{}')
-                        _rps = float(scanner_stats.get('rps', 0))
-                        _pps = float(scanner_stats.get('pps', 0))
-                        _avg_rps = float(scanner_stats.get('avg_rps', 0))
-                        _avg_pps = float(scanner_stats.get('avg_pps', 0))
-                        _valid_hosts = int(scanner_stats.get('valid_hosts', 0))
-                        _invalid_hosts = int(scanner_stats.get('invalid_hosts', 0))
-                        _progression = float(scanner_stats.get('progression', 0))
-                        if _rps > 0 or _pps > 0 or _avg_rps > 0 or _valid_hosts > 0:
-                            _update_crack_session(
-                                session_id,
-                                lambda s, _r=_rps, _p=_pps, _ar=_avg_rps, _ap=_avg_pps, _vh=_valid_hosts, _ih=_invalid_hosts, _pg=_progression: s.update({
-                                    'last_rps': _r,
-                                    'last_pps': _p,
-                                    'last_avg_rps': _ar,
-                                    'last_avg_pps': _ap,
-                                    'last_valid_hosts': _vh,
-                                    'last_invalid_hosts': _ih,
-                                    'last_progression': _pg,
-                                }),
-                            )
+                        # Accumulate across all workers — do NOT write to session
+                        # here; a single s.update() after the loop prevents any
+                        # slower/later worker from overwriting a faster worker's
+                        # higher cumulative count.
+                        total_rps += float(scanner_stats.get('rps', 0))
+                        total_pps += float(scanner_stats.get('pps', 0))
+                        last_avg_rps += float(scanner_stats.get('avg_rps', 0))
+                        last_avg_pps += float(scanner_stats.get('avg_pps', 0))
+                        total_valid_hosts += int(scanner_stats.get('valid_hosts', 0))
+                        total_invalid_hosts += int(scanner_stats.get('invalid_hosts', 0))
+                        # progression: take the max across workers (furthest-ahead worker)
+                        _pg = float(scanner_stats.get('progression', 0))
+                        if _pg > last_progression:
+                            last_progression = _pg
                     except Exception:
                         pass
                     # Fix 5: Memory health check in poll loop
@@ -4815,12 +4816,21 @@ def _poll_live_results(session_id: str) -> None:
             speed = round((total_progress - prev_progress) / elapsed, 1) if elapsed > 0 and total_progress >= prev_progress else 0
             _update_crack_session(
                 session_id,
-                lambda s, _p=total_progress, _t=now, _sp=speed, _inv=total_invalid, _wp=dict(worker_progress_update): s.update({
+                lambda s, _p=total_progress, _t=now, _sp=speed, _inv=total_invalid, _wp=dict(worker_progress_update),
+                    _vh=total_valid_hosts, _ih=total_invalid_hosts,
+                    _r=total_rps, _pp=total_pps, _ar=last_avg_rps, _ap=last_avg_pps, _pg=last_progression: s.update({
                     'last_progress': _p,
                     'last_progress_time': _t,
                     'last_speed': _sp,
                     'last_invalid': _inv,
                     'worker_progress': _wp,
+                    'last_valid_hosts': _vh,
+                    'last_invalid_hosts': _ih,
+                    'last_rps': _r,
+                    'last_pps': _pp,
+                    'last_avg_rps': _ar,
+                    'last_avg_pps': _ap,
+                    'last_progression': _pg,
                 }),
             )
             # Persist updated progress/invalid counts so other gunicorn
