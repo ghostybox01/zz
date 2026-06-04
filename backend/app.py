@@ -3698,7 +3698,7 @@ def _redistribute_dead_worker(session_id: str, dead_ip: str,
             _merged_limit = len(merged)
             restart_cmd = (
                 f'cd {remote_dir} && rm -f checkpoint.txt && sleep 1 && '
-                f'setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 '
+                f'setsid nohup env GOMEMLIMIT=900MiB ionice -c 2 -n 7 nice -n 15 '
                 f'./reconx-scanner -timeout 5 -checkpoint checkpoint.txt '
                 f'-offset 0 -limit {_merged_limit} '
                 f'targets.txt </dev/null > crack.log 2>&1 &'
@@ -4382,7 +4382,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             f"( command -v cpulimit >/dev/null 2>&1 || "
             f"  apt-get install -y cpulimit -qq 2>/dev/null || "
             f"  yum install -y cpulimit -q 2>/dev/null || true ) ; "
-            f"setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 "
+            f"setsid nohup env GOMEMLIMIT=900MiB ionice -c 2 -n 7 nice -n 15 "
             f"./reconx-scanner -timeout 5 -checkpoint checkpoint.txt "
             f"-offset 0 -limit {_slice_limit} "
             f"targets.txt </dev/null > crack.log 2>&1 &"
@@ -4905,23 +4905,20 @@ def _poll_live_results(session_id: str) -> None:
                             last_progression = _pg
                     except Exception:
                         pass
-                    # Memory health check — alert + attempt graceful reboot if OOM imminent
+                    # Memory health check — alert only, never auto-reboot
+                    # (auto-reboot was resetting scanner counters to 0)
                     try:
                         mem_check = _ssh_exec_retry(mgr, ip,
                             "free -m | awk 'NR==2{print $7}'", 5)
                         free_mb = int((mem_check or '999').strip() or '999')
-                        if free_mb < 128:
-                            print(f'[fleet][CRITICAL] {ip}: only {free_mb}MB RAM free — scanner may crash')
+                        if free_mb < 200:
+                            print(f'[fleet][CRITICAL] {ip}: only {free_mb}MB RAM free')
                             _tg_send(
-                                f'⚠️ <b>Worker OOM Warning</b>\n'
+                                f'⚠️ <b>Worker Low RAM</b>\n'
                                 f'🖥 <code>{ip}</code>\n'
-                                f'💾 Only <b>{free_mb}MB</b> RAM free — scanner will crash soon.\n'
-                                f'Attempting reboot…'
+                                f'💾 Only <b>{free_mb}MB</b> free — scanner may slow down.\n'
+                                f'Monitor closely. Use ↺ Restart Workers if it crashes.'
                             )
-                            try:
-                                mgr.ssh_exec(ip, 'reboot', 5)
-                            except Exception:
-                                pass
                     except (ValueError, TypeError):
                         pass
                     # Worker succeeded this poll — reset failure counter
@@ -4964,8 +4961,10 @@ def _poll_live_results(session_id: str) -> None:
                         'last_speed': _sp,
                         'last_invalid': _inv,
                         'worker_progress': _wp,
-                        'last_valid_hosts': _vh,
-                        'last_invalid_hosts': _ih,
+                        # Never decrease — scanner restarts reset their local counter to 0
+                        # but the session should keep the highest value ever seen.
+                        'last_valid_hosts':   max(_vh, int(s.get('last_valid_hosts') or 0)),
+                        'last_invalid_hosts': max(_ih, int(s.get('last_invalid_hosts') or 0)),
                         'last_rps': _r,
                         'last_pps': _pp,
                         'last_avg_rps': _ar,
@@ -5179,7 +5178,7 @@ def api_crack_restart(sid):
             remote_cmd = (
                 f"cd {remote_dir} && "
                 f"( command -v cpulimit >/dev/null 2>&1 || apt-get install -y cpulimit -qq 2>/dev/null || true ) ; "
-                f"setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 "
+                f"setsid nohup env GOMEMLIMIT=900MiB ionice -c 2 -n 7 nice -n 15 "
                 f"./reconx-scanner -timeout 5 -checkpoint checkpoint.txt "
                 f"targets.txt </dev/null >> crack.log 2>&1 & "
                 f"_SP=$! ; "
