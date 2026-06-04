@@ -5464,6 +5464,8 @@ def api_crack_stop(sid):
                     f'kill -0 {int(pid)} 2>/dev/null && kill -KILL {int(pid)} 2>/dev/null; '
                     f'true',
                     15)
+                # Clear watchdog session config so watchdog stops restarting
+                _ssh_exec_retry(mgr, ip, 'rm -f /tmp/reconx_session.conf', 5)
             except Exception as e:
                 print(f'[crack] stop failed for {ip} pid {pid}: {e}')
 
