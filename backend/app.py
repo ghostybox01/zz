@@ -4517,6 +4517,8 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             if real:
                 return None, f'remote spawn failed — {real}'
             return None, f'remote spawn returned no pid; ssh output: {out!r}'
+        # Deploy watchdog so scanner auto-restarts on crash (non-fatal).
+        _deploy_watchdog(mgr, ip, remote_dir)
         return pid, None
     except Exception as e:
         return None, str(e)
