@@ -5090,7 +5090,10 @@ def api_crack_restart(sid):
             wc = (mgr.ssh_exec(ip, f'wc -l < {remote_dir}/targets.txt', 5) or '0').strip()
             slice_limit = int(wc) if wc.isdigit() else 0
 
-            # Re-launch scanner (same flags as original dispatch)
+            # Re-launch scanner. targets.txt already contains only this
+            # worker's slice so -offset/-limit are not needed. The checkpoint
+            # file handles skipping already-scanned lines on resume.
+            # Avoid -offset/-limit entirely: old binaries don't support them.
             cores = int((mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 1', 5) or '1').strip())
             cpu_lim = cores * 90
             remote_cmd = (
@@ -5098,8 +5101,7 @@ def api_crack_restart(sid):
                 f"( command -v cpulimit >/dev/null 2>&1 || apt-get install -y cpulimit -qq 2>/dev/null || true ) ; "
                 f"setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 "
                 f"./reconx-scanner -timeout 5 -checkpoint checkpoint.txt "
-                f"-offset 0 -limit {slice_limit} "
-                f"targets.txt </dev/null > crack.log 2>&1 & "
+                f"targets.txt </dev/null >> crack.log 2>&1 & "
                 f"_SP=$! ; "
                 f"( command -v cpulimit >/dev/null 2>&1 && "
                 f"setsid nohup cpulimit -p $_SP -l {cpu_lim} -q </dev/null >/dev/null 2>&1 & ) ; "
