@@ -603,8 +603,28 @@ export function CrackerWorkspace({
                             Stop
                           </button>
                         )}
-                        {(s.status === 'completed' || s.status === 'stopped' || s.status === 'failed') && (
+                        {(s.status === 'completed' || s.status === 'stopped' || s.status === 'failed' || s.status === 'running') && (
                           <>
+                            <button
+                              type="button"
+                              className="btn-glass btn-glass--xs"
+                              title="Re-spawn scanner on all workers using existing targets.txt — resumes from checkpoint"
+                              onClick={() => {
+                                crack.restart(s.id)
+                                  .then((r) => {
+                                    if (r.ok) {
+                                      onToast({ kind: 'success', title: `Restarted on ${Object.keys(r.started ?? {}).length} worker(s)` })
+                                      crack.list().then((rr) => { if (Array.isArray(rr?.sessions)) setSessions(rr.sessions) }).catch(() => { /* swallow */ })
+                                    } else {
+                                      onToast({ kind: 'error', title: r.error ?? 'Restart failed' })
+                                    }
+                                  })
+                                  .catch(() => onToast({ kind: 'error', title: 'Restart request failed' }))
+                              }}
+                              style={{ marginLeft: '0.4rem' }}
+                            >
+                              ↺ Restart Workers
+                            </button>
                             <button
                               type="button"
                               className="btn-glass btn-glass--xs"

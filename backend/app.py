@@ -5049,6 +5049,90 @@ def api_crack_reattach(sid):
     return jsonify({'ok': True, 'found_pids': found_pids})
 
 
+@app.route('/api/crack/<sid>/restart', methods=['POST'])
+def api_crack_restart(sid):
+    """Re-spawn the scanner on every worker without re-uploading the list.
+    Uses the targets.txt and checkpoint.txt already on each worker so the
+    scanner resumes from where it left off. Useful after a VPS reboot or
+    OOM kill where the files are intact but the process died."""
+    with _crack_lock:
+        _reload_crack_state_if_changed()
+        raw = _crack_sessions.get(sid)
+        if raw is None:
+            return jsonify({'ok': False, 'error': 'session not found'}), 404
+        sess = dict(raw)
+
+    mgr = get_ssh_manager()
+    if mgr is None:
+        return jsonify({'ok': False, 'error': 'SSH manager not available'}), 503
+
+    worker_ips = list(sess.get('worker_ips') or list((sess.get('remote_pids') or {}).keys()))
+    if not worker_ips:
+        return jsonify({'ok': False, 'error': 'no workers in session'}), 400
+
+    remote_dir = sess.get('remote_dir') or f'/root/python_job/crack_{sid}'
+    config_bytes = json.dumps(sess.get('config_snapshot') or {}, indent=2).encode('utf-8')
+
+    new_pids: dict = {}
+    errors: list = []
+    for ip in worker_ips:
+        try:
+            # Kill any stale scanner + cpulimit
+            mgr.ssh_exec(ip, 'pkill -x reconx-scanner-linux 2>/dev/null; pkill -x cpulimit 2>/dev/null; true', 5)
+
+            # Check targets.txt exists on worker
+            check = (mgr.ssh_exec(ip, f'test -f {remote_dir}/targets.txt && echo ok || echo missing', 5) or '').strip()
+            if check != 'ok':
+                errors.append(f'{ip}: targets.txt missing at {remote_dir}')
+                continue
+
+            # Count lines for limit flag
+            wc = (mgr.ssh_exec(ip, f'wc -l < {remote_dir}/targets.txt', 5) or '0').strip()
+            slice_limit = int(wc) if wc.isdigit() else 0
+
+            # Re-launch scanner (same flags as original dispatch)
+            cores = int((mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 1', 5) or '1').strip())
+            cpu_lim = cores * 90
+            remote_cmd = (
+                f"cd {remote_dir} && "
+                f"( command -v cpulimit >/dev/null 2>&1 || apt-get install -y cpulimit -qq 2>/dev/null || true ) ; "
+                f"setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 "
+                f"./reconx-scanner -timeout 5 -checkpoint checkpoint.txt "
+                f"-offset 0 -limit {slice_limit} "
+                f"targets.txt </dev/null > crack.log 2>&1 & "
+                f"_SP=$! ; "
+                f"( command -v cpulimit >/dev/null 2>&1 && "
+                f"setsid nohup cpulimit -p $_SP -l {cpu_lim} -q </dev/null >/dev/null 2>&1 & ) ; "
+                f"echo $_SP"
+            )
+            out = mgr.ssh_spawn_bg(ip, remote_cmd, 60) if hasattr(mgr, 'ssh_spawn_bg') else mgr.ssh_exec(ip, remote_cmd, 60)
+            pid = _extract_remote_pid(out or '')
+            if pid:
+                new_pids[ip] = pid
+            else:
+                errors.append(f'{ip}: failed to get PID (output: {(out or "")[:80]})')
+        except Exception as e:
+            errors.append(f'{ip}: {e}')
+
+    if not new_pids:
+        return jsonify({'ok': False, 'error': 'failed to start scanner on any worker', 'details': errors}), 500
+
+    _update_crack_session(sid, lambda s: s.update({
+        'status': 'running',
+        'remote_pids': {**dict(s.get('remote_pids') or {}), **new_pids},
+        'last_error': '; '.join(errors) if errors else None,
+    }))
+    with _crack_lock:
+        _save_crack_sessions(_crack_sessions)
+
+    # Restart poll thread if needed
+    if not any(t.name == f'crack-poll-{sid}' for t in threading.enumerate()):
+        threading.Thread(target=_poll_live_results, args=(sid,),
+                         name=f'crack-poll-{sid}', daemon=True).start()
+
+    return jsonify({'ok': True, 'started': new_pids, 'errors': errors})
+
+
 @app.route('/api/crack/<sid>/throttle', methods=['POST'])
 def api_crack_throttle(sid):
     """Force CPU throttling on each worker via cgroups (preferred) or cpulimit.

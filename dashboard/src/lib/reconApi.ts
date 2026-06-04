@@ -786,6 +786,7 @@ export const crack = {
   list: () => getJson<{ sessions: CrackSession[] }>('/crack/sessions'),
   stop: (id: string) => postJson<{ ok: boolean }>(`/crack/${encodeURIComponent(id)}/stop`),
   reattach: (id: string) => postJson<{ ok: boolean; found_pids?: Record<string, number>; error?: string }>(`/crack/${encodeURIComponent(id)}/reattach`),
+  restart: (id: string) => postJson<{ ok: boolean; started?: Record<string, number>; errors?: string[]; error?: string }>(`/crack/${encodeURIComponent(id)}/restart`),
   remove: async (id: string): Promise<{ ok: boolean; error?: string }> => {
     const res = await fetch(`${BASE}/crack/${encodeURIComponent(id)}`, { method: 'DELETE' })
     if (!res.ok) {
