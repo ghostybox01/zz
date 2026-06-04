@@ -4599,6 +4599,10 @@ def _poll_live_results(session_id: str) -> None:
     dashboard near-real-time hits without waiting for session completion."""
     import time as _time
     POLL_INTERVAL = 30
+    # Track consecutive SSH failures per worker so we only alert once per outage
+    # rather than spamming every 30 s. Reset to 0 when worker comes back up.
+    _worker_fail_count: dict = {}
+    _DEAD_THRESHOLD = 3  # alert after 3 consecutive failures (~90 s)
     while True:
         try:
             # Poll immediately (no leading sleep) so backend restarts pick up
@@ -4798,18 +4802,49 @@ def _poll_live_results(session_id: str) -> None:
                             last_progression = _pg
                     except Exception:
                         pass
-                    # Fix 5: Memory health check in poll loop
+                    # Memory health check — alert + attempt graceful reboot if OOM imminent
                     try:
                         mem_check = _ssh_exec_retry(mgr, ip,
                             "free -m | awk 'NR==2{print $7}'", 5)
                         free_mb = int((mem_check or '999').strip() or '999')
                         if free_mb < 128:
                             print(f'[fleet][CRITICAL] {ip}: only {free_mb}MB RAM free — scanner may crash')
+                            _tg_send(
+                                f'⚠️ <b>Worker OOM Warning</b>\n'
+                                f'🖥 <code>{ip}</code>\n'
+                                f'💾 Only <b>{free_mb}MB</b> RAM free — scanner will crash soon.\n'
+                                f'Attempting reboot…'
+                            )
+                            try:
+                                mgr.ssh_exec(ip, 'reboot', 5)
+                            except Exception:
+                                pass
                     except (ValueError, TypeError):
                         pass
+                    # Worker succeeded this poll — reset failure counter
+                    _worker_fail_count[ip] = 0
                     ssh.close()
                 except Exception as e:
                     print(f'[live-poll] {ip}: {e}')
+                    # Track consecutive failures and alert when threshold hit
+                    _worker_fail_count[ip] = _worker_fail_count.get(ip, 0) + 1
+                    fails = _worker_fail_count[ip]
+                    if fails == _DEAD_THRESHOLD:
+                        _tg_send(
+                            f'🔴 <b>Worker Unreachable</b>\n'
+                            f'🖥 <code>{ip}</code>\n'
+                            f'❌ Failed to connect <b>{fails}</b> times in a row (~{fails * POLL_INTERVAL}s).\n'
+                            f'Session: <b>{session_id}</b>\n'
+                            f'Error: <code>{e}</code>\n'
+                            f'⚠️ Manual reboot required.'
+                        )
+                    elif fails > _DEAD_THRESHOLD and fails % 10 == 0:
+                        # Reminder every 10 polls (~5 min) if still dead
+                        _tg_send(
+                            f'🔴 <b>Worker Still Down</b>\n'
+                            f'🖥 <code>{ip}</code> — {fails} consecutive failures.\n'
+                            f'Session: <b>{session_id}</b>'
+                        )
             # Write summed progress + invalid once after all workers are polled.
             now = _time.time()
             elapsed = now - prev_ts if prev_ts > 0 else POLL_INTERVAL
