@@ -1,0 +1,14 @@
+chmod 777 *
+
+
+
+
+./ss 80 -i eth0 -s 10 -a 10;./ss 80 -i eth0 -s 10 -a 12;./ss 80 -i eth0 -s 10 -a 13;./ss 80 -i eth0 -s 10 -a 14;./ss 80 -i eth0 -s 10 -a 15;./ss 80 -i eth0 -s 10 -a 16;./ss 80 -i eth0 -s 10 -a 17;./ss 80 -i eth0 -s 10 -a 18;./ss 80 -i eth0 -s 10 -a 19;./ss 80 -i eth0 -s 10 -a 20;./ss 80 -i eth0 -s 10 -a 21
+
+
+
+./ss 80 -i eth0 -s 10 -a 1;./ss 80 -i eth0 -s 10 -a 2;./ss 80 -i eth0 -s 10 -a 3;./ss 80 -i eth0 -s 10 -a 4;./ss 80 -i eth0 -s 10 -a 5;./ss 80 -i eth0 -s 10 -a 6;./ss 80 -i eth0 -s 10 -a 7;./ss 80 -i eth0 -s 10 -a 8;./ss 80 -i eth0 -s 10 -a 9;./ss 80 -i eth0 -s 10 -a 253;./ss 80 -i eth0 -s 10 -a 254
+
+
+
+./ss 80 -i eth0 -s 10 -a 22;./ss 80 -i eth0 -s 10 -a 23;./ss 80 -i eth0 -s 10 -a 24;./ss 80 -i eth0 -s 10 -a 25;./ss 80 -i eth0 -s 10 -a 26;./ss 80 -i eth0 -s 10 -a 27;./ss 80 -i eth0 -s 10 -a 28;./ss 80 -i eth0 -s 10 -a 29;./ss 80 -i eth0 -s 10 -a 30;./ss 80 -i eth0 -s 10 -a 31;./ss 80 -i eth0 -s 10 -a 32

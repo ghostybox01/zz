@@ -204,6 +204,12 @@ export type Scan = {
   validHits: number
   parsingPerSec: number
   requestsPerSec: number
+  /** Session-wide average RPS (running mean). */
+  avgRps?: number
+  /** Session-wide average PPS (running mean). */
+  avgPps?: number
+  /** Scan completion fraction 0.0–1.0. */
+  progression?: number
   /** Recent rps samples for the spark trend (newest at end). */
   rpsHistory: readonly number[]
   /** Source WARC snapshots feeding this scan, when known. */

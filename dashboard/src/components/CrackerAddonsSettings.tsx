@@ -17,16 +17,19 @@ import {
 } from '../data/addonCatalog'
 
 const CATEGORY_LABELS: Record<AddonCategory, string> = {
-  ai:         'AI Keys',
-  cloud:      'Cloud (AWS)',
-  'email-api':'Email APIs',
-  smtp:       'SMTP senders',
-  payment:    'Payment',
-  sms:        'SMS providers',
+  ai:              'AI Keys',
+  cloud:           'Cloud (AWS)',
+  'email-api':     'Email APIs',
+  smtp:            'SMTP senders',
+  payment:         'Payment',
+  sms:             'SMS providers',
+  database:        'Database',
+  'web-panels':    'Web Panels',
+  infrastructure:  'Infrastructure',
 }
 
 const CATEGORY_ORDER: readonly AddonCategory[] = [
-  'ai', 'cloud', 'email-api', 'smtp', 'payment', 'sms',
+  'ai', 'cloud', 'email-api', 'smtp', 'payment', 'sms', 'database', 'web-panels', 'infrastructure',
 ]
 
 export function CrackerAddonsSettings() {
@@ -55,6 +58,7 @@ export function CrackerAddonsSettings() {
   const grouped = useMemo(() => {
     const out: Record<AddonCategory, AddonEntry[]> = {
       ai: [], cloud: [], 'email-api': [], smtp: [], payment: [], sms: [],
+      database: [], 'web-panels': [], infrastructure: [],
     }
     for (const a of ADDON_CATALOG) out[a.category].push(a)
     return out

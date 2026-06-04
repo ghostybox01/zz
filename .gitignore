@@ -65,3 +65,8 @@ dashboard.zip
 dashboard1.zip
 raven1.zip
 ravenx3.zip
+
+# Compiled binaries — build from source on server
+backend/reconx-scanner-linux
+backend/reconx-scanner-new
+.claude/

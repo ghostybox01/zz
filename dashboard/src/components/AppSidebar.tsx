@@ -146,7 +146,34 @@ function IcoHelp(props: SVGProps<SVGSVGElement>) {
   )
 }
 
-export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'dorks' | 'logs' | 'settings' | 'help'
+function IcoDatabase(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" strokeLinecap="round" />
+      <path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3" />
+    </svg>
+  )
+}
+
+function IcoPanel(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M3 9h18M9 21V9" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function IcoFilter(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'logs' | 'settings' | 'help'
 
 type Item = { id: DashboardTab; label: string; Ico: typeof IcoDash; goldWhenActive?: boolean }
 
@@ -159,6 +186,9 @@ const ITEMS: Item[] = [
   { id: 'findings', label: 'Hits', Ico: IcoTrophy },
   { id: 'stripe', label: 'Stripe', Ico: IcoTrophy },
   { id: 'crypto', label: 'Crypto', Ico: IcoCrypto },
+  { id: 'database', label: 'Database', Ico: IcoDatabase },
+  { id: 'webpanels', label: 'Web Panels', Ico: IcoPanel },
+  { id: 'prefilter', label: 'Pre-filter', Ico: IcoFilter },
   { id: 'dorks', label: 'Dorks', Ico: IcoSearch },
   { id: 'logs', label: 'Logs', Ico: IcoTerminal },
   { id: 'settings', label: 'Settings', Ico: IcoGear },
@@ -179,6 +209,9 @@ const TAB_TITLE: Record<DashboardTab, string> = {
   findings: 'Hits ledger',
   stripe: 'Stripe keys',
   crypto: 'Crypto keys',
+  database: 'Database credentials',
+  webpanels: 'Web panel credentials',
+  prefilter: 'Target pre-filter',
   dorks: 'Dork hunter',
   logs: 'Logs',
   settings: 'Integrations',

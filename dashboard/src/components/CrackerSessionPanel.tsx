@@ -14,10 +14,14 @@ function fmtRps(n: number): string {
 }
 
 export function CrackerSessionPanel({ scan, onStop, onViewStats }: Props) {
+  // Use server-reported progression (0–1) when available; fall back to
+  // host-count ratio for backwards compat with older backends.
   const progress =
-    scan.targetCount > 0
-      ? Math.min(100, ((scan.validHosts + scan.invalidHosts) / scan.targetCount) * 100)
-      : 0
+    scan.progression != null && scan.progression > 0
+      ? Math.min(100, scan.progression * 100)
+      : scan.targetCount > 0
+        ? Math.min(100, ((scan.validHosts + scan.invalidHosts) / scan.targetCount) * 100)
+        : 0
   const ppsHistory = scan.rpsHistory.map((v) => Math.max(0, v * 1.4 + 40))
 
   return (
@@ -55,6 +59,11 @@ export function CrackerSessionPanel({ scan, onStop, onViewStats }: Props) {
             <span className="cw-metric__label">Requests / Sec</span>
             <strong className="cw-metric__value">{fmtRps(scan.requestsPerSec)}</strong>
             <span className="cw-metric__unit">RPS</span>
+            {scan.avgRps != null && scan.avgRps > 0 && (
+              <span className="cw-metric__sub muted" style={{ fontSize: '.72rem' }}>
+                avg&nbsp;{fmtRps(scan.avgRps)}
+              </span>
+            )}
           </div>
           <div className="cw-metric__bars" aria-hidden>
             {scan.rpsHistory.slice(-8).map((v, i) => (
@@ -74,6 +83,11 @@ export function CrackerSessionPanel({ scan, onStop, onViewStats }: Props) {
             <span className="cw-metric__label">Parsing / Sec</span>
             <strong className="cw-metric__value">{fmtInt(scan.parsingPerSec)}</strong>
             <span className="cw-metric__unit">PPS</span>
+            {scan.avgPps != null && scan.avgPps > 0 && (
+              <span className="cw-metric__sub muted" style={{ fontSize: '.72rem' }}>
+                avg&nbsp;{fmtInt(scan.avgPps)}
+              </span>
+            )}
           </div>
           <div className="cw-metric__spark">
             <CpuSparkline values={ppsHistory} />
@@ -84,7 +98,7 @@ export function CrackerSessionPanel({ scan, onStop, onViewStats }: Props) {
       <div className="cw-session__completion">
         <div className="cw-session__completion-head">
           <span className="muted">Completion</span>
-          <span className="mono">{progress.toFixed(0)}%</span>
+          <span className="mono">{progress.toFixed(0)} %</span>
         </div>
         <div className="cw-session__completion-track">
           <div className="cw-session__completion-fill" style={{ width: `${progress}%` }} />

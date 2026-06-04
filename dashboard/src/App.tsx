@@ -30,6 +30,9 @@ import { WarcPanel } from './components/WarcPanel'
 import { DorksPanel } from './components/DorksPanel'
 import { StripePanel } from './components/StripePanel'
 import { CryptoPanel } from './components/CryptoPanel'
+import { DatabasePanel } from './components/DatabasePanel'
+import { WebPanelsPanel } from './components/WebPanelsPanel'
+import { PrefilterPanel } from './components/PrefilterPanel'
 import { LogsPanel } from './components/LogsPanel'
 import { HelpPanel } from './components/HelpPanel'
 import { readTargetTxtFile } from './lib/targetList'
@@ -420,6 +423,9 @@ export default function App() {
   const findingsHidden = tab !== 'findings'
   const stripeHidden = tab !== 'stripe'
   const cryptoHidden = tab !== 'crypto'
+  const databaseHidden = tab !== 'database'
+  const webpanelsHidden = tab !== 'webpanels'
+  const prefilterHidden = tab !== 'prefilter'
   const dorksHidden = tab !== 'dorks'
   const logsHidden = tab !== 'logs'
   const settingsHidden = tab !== 'settings'
@@ -797,6 +803,58 @@ export default function App() {
               className="tab-panel"
             >
               <CryptoPanel onToast={pushAlertToast} />
+            </section>
+
+            <section
+              id="panel-database"
+              role="tabpanel"
+              aria-labelledby="tab-database"
+              hidden={databaseHidden}
+              className="tab-panel"
+            >
+              <DatabasePanel onToast={pushAlertToast} />
+            </section>
+
+            <section
+              id="panel-webpanels"
+              role="tabpanel"
+              aria-labelledby="tab-webpanels"
+              hidden={webpanelsHidden}
+              className="tab-panel"
+            >
+              <WebPanelsPanel onToast={pushAlertToast} />
+            </section>
+
+            <section
+              id="panel-prefilter"
+              role="tabpanel"
+              aria-labelledby="tab-prefilter"
+              hidden={prefilterHidden}
+              className="tab-panel"
+            >
+              <PrefilterPanel
+                lists={lists}
+                onToast={pushAlertToast}
+                onUseResults={(hosts, label) => {
+                  const body = hosts.join('\n')
+                  const now = new Date().toISOString()
+                  const id = makeListId()
+                  const list: import('./types').TargetList = {
+                    id,
+                    name: label,
+                    uploadedAt: now,
+                    lineCount: hosts.length,
+                    fileSize: body.length,
+                    contentHash: hashContent(body),
+                    preview: hosts.slice(0, 6),
+                    assignedVpsIds: [],
+                    status: 'idle',
+                  }
+                  upsertList(list)
+                  import('./lib/listBodyCache').then(({ setListBody }) => setListBody(id, body))
+                  setTab('lists')
+                }}
+              />
             </section>
 
             <section

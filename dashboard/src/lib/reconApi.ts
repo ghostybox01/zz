@@ -308,6 +308,18 @@ export type ReconScannerConfig = {
     aws_main_scan: boolean
     github_token_deep_scan: boolean
     smtp_credentials_scan: boolean
+    // Per-method scan gates — each maps to a tile in the dashboard
+    js_scan: boolean
+    js_extended_scan: boolean
+    phpinfo_scan: boolean
+    git_config_scan: boolean
+    docker_scan: boolean
+    config_file_scan: boolean
+    backup_file_scan: boolean
+    ssh_scan: boolean
+    nvca_scan: boolean
+    gpl_scan: boolean
+    lib_scan: boolean
   }
   aws_checks: {
     ses_quota_check: boolean
@@ -318,6 +330,7 @@ export type ReconScannerConfig = {
   api_validation: {
     openai: boolean
     anthropic: boolean
+    ai_all: boolean
     stripe: boolean
     gcp_api_key: boolean
     sendgrid: boolean
@@ -326,8 +339,26 @@ export type ReconScannerConfig = {
     nexmo: boolean
     telnyx: boolean
     messagebird: boolean
+    plivo: boolean
+    postmark: boolean
+    sparkpost: boolean
+    mailtrap: boolean
+    mailjet: boolean
+    heroku: boolean
+    datadog: boolean
     github: boolean
     crypto_wallet: boolean
+    aws_access: boolean
+    tencent: boolean
+    socketlabs: boolean
+    zeptomail: boolean
+    elasticemail: boolean
+    mysql: boolean
+    postgresql: boolean
+    redis: boolean
+    cpanel: boolean
+    ftp: boolean
+    wordpress: boolean
   }
   features: {
     brevo: boolean
@@ -735,6 +766,18 @@ export type CrackSession = {
   valid_hits?: number
   /** URLs that failed to fetch (timeout / connection refused / DNS failure). */
   invalid_hosts?: number
+  /** Live requests-per-second from the Go rate tracker (stats.json). */
+  rps?: number
+  /** Live parses-per-second (credential detections/sec) from stats.json. */
+  pps?: number
+  /** Session-wide average RPS (running mean since scan start). */
+  avg_rps?: number
+  /** Session-wide average PPS (running mean since scan start). */
+  avg_pps?: number
+  /** Hosts returning HTTP 200 (from Go's ValidHosts counter). */
+  valid_hosts?: number
+  /** Scan completion fraction 0.0–1.0 (URLsProcessed / URLsLoaded). */
+  progression?: number
 }
 
 export const crack = {
@@ -752,6 +795,29 @@ export const crack = {
     }
     return (await res.json()) as { ok: boolean }
   },
+}
+
+/* ── Prefilter (target-list liveness probe) ──────────────────────── */
+
+export type PrefilterParams = {
+  list_file: string
+  vps_ip: string
+}
+
+export type PrefilterResult = {
+  ok: boolean
+  running?: boolean
+  hits?: string[]
+  total_checked?: number
+  total_hits?: number
+  error?: string
+}
+
+export const prefilter = {
+  start: (params: PrefilterParams) =>
+    postJson<{ ok: boolean; message?: string; error?: string }>('/prefilter/start', params),
+  results: () =>
+    getJson<PrefilterResult>('/prefilter/results'),
 }
 
 export { ReconApiError }
@@ -869,6 +935,12 @@ export const findings = {
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/stripe'),
   listCrypto: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/crypto'),
+  listDatabase: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/database'),
+  listWebPanels: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/webpanels'),
+  listSSH: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/ssh'),
   refreshStripe: (id: number) =>
     postJson<StripeRefreshResult>(`/findings/stripe/${id}/refresh`, {}),
   refreshCrypto: (id: number, address?: string, chain?: 'eth' | 'btc' | 'bnb') =>

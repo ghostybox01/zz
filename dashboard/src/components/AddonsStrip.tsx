@@ -58,12 +58,15 @@ const BRAND_BY_ID: Record<string, { domain: string; Glyph: Glyph }> = {
 
 function fallbackGlyphForCategory(category: AddonCategory): Glyph {
   switch (category) {
-    case 'ai':         return GlyphAI
-    case 'cloud':      return GlyphAwsDeep
-    case 'email-api':  return GlyphSendGrid
-    case 'smtp':       return GlyphSmtp
-    case 'payment':    return GlyphStripe
-    case 'sms':        return GlyphTwilio
+    case 'ai':             return GlyphAI
+    case 'cloud':          return GlyphAwsDeep
+    case 'email-api':      return GlyphSendGrid
+    case 'smtp':           return GlyphSmtp
+    case 'payment':        return GlyphStripe
+    case 'sms':            return GlyphTwilio
+    case 'database':       return GlyphSmtp
+    case 'web-panels':     return GlyphSendGrid
+    case 'infrastructure': return GlyphAwsDeep
   }
 }
 

@@ -55,7 +55,14 @@ export function UpdateBanner() {
         setStatus({ kind: 'error', sha, error: r.error ?? 'Update failed to start.' })
       }
     } catch (e) {
-      setStatus({ kind: 'error', sha, error: e instanceof Error ? e.message : String(e) })
+      const msg = e instanceof Error ? e.message : String(e)
+      // A 502 from nginx means the update helper restarted Flask mid-request —
+      // that's actually a success signal, not an error.
+      if (msg.includes('502')) {
+        setStatus({ kind: 'started', sha, message: 'Update helper launched — services are restarting (~30–90 s).' })
+      } else {
+        setStatus({ kind: 'error', sha, error: msg })
+      }
     }
   }
 

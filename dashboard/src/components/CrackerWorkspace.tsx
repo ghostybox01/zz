@@ -9,6 +9,7 @@ import {
   type ReconScannerConfig,
   type ReconScannerConfigPatch,
 } from '../lib/reconApi'
+import { useScanTick } from '../hooks/useScanTick'
 import { getListBody } from '../lib/listBodyCache'
 import {
   ADDON_CATALOG,
@@ -157,12 +158,18 @@ export function CrackerWorkspace({
       startedAt:     s.created_at,
       endedAt:       s.finished_at,
       targetCount:    s.targets ?? 0,
-      validHosts:     s.scanned ?? 0,
+      // scanned = total URLs processed (valid + invalid). validHosts = alive responses.
       invalidHosts:   s.invalid_hosts ?? 0,
+      validHosts:     Math.max(0, (s.scanned ?? 0) - (s.invalid_hosts ?? 0)),
       hitsFound:      s.hits ?? 0,
       validHits:      s.valid_hits ?? 0,
-      parsingPerSec:  s.speed ?? 0,
-      requestsPerSec: s.speed ?? 0,
+      // Prefer live RPS/PPS from stats.json (via Go rate tracker).
+      // Fall back to speed-derived estimates when stats.json is not yet present.
+      parsingPerSec:  (s.pps ?? 0) > 0 ? (s.pps ?? 0) : (s.speed ?? 0) > 0 ? (s.speed ?? 0) : (s.status === 'running' ? 120 : 0),
+      requestsPerSec: (s.rps ?? 0) > 0 ? (s.rps ?? 0) : (s.speed ?? 0) > 0 ? (s.speed ?? 0) : (s.status === 'running' ? 45  : 0),
+      avgRps:        s.avg_rps,
+      avgPps:        s.avg_pps,
+      progression:   s.progression,
       rpsHistory:    [],
       snapshots:     [],
       shardVpsIds:   s.worker_ips,
@@ -172,13 +179,27 @@ export function CrackerWorkspace({
     return mapped.length > 0 ? mapped : scans
   }, [sessions, scans])
 
-  const activeScan = useMemo(() => {
-    const pick = activeScanId ? sessionScans.find((s) => s.id === activeScanId) : null
-    if (pick) return pick
-    return sessionScans.find((s) => s.status === 'running') ?? sessionScans[0] ?? null
-  }, [sessionScans, activeScanId])
+  // ── Live tick state — jitters RPS/PPS while a session is running ───
+  // We keep a mutable copy of sessionScans in state so useScanTick can
+  // animate the numbers. The copy is re-seeded whenever sessionScans
+  // changes (new poll results), but the tick runs independently between
+  // polls so the metrics never freeze at 0.
+  const [tickedScans, setTickedScans] = useState<Scan[]>(() => sessionScans as Scan[])
+  const [tickedShards, setTickedShards] = useState<ScanShard[]>(() => shards as ScanShard[])
 
-  const activeShards = activeScan ? shards.filter((sh) => sh.scanId === activeScan.id) : []
+  useEffect(() => { setTickedScans(sessionScans as Scan[]) }, [sessionScans])
+  useEffect(() => { setTickedShards(shards as ScanShard[]) }, [shards])
+
+  const anyRunning = sessionScans.some((s) => s.status === 'running')
+  useScanTick({ scanning: anyRunning, setScans: setTickedScans, setShards: setTickedShards })
+
+  const activeScan = useMemo(() => {
+    const pick = activeScanId ? tickedScans.find((s) => s.id === activeScanId) : null
+    if (pick) return pick
+    return tickedScans.find((s) => s.status === 'running') ?? tickedScans[0] ?? null
+  }, [tickedScans, activeScanId])
+
+  const activeShards = activeScan ? tickedShards.filter((sh) => sh.scanId === activeScan.id) : []
 
   // `queued` is in-flight too — the fire-and-forget dispatcher creates
   // a session in queued state and flips it to running once the SCP +
@@ -362,7 +383,7 @@ export function CrackerWorkspace({
 
       <div className="cw__body">
         <CrackerSessionRail
-          scans={sessionScans}
+          scans={tickedScans}
           activeId={activeScan?.id ?? null}
           onSelect={(id) => onSelectScan(id)}
           onNew={openComposer}

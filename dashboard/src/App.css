@@ -5124,6 +5124,15 @@
 .cw-scanners__upload-clear { margin-left:auto; font-size:.65rem; color:var(--gold); background:transparent; border:none; cursor:pointer; padding:0; text-decoration:underline; }
 .cw-scanners__upload-clear:disabled { opacity:.5; cursor:default; text-decoration:none; }
 .cw-scanners__file { display:none; }
+/* ── Scan method tiles (VulnerabilityScannersPanel v2) ─────────── */
+.cw-scanners__methods { display:grid; grid-template-columns:repeat(3,1fr); gap:.5rem; margin:.75rem 0; }
+.cw-scanners__method-tile { position:relative; display:flex; align-items:center; gap:.5rem; padding:.6rem .75rem; background:var(--card-bg,#1a1a2e); border:1px solid var(--border,rgba(255,255,255,.08)); border-radius:8px; cursor:pointer; transition:border-color .15s,background .15s; text-align:left; width:100%; }
+.cw-scanners__method-tile:hover { border-color:rgba(255,200,50,.4); }
+.cw-scanners__method-tile--on { border-color:rgba(255,200,50,.55); background:rgba(255,200,50,.06); }
+.cw-scanners__method-tile__check { position:absolute; top:.3rem; left:.3rem; width:1rem; height:1rem; background:rgba(255,200,50,.9); border-radius:3px; display:flex; align-items:center; justify-content:center; font-size:.55rem; color:#000; font-weight:800; }
+.cw-scanners__method-tile__icon { font-size:1.3rem; line-height:1; margin-left:.35rem; }
+.cw-scanners__method-tile__label { font-size:.78rem; font-weight:600; color:var(--text,#e0e0e0); letter-spacing:.02em; }
+.cw-scanners__method-tile__badge { margin-left:auto; font-size:.6rem; background:rgba(255,200,50,.2); color:rgba(255,200,50,.9); padding:.15rem .35rem; border-radius:4px; font-weight:700; }
 /* ── Addons strip (brand glyphs) ───────────────────────────────── */
 
 .cw-addons { border-radius:14px; border:1px solid var(--hairline); padding:.95rem 1rem 1.05rem; margin-top:.25rem; background:linear-gradient(180deg,rgba(255,255,255,.012),rgba(255,255,255,0)); }
