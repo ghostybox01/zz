@@ -40,8 +40,8 @@ func resetCounterAndKeys(a *AWSScanner) {
 
 // The SendGrid dummy key used across these tests.
 // Pattern: SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}
-// Reuses the already-validated constant from detectors_aws_test.go.
-const sgKey = sendGridKey // "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"
+// Uses obviously-fake zeros for testing only.
+const sgKey = "SG.00000000000000000000.0000000000000000000000000000000000000000000"
 
 // ---------------------------------------------------------------------------
 // Test 1 — Honeypot detection (lines 3600-3604)

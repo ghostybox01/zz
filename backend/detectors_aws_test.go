@@ -23,23 +23,23 @@ var (
 	patAnthropic   = regexp.MustCompile(`sk-ant-(?:api\d+-[A-Za-z0-9_-]{86,}|[A-Za-z0-9_-]{92,})`)
 )
 
-// Dummy credentials (safe/fake values)
+// Test fixture credentials (safe/fake values for unit testing only)
 const (
-	akiaKey      = "AKIAIOSFODNN7EXAMPLE"  // AKIA + 16 uppercase alphanum = 20 chars total
-	asiaKey      = "ASIAIOSFODNN7EXAMPLE"  // ASIA + 16 uppercase alphanum = 20 chars total
-	awsSecret    = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" // 40 chars
-	// 100+ char session token (96 chars was too short; padded to 102)
-	awsToken     = "AQoXnyc4lcK4ZIAAAAAAAAABBBBvkFk/dpKyUGSRc4qr1TFHDqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	// SendGrid: SG.<22 chars>.<43 chars> — original second segment was 42; appended one char
-	sendGridKey  = "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"
-	stripeLive   = "sk_live_51ABC123DEFGHIJKLMNOPQRSTuvwxyz0123456789abcdef"
-	stripeTest   = "sk_test_51ABC123DEFGHIJKLMNOPQRSTuvwxyz0123456789abcdef"
-	// Mailgun legacy: key-[0-9a-zA-Z]{32} — original had only 29 chars after key-; fixed to 32
-	mailgunLegacy = "key-3ax6xnjp29d4qt0mqr3bqp97e27d9abc"
-	mailgunNew   = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4-12345678-abcdef12"
-	// OpenAI: sk-proj- + >=20 alphanum + >=28 alphanum/_/- (two adjacent groups)
-	openAIKey    = "sk-proj-abcdefghijklmnopqrstABCDEFGHIJKLMNOPQRSTUVWXYZ01"
-	anthropicKey = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	akiaKey      = "AKIA0000000000000000"  // AKIA + 16 zeros = valid format, obviously fake
+	asiaKey      = "ASIA0000000000000000"  // ASIA + 16 zeros = valid format, obviously fake
+	awsSecret    = "0000000000000000000000000000000000000000" // 40 zeros
+	// 102 char session token of zeros
+	awsToken     = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+	// SendGrid: SG.0000.0000
+	sendGridKey  = "SG.00000000000000000000.000000000000000000000000000000000000000000"
+	stripeLive   = "sk_live_0000000000000000"
+	stripeTest   = "sk_test_0000000000000000"
+	// Mailgun legacy: key-00000000000000000000000000000000
+	mailgunLegacy = "key-00000000000000000000000000000000"
+	mailgunNew   = "00000000000000000000000000000000-00000000-00000000"
+	// OpenAI: sk-proj-0000...
+	openAIKey    = "sk-proj-00000000000000000000000000000000000000"
+	anthropicKey = "sk-ant-api03-000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 )
 
 // ---------------------------------------------------------------------------

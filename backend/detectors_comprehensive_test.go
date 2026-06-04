@@ -23,29 +23,28 @@ import (
 
 const (
 	// AWS
-	compAKIA   = "AKIAIOSFODNN7EXAMPLE" // AKIA + 16 uppercase alphanum
-	compASIA   = "ASIAIOSFODNN7EXAMPLE" // ASIA + 16 uppercase alphanum
-	compAWSSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" // exactly 40 chars
+	compAKIA   = "AKIA0000000000000000" // AKIA + 16 zeros
+	compASIA   = "ASIA0000000000000000" // ASIA + 16 zeros
+	compAWSSecret = "00000000000000000000000000000000000000" // 40 zeros
 
 	// SendGrid: SG.<22>.<43>
-	compSendGrid = "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"
+	compSendGrid = "SG.00000000000000000000.0000000000000000000000000000000000000000000"
 
 	// Stripe
-	compStripeLive = "sk_live_51ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234567890"
-	compStripeRK   = "rk_live_abcdefghijklmnopqrstu" // rk_live_ + 20 chars = 28 total (≥ 16 required)
+	compStripeLive = "sk_live_0000000000000000"
+	compStripeRK   = "rk_live_0000000000000000" // rk_live_ + zeros
 
 	// Mailgun legacy: key- + exactly 32 alphanum
-	compMailgunLegacy = "key-abcdefghijklmnopqrstuvwxyz123456"
+	compMailgunLegacy = "key-00000000000000000000000000000000"
 	// Mailgun new UUID: [a-f0-9]{32}-[0-9a-f]{8}-[a-f0-9]{8}
 	// All segments must be strict lowercase hex (a-f0-9 only)
-	compMailgunNew = "abcdef1234567890abcdef1234567890-12345678-abcdef12"
+	compMailgunNew = "00000000000000000000000000000000-00000000-00000000"
 
 	// Brevo: xkeysib- + 64 alphanum + - + 16 alphanum
-	compBrevo = "xkeysib-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab-abcdefghijklmnop"
+	compBrevo = "xkeysib-0000000000000000000000000000000000000000000000000000000000000000-0000000000000000"
 
 	// Mandrill: md- + exactly 22 alphanum (22 chars after "md-")
-	// A(1)B(2)C(3)D(4)E(5)F(6)a(7)b(8)c(9)d(10)e(11)f(12)0(13)1(14)2(15)3(16)4(17)5(18)6(19)7(20)8(21)9(22)
-	compMandrill = "md-ABCDEFabcdef0123456789"
+	compMandrill = "md-0000000000000000000000"
 
 	// MailerSend: mlsn. + 68 chars of [A-Za-z0-9_-]
 	// 26 lower + 26 upper + 10 digits + 6 more = 68 chars

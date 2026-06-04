@@ -351,7 +351,7 @@ func TestValidator_SendGrid(t *testing.T) {
 
 func TestValidator_Stripe(t *testing.T) {
 	chdirTemp(t)
-	const key = "sk_live_51ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234567890"
+	const key = "sk_live_0000000000000000"
 	successRoutes := []mockRoute{
 		{"api.stripe.com", 200, `{"livemode":false,"available":[]}`},
 	}

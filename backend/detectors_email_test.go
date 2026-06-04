@@ -371,7 +371,7 @@ func TestMailgunLegacyInEnvDispatchedKeyIsJustToken(t *testing.T) {
 var newMailgunPattern = regexp.MustCompile(`[a-f0-9]{32}-[0-9a-f]{8}-[a-f0-9]{8}`)
 
 func TestNewMailgunPatternDispatch(t *testing.T) {
-	newKey := "abcdef1234567890abcdef1234567890-12345678-abcdef12"
+	newKey := "00000000000000000000000000000000-00000000-00000000"
 	cases := []struct {
 		name    string
 		input   string
