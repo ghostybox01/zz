@@ -4000,6 +4000,124 @@ def _extract_remote_pid(out: str) -> 'int | None':
     return None
 
 
+# ── Watchdog deployment ───────────────────────────────────────────────────────
+# These strings are shipped verbatim to each worker VPS via SSH heredoc.
+# The watchdog reads /tmp/reconx_session.conf written by _deploy_watchdog()
+# and uses systemd-run --scope to launch the scanner inside a cgroup that
+# enforces MemoryMax and CPUQuota at the kernel level.
+
+_WATCHDOG_SCRIPT = r"""#!/bin/bash
+# /usr/local/bin/reconx-watchdog
+# Managed by RavenX controller — do not edit manually.
+CONF=/tmp/reconx_session.conf
+LOG=/tmp/reconx_watchdog.log
+
+[ -f "$CONF" ] || exit 0
+source "$CONF"   # sets CRACK_DIR and SCANNER_BIN
+
+[ -d "$CRACK_DIR" ] || exit 0
+BIN="${SCANNER_BIN:-$CRACK_DIR/reconx-scanner}"
+[ -x "$BIN" ] || BIN="$CRACK_DIR/reconx-scanner-linux"
+[ -x "$BIN" ] || exit 0
+
+# Already running?
+if pgrep -x "$(basename $BIN)" > /dev/null 2>&1; then exit 0; fi
+
+cd "$CRACK_DIR"
+
+# Launch inside a transient systemd scope — kernel cgroups enforce limits.
+systemd-run --scope --unit=reconx-scanner-scope \
+    -p MemoryMax=900M -p CPUQuota=90% \
+    env GOMEMLIMIT=900MiB \
+    ionice -c 2 -n 7 nice -n 15 \
+    "$BIN" -timeout 5 -checkpoint checkpoint.txt targets.txt \
+    >> "$CRACK_DIR/crack.log" 2>&1 &
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') watchdog: restarted scanner (PID $!)" >> "$LOG"
+"""
+
+_WATCHDOG_LOOP = r"""#!/bin/bash
+# /usr/local/bin/reconx-watchdog-loop — called by systemd, loops forever
+while true; do
+    /usr/local/bin/reconx-watchdog
+    sleep 10
+done
+"""
+
+_WATCHDOG_SERVICE = """[Unit]
+Description=RavenX Scanner Watchdog
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/reconx-watchdog-loop
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _deploy_watchdog(mgr, ip: str, remote_dir: str, binary_name: str = 'reconx-scanner') -> bool:
+    """Install the self-healing watchdog on `ip` (idempotent) and write the
+    session config so the watchdog knows which directory and binary to watch.
+
+    Deploys three files to the worker:
+      /usr/local/bin/reconx-watchdog        — one-shot check+restart script
+      /usr/local/bin/reconx-watchdog-loop   — infinite loop wrapper for systemd
+      /etc/systemd/system/reconx-watchdog.service — systemd unit
+
+    The systemd service is enabled + started on first deploy; subsequent calls
+    only update /tmp/reconx_session.conf (idempotent — service already running).
+
+    Returns True on success, False on any SSH error. Non-fatal: dispatch
+    continues even if watchdog installation fails.
+    """
+    try:
+        # Write watchdog scripts using printf to avoid heredoc quoting issues
+        _write_remote_file(mgr, ip, '/usr/local/bin/reconx-watchdog', _WATCHDOG_SCRIPT)
+        mgr.ssh_exec(ip, 'chmod +x /usr/local/bin/reconx-watchdog', 5)
+
+        _write_remote_file(mgr, ip, '/usr/local/bin/reconx-watchdog-loop', _WATCHDOG_LOOP)
+        mgr.ssh_exec(ip, 'chmod +x /usr/local/bin/reconx-watchdog-loop', 5)
+
+        # Install systemd service only if not already active
+        svc_status = (mgr.ssh_exec(
+            ip, 'systemctl is-active reconx-watchdog 2>/dev/null || echo inactive', 5
+        ) or '').strip()
+        if svc_status != 'active':
+            _write_remote_file(mgr, ip,
+                '/etc/systemd/system/reconx-watchdog.service', _WATCHDOG_SERVICE)
+            mgr.ssh_exec(ip,
+                'systemctl daemon-reload && '
+                'systemctl enable reconx-watchdog && '
+                'systemctl restart reconx-watchdog',
+                15)
+
+        # Write session config — updated every crack so watchdog knows where to look
+        bin_path = f'{remote_dir}/{binary_name}'
+        conf = f'CRACK_DIR={remote_dir}\nSCANNER_BIN={bin_path}\n'
+        _write_remote_file(mgr, ip, '/tmp/reconx_session.conf', conf)
+
+        print(f'[watchdog] deployed on {ip} → {remote_dir}')
+        return True
+    except Exception as e:
+        print(f'[watchdog] deploy failed for {ip}: {e}')
+        return False
+
+
+def _write_remote_file(mgr, ip: str, path: str, content: str) -> None:
+    """Write `content` to `path` on `ip` using a base64-encoded transfer to
+    avoid heredoc quoting issues with special characters in the content."""
+    import base64 as _b64
+    b64 = _b64.b64encode(content.encode()).decode()
+    mgr.ssh_exec(ip,
+        f"echo '{b64}' | base64 -d > {path}",
+        10)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Per-list target storage
 # ─────────────────────────────────────────────────────────────────────
