@@ -4241,7 +4241,9 @@ def _push_dedup_to_worker(mgr, ip: str, remote_dir: str):
 
 
 def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
-                           work_dir: str, slice_lines: list, config_bytes: bytes) -> tuple:
+                           work_dir: str, slice_lines, config_bytes: bytes) -> tuple:
+    # slice_lines may be a file path (str) from the streaming dispatcher
+    # or a legacy list for the redistribution code path.
     """Ship targets + config to one worker and spawn the scanner. Returns
     (pid_or_None, error_message_or_None). Pure helper; no shared-state
     mutation so it's safe to fan out from the dispatcher thread."""
@@ -4272,15 +4274,22 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
 
         # mkstemp + explicit close before scp_upload sidesteps paramiko's
         # habit of reading 0 bytes when the file handle's still open.
-        tf_targets = _tempfile.NamedTemporaryFile(
-            mode='w', suffix=f'_{session_id}_targets.txt', delete=False
-        )
-        try:
-            tf_targets.write('\n'.join(slice_lines))
-            if slice_lines:
-                tf_targets.write('\n')
-        finally:
-            tf_targets.close()
+        # If slice_lines is already a file path (streaming dispatch), use it
+        # directly — no copy needed. Otherwise write the legacy list to disk.
+        if isinstance(slice_lines, str) and os.path.exists(slice_lines):
+            _targets_upload_path = slice_lines
+            tf_targets = None  # don't delete — dispatcher cleans up
+        else:
+            tf_targets = _tempfile.NamedTemporaryFile(
+                mode='w', suffix=f'_{session_id}_targets.txt', delete=False
+            )
+            try:
+                for _ln in (slice_lines or []):
+                    tf_targets.write(_ln)
+                    tf_targets.write('\n')
+            finally:
+                tf_targets.close()
+            _targets_upload_path = tf_targets.name
 
         tf_config = _tempfile.NamedTemporaryFile(
             mode='wb', suffix=f'_{session_id}_config.json', delete=False
@@ -4290,7 +4299,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
         finally:
             tf_config.close()
 
-        if not mgr.scp_upload(ip, tf_targets.name, f'{remote_dir}/targets.txt'):
+        if not mgr.scp_upload(ip, _targets_upload_path, f'{remote_dir}/targets.txt'):
             real = mgr.last_error(ip) if hasattr(mgr, 'last_error') else ''
             return None, f'scp_upload(targets.txt) failed — {real}' if real else 'scp_upload(targets.txt) returned False'
         if not mgr.scp_upload(ip, tf_config.name, f'{remote_dir}/config.json'):
@@ -4431,8 +4440,9 @@ def _probe_worker_nproc(mgr, ip: str) -> int:
         return 1
 
 
-def _run_crack_dispatch(session_id: str, norm_ips: list, all_targets: list,
-                        config_snapshot: dict, work_dir: str, remote_dir: str) -> None:
+def _run_crack_dispatch(session_id: str, norm_ips: list, all_targets: int,
+                        config_snapshot: dict, work_dir: str, remote_dir: str,
+                        all_targets_path: str = '') -> None:
     """Background dispatcher: slice the target list and ship to each worker.
 
     The list is split proportionally to each worker's CPU count so faster
@@ -4461,29 +4471,96 @@ def _run_crack_dispatch(session_id: str, norm_ips: list, all_targets: list,
     print(f'[dispatch] {session_id}: nproc weights per worker: '
           f'{dict(zip(norm_ips, weights))}')
 
-    slices = _slice_targets(all_targets, len(norm_ips), weights=weights)
+    # ── Stream target list into per-worker temp files without loading all ──
+    # Loading 10M lines into a Python list peaks at 500MB+ on the controller.
+    # Instead: count lines once, compute split boundaries, stream the source
+    # file line-by-line into per-worker temp files. Peak RAM = one line.
+    import tempfile as _dispatch_tmpmod
     config_bytes = json.dumps(config_snapshot, indent=2).encode('utf-8')
 
-    # Record absolute start/end offsets per worker so the redistribution
-    # logic can calculate how much of each slice was completed.
+    total_lines = all_targets  # all_targets is now an int line count, not a list
+    if total_lines == 0:
+        _update_crack_session(session_id, lambda s: s.update({
+            'status': 'failed', 'last_error': 'target list is empty',
+            'finished_at': datetime.now().isoformat(),
+        }))
+        return
+
+    # Weighted split boundaries
+    wsum = sum(weights) or 1
+    sizes, assigned = [], 0
+    for i, w in enumerate(weights):
+        if i == len(weights) - 1:
+            sizes.append(total_lines - assigned)
+        else:
+            chunk = max(1, round(total_lines * w / wsum))
+            sizes.append(chunk)
+            assigned += chunk
+
+    # Build worker_slices metadata
     worker_slices: dict = {}
-    _slice_off = 0
+    _off = 0
     for _i, _wip in enumerate(norm_ips):
-        _slen = len(slices[_i]) if _i < len(slices) else 0
-        worker_slices[_wip] = {'start': _slice_off, 'end': _slice_off + _slen}
-        _slice_off += _slen
+        worker_slices[_wip] = {'start': _off, 'end': _off + sizes[_i]}
+        _off += sizes[_i]
+
+    # Create per-worker temp files and stream source into them
+    _tmp_paths: dict = {}   # ip -> temp file path
+    _tmp_sizes: dict = {}   # ip -> actual line count written
+    try:
+        _target_path_disp = all_targets_path  # path to source file
+        _handles = {}
+        for _i, _wip in enumerate(norm_ips):
+            _tf = _dispatch_tmpmod.NamedTemporaryFile(
+                mode='w', suffix=f'_{session_id}_{_i}.txt', delete=False
+            )
+            _handles[_wip] = (_tf, sizes[_i], 0)
+            _tmp_paths[_wip] = _tf.name
+
+        with open(_target_path_disp, 'r', errors='ignore') as _src:
+            _worker_idx = 0
+            _cur_ip = norm_ips[_worker_idx]
+            _written = 0
+            _target_size = sizes[_worker_idx]
+            for _raw_line in _src:
+                _line = _raw_line.strip()
+                if not _line:
+                    continue
+                fh, _sz, _cnt = _handles[_cur_ip]
+                fh.write(_line + '\n')
+                _cnt += 1
+                _handles[_cur_ip] = (fh, _sz, _cnt)
+                if _cnt >= _sz and _worker_idx < len(norm_ips) - 1:
+                    _worker_idx += 1
+                    _cur_ip = norm_ips[_worker_idx]
+
+        for _wip, (fh, _sz, _cnt) in _handles.items():
+            fh.close()
+            _tmp_sizes[_wip] = _cnt
+    except Exception as _e:
+        for _p in _tmp_paths.values():
+            try: os.unlink(_p)
+            except Exception: pass
+        _update_crack_session(session_id, lambda s: s.update({
+            'status': 'failed', 'last_error': f'slice write failed: {_e}',
+            'finished_at': datetime.now().isoformat(),
+        }))
+        return
 
     remote_pids: dict = {}
     dispatch_errors: list = []
     for idx, ip in enumerate(norm_ips):
-        slice_lines = slices[idx] if idx < len(slices) else []
+        slice_file = _tmp_paths.get(ip, '')
+        slice_count = _tmp_sizes.get(ip, 0)
         pid, err = _dispatch_crack_worker(
-            mgr, ip, session_id, remote_dir, work_dir, slice_lines, config_bytes
+            mgr, ip, session_id, remote_dir, work_dir,
+            slice_file,   # now a file path, not a list
+            config_bytes
         )
-        if pid is not None:
-            remote_pids[ip] = pid
-        else:
-            dispatch_errors.append(f'{ip}: {err}')
+        # Clean up per-worker temp file after upload (success or fail)
+        if slice_file and os.path.exists(slice_file):
+            try: os.unlink(slice_file)
+            except Exception: pass
 
     status = 'running' if remote_pids else 'failed'
     last_error = '; '.join(dispatch_errors) if dispatch_errors else None
@@ -4547,13 +4624,16 @@ def api_crack_start():
         else:
             err = 'target list not found — upload one via the Lists tab'
         return jsonify({'ok': False, 'error': err}), 404
+    # Count lines without loading the whole file into memory.
+    # The dispatch thread streams line-by-line into per-worker temp files.
     try:
         with open(target_path, 'r', errors='ignore') as f:
-            all_targets = [ln.strip() for ln in f if ln.strip()]
+            all_targets = sum(1 for ln in f if ln.strip())
     except Exception as e:
         return jsonify({'ok': False, 'error': f'cannot read target list: {e}'}), 500
     if not all_targets:
         return jsonify({'ok': False, 'error': 'target list is empty'}), 400
+    all_targets_path = target_path  # pass path to dispatch thread
 
     session_id = uuid.uuid4().hex[:12]
     config_snapshot = _build_crack_config_snapshot([str(a) for a in addon_ids])
@@ -4592,7 +4672,7 @@ def api_crack_start():
     # /api/crack/sessions to observe the queued → running/failed transition.
     threading.Thread(
         target=_run_crack_dispatch,
-        args=(session_id, norm_ips, all_targets, config_snapshot, work_dir, remote_dir),
+        args=(session_id, norm_ips, all_targets, config_snapshot, work_dir, remote_dir, all_targets_path),
         name=f'crack-dispatch-{session_id}',
         daemon=True,
     ).start()
