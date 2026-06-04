@@ -3677,7 +3677,7 @@ def _redistribute_dead_worker(session_id: str, dead_ip: str,
         try:
             _nproc = int((mgr.ssh_exec(ip, 'nproc 2>/dev/null || echo 2', 5) or '2').strip())
             # 80% per core — leaves 20% headroom for OS, SSH, monitoring
-            _lim   = max(80, min(_nproc * 80, 800))
+            _lim   = max(90, min(_nproc * 90, 900))
             _merged_limit = len(merged)
             restart_cmd = (
                 f'cd {remote_dir} && rm -f checkpoint.txt && sleep 1 && '
@@ -3777,7 +3777,7 @@ def _liveness_monitor_loop() -> None:
                                     ip,
                                     f'command -v cpulimit >/dev/null 2>&1 || exit 0 ; '
                                     f'pgrep -x cpulimit >/dev/null 2>&1 && exit 0 ; '
-                                    f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 80 )) ; '
+                                    f'_lim=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; '
                                     f'nohup cpulimit -p {actual_pid} -l $_lim -q '
                                     f'>>/tmp/cpulimit.log 2>&1 &',
                                     8,
@@ -4342,7 +4342,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
         # so it returns as soon as the PID is written, never retries, and
         # never blocks waiting for the scanner to finish.
         # ionice -c 2 -n 7 + nice -n 15 keeps the scanner low-priority so
-        # the VPS stays responsive. cpulimit hard-caps at 80% * nproc.
+        # the VPS stays responsive. cpulimit hard-caps at 90% * nproc.
         # Install cpulimit if missing (best-effort apt/yum), then always apply.
         #
         # --offset 0 --limit N are passed as an explicit slice boundary so
@@ -4361,7 +4361,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             f"-offset 0 -limit {_slice_limit} "
             f"targets.txt </dev/null > crack.log 2>&1 &"
             f"_SP=$! ; "
-            f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 80 )) ; "
+            f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; "
             f"( command -v cpulimit >/dev/null 2>&1 && "
             f"setsid nohup cpulimit -p $_SP -l $_LIM -q </dev/null >/dev/null 2>&1 & ) ; "
             f"echo $_SP"
