@@ -5765,6 +5765,23 @@ func (a *AWSScanner) logActiveAddons() {
 // writes a stats.json to the ResultJS directory so Flask can expose the live
 // metrics without any SSH log parsing.
 func startRateTracker() {
+	// Seed ValidHosts/InvalidHosts from the last stats.json written by a
+	// previous run. This means counters survive a scanner restart — they
+	// continue from the last saved value instead of resetting to 0.
+	if data, err := os.ReadFile(filepath.Join("ResultJS", "stats.json")); err == nil {
+		var prev map[string]interface{}
+		if json.Unmarshal(data, &prev) == nil {
+			globalCounters.mu.Lock()
+			if v, ok := prev["valid_hosts"].(float64); ok && v >= 0 {
+				globalCounters.ValidHosts = int(v)
+			}
+			if v, ok := prev["invalid_hosts"].(float64); ok && v >= 0 {
+				globalCounters.InvalidHosts = int(v)
+			}
+			globalCounters.mu.Unlock()
+		}
+	}
+
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
@@ -5776,7 +5793,6 @@ func startRateTracker() {
 			globalCounters.ParsesPerSec = float64(newParse - globalCounters.parseSnapshot)
 			globalCounters.requestSnapshot = newReq
 			globalCounters.parseSnapshot = newParse
-			// Update running averages
 			globalCounters.rpsTotal += globalCounters.RequestsPerSec
 			globalCounters.ppsTotal += globalCounters.ParsesPerSec
 			globalCounters.rpsCount++
@@ -5803,17 +5819,17 @@ func startRateTracker() {
 			}
 
 			statsData := map[string]interface{}{
-				"urls_processed":  processed,
-				"apis_found":      found,
-				"apis_validated":  validated,
-				"rps":             rps,
-				"pps":             pps,
-				"avg_rps":         avgRps,
-				"avg_pps":         avgPps,
-				"valid_hosts":     validHosts,
-				"invalid_hosts":   invalidHosts,
-				"progression":     progression,
-				"urls_loaded":     loaded,
+				"urls_processed": processed,
+				"apis_found":     found,
+				"apis_validated": validated,
+				"rps":            rps,
+				"pps":            pps,
+				"avg_rps":        avgRps,
+				"avg_pps":        avgPps,
+				"valid_hosts":    validHosts,
+				"invalid_hosts":  invalidHosts,
+				"progression":    progression,
+				"urls_loaded":    loaded,
 			}
 			if b, err := json.Marshal(statsData); err == nil {
 				_ = os.WriteFile(filepath.Join("ResultJS", "stats.json"), b, 0644)
