@@ -885,7 +885,7 @@ func (e *Enhancer) fetchURL(rawurl string) (string, map[string][]string, error) 
 	defer resp.Body.Close()
 
 	// Batasi response body untuk mencegah OOM
-	b, err := ioutil.ReadAll(io.LimitReader(resp.Body, 512*1024)) // 512KB max
+	b, err := ioutil.ReadAll(io.LimitReader(resp.Body, 128*1024)) // 512KB max
 	if err != nil {
 		return "", nil, err
 	}
@@ -4299,7 +4299,7 @@ func (a *AWSScanner) probeGraphQLIntrospection(baseURL string) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 200 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
 		if strings.Contains(string(body), "__schema") || strings.Contains(string(body), "queryType") {
 			a.logFound("GraphQL", "Introspection enabled", baseURL)
 			a.saveIntoFile(fmt.Sprintf("%s:introspection_enabled", sanitizeSource(baseURL)), "graphql_found.txt")
@@ -5384,7 +5384,10 @@ func (a *AWSScanner) createRequest(domain string) {
 			continue
 		}
 
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		// 128KB is enough to capture any .env / config file with credentials.
+		// Keeping this small is the single biggest RAM saving — 80 goroutines
+		// × 128KB = 10MB peak vs 80 × 512KB = 40MB at the old limit.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
 		resp.Body.Close()
 
 		// Track valid/invalid host counts for stats.json progression metrics.
@@ -5420,7 +5423,7 @@ func (a *AWSScanner) createRequest(domain string) {
 						fullJS := resolveURL(mainURL, js[1])
 						if !a.BlacklistPattern.MatchString(fullJS) {
 							if r, e := client.Get(fullJS); e == nil {
-								b, _ := io.ReadAll(io.LimitReader(r.Body, 512*1024))
+								b, _ := io.ReadAll(io.LimitReader(r.Body, 128*1024))
 								r.Body.Close()
 								a.checkAndSaveKeys(string(b), fullJS)
 								// Second-level: extract and scan JS files referenced within this JS file
@@ -5455,7 +5458,7 @@ func (a *AWSScanner) createRequest(domain string) {
 											}
 											continue
 										}
-										subBody, _ := io.ReadAll(io.LimitReader(subResp.Body, 512*1024))
+										subBody, _ := io.ReadAll(io.LimitReader(subResp.Body, 128*1024))
 										subResp.Body.Close()
 										if len(subBody) > 0 {
 											a.checkAndSaveKeys(string(subBody), subSrc)
@@ -5467,7 +5470,7 @@ func (a *AWSScanner) createRequest(domain string) {
 							// often retains API keys stripped from the minified bundle.
 							mapURL := fullJS + ".map"
 							if r2, e2 := client.Get(mapURL); e2 == nil {
-								b2, _ := io.ReadAll(io.LimitReader(r2.Body, 512*1024))
+								b2, _ := io.ReadAll(io.LimitReader(r2.Body, 128*1024))
 								r2.Body.Close()
 								if len(b2) > 0 {
 									a.checkAndSaveKeys(string(b2), mapURL)
@@ -5691,7 +5694,7 @@ func (a *AWSScanner) createRequest(domain string) {
 
 				fullURL := fmt.Sprintf("%s://%s%s", p, baseDomain, pth)
 				if r, e := client.Get(fullURL); e == nil {
-					b, _ := io.ReadAll(io.LimitReader(r.Body, 512*1024))
+					b, _ := io.ReadAll(io.LimitReader(r.Body, 128*1024))
 					r.Body.Close()
 					if len(b) > 0 {
 						if strings.Contains(pth, ".git/config") || strings.Contains(pth, ".gitconfig") {
@@ -5785,8 +5788,10 @@ func interactiveMode() string {
 
 func (a *AWSScanner) processBatch(urls []string) {
 	var wg sync.WaitGroup
-	// Batasi concurrent HTTP requests untuk menghindari OOM
-	sem := make(chan struct{}, 200)
+	// 80 concurrent goroutines: reduces peak RAM by ~60% vs 200.
+	// Each goroutine holds a response body buffer (up to 128KB) + stack (~8KB).
+	// 80 × 136KB ≈ 11MB vs 200 × 520KB ≈ 104MB at the old 512KB limit.
+	sem := make(chan struct{}, 80)
 
 	for _, u := range urls {
 		wg.Add(1)

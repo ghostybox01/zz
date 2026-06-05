@@ -4827,6 +4827,9 @@ def _poll_live_results(session_id: str) -> None:
     # rather than spamming every 30 s. Reset to 0 when worker comes back up.
     _worker_fail_count: dict = {}
     _DEAD_THRESHOLD = 3  # alert after 3 consecutive failures (~90 s)
+    # Track last RAM-alert time per worker — don't re-alert within 10 minutes
+    _ram_alert_ts: dict = {}
+    _RAM_ALERT_COOLDOWN = 600  # seconds between RAM warnings per worker
     while True:
         try:
             # Poll immediately (no leading sleep) so backend restarts pick up
@@ -5032,20 +5035,25 @@ def _poll_live_results(session_id: str) -> None:
                             last_progression = _pg
                     except Exception:
                         pass
-                    # Memory health check — alert only, never auto-reboot
-                    # (auto-reboot was resetting scanner counters to 0)
+                    # Memory health check — alert at most once per 10 min per worker
                     try:
                         mem_check = _ssh_exec_retry(mgr, ip,
                             "free -m | awk 'NR==2{print $7}'", 5)
                         free_mb = int((mem_check or '999').strip() or '999')
                         if free_mb < 200:
                             print(f'[fleet][CRITICAL] {ip}: only {free_mb}MB RAM free')
-                            _tg_send(
-                                f'⚠️ <b>Worker Low RAM</b>\n'
-                                f'🖥 <code>{ip}</code>\n'
-                                f'💾 Only <b>{free_mb}MB</b> free — scanner may slow down.\n'
-                                f'Monitor closely. Use ↺ Restart Workers if it crashes.'
-                            )
+                            last_alerted = _ram_alert_ts.get(ip, 0)
+                            if _time.time() - last_alerted >= _RAM_ALERT_COOLDOWN:
+                                _ram_alert_ts[ip] = _time.time()
+                                _tg_send(
+                                    f'⚠️ <b>Worker Low RAM</b>\n'
+                                    f'🖥 <code>{ip}</code>\n'
+                                    f'💾 Only <b>{free_mb}MB</b> free — scanner may slow down.\n'
+                                    f'Monitor closely. Use ↺ Restart Workers if it crashes.'
+                                )
+                        else:
+                            # RAM recovered — reset cooldown so next drop alerts promptly
+                            _ram_alert_ts.pop(ip, None)
                     except (ValueError, TypeError):
                         pass
                     # Worker succeeded this poll — reset failure counter
