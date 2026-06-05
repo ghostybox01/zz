@@ -3704,9 +3704,9 @@ def _redistribute_dead_worker(session_id: str, dead_ip: str,
                 f'targets.txt </dev/null > crack.log 2>&1 &'
                 f'_SP=$! ; '
                 f'setsid nohup cpulimit -p $_SP -l {_lim} -q </dev/null >/dev/null 2>&1 & '
-                f'echo $_SP'
+                f'sleep 1 ; echo PID:$_SP'
             )
-            _pid_out = mgr.ssh_exec(ip, restart_cmd, 30)
+            _pid_out = mgr.ssh_exec(ip, restart_cmd, 35)
             new_pid  = _extract_remote_pid(_pid_out or '')
             if new_pid:
                 new_pids[ip] = new_pid
@@ -3984,13 +3984,20 @@ def _slice_targets(lines: list, n: int,
 
 
 def _extract_remote_pid(out: str) -> 'int | None':
-    """Parse `nohup ... & echo $!` output to recover the worker-side PID.
-    Mirrors the WARC remote-spawn parser: nohup may emit a `[1] 12345` job
-    tag before the echoed PID, so we walk the lines in reverse looking
-    for the last all-digit token."""
+    """Parse `nohup ... & sleep 1 ; echo PID:$!` output to recover the worker PID.
+
+    Primary path: look for the unambiguous 'PID:<digits>' marker we now emit.
+    Fallback: walk lines in reverse for the last all-digit token (legacy/WARC paths).
+    """
     if not out:
         return None
-    for ln in out.splitlines():
+    # Primary: unambiguous PID: prefix (new scanner spawn commands)
+    import re as _re
+    m = _re.search(r'PID:(\d+)', out)
+    if m:
+        return int(m.group(1))
+    # Fallback: last numeric token on any line (nohup job-tag, legacy paths)
+    for ln in reversed(out.splitlines()):
         for tok in reversed(ln.strip().split()):
             if tok.isdigit():
                 try:
@@ -4508,7 +4515,7 @@ def _dispatch_crack_worker(mgr, ip: str, session_id: str, remote_dir: str,
             f"_LIM=$(( $(nproc 2>/dev/null || echo 2) * 90 )) ; "
             f"( command -v cpulimit >/dev/null 2>&1 && "
             f"setsid nohup cpulimit -p $_SP -l $_LIM -q </dev/null >/dev/null 2>&1 & ) ; "
-            f"echo $_SP"
+            f"sleep 1 ; echo PID:$_SP"
         )
         out = mgr.ssh_spawn_bg(ip, remote_cmd, 120) if hasattr(mgr, 'ssh_spawn_bg') else mgr.ssh_exec(ip, remote_cmd, 120)
         pid = _extract_remote_pid(out or '')
@@ -5304,7 +5311,7 @@ def api_crack_restart(sid):
                 f"_SP=$! ; "
                 f"( command -v cpulimit >/dev/null 2>&1 && "
                 f"setsid nohup cpulimit -p $_SP -l {cpu_lim} -q </dev/null >/dev/null 2>&1 & ) ; "
-                f"echo $_SP"
+                f"sleep 1 ; echo PID:$_SP"
             )
             out = mgr.ssh_spawn_bg(ip, remote_cmd, 60) if hasattr(mgr, 'ssh_spawn_bg') else mgr.ssh_exec(ip, remote_cmd, 60)
             pid = _extract_remote_pid(out or '')
