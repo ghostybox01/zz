@@ -8168,6 +8168,43 @@ def _rich_recheck(cred_type: str, key_value: str, source_url: str, metadata: str
             except Exception:
                 pass
 
+        # ── SMTP / XSMTP ─────────────────────────────────────────────────
+        elif cred_type in ('SMTP', 'XSMTP'):
+            import smtplib as _smtp
+            # Format: host:port:user:pass or user:pass (host from source_url)
+            host, port_s, user, password = '', '587', '', ''
+            parts = key_value.split(':')
+            if len(parts) >= 4:
+                host, port_s, user, password = parts[0], parts[1], parts[2], ':'.join(parts[3:])
+            elif len(parts) == 2:
+                user, password = parts[0], parts[1]
+                host = (source_url or '').split('/')[0].split(' ')[0]
+            elif metadata:
+                meta_parts = metadata.split(':')
+                if len(meta_parts) >= 2:
+                    user, password = meta_parts[0], ':'.join(meta_parts[1:])
+                host = (source_url or '').split('/')[0].split(' ')[0]
+            if not host:
+                return {'live': False, 'info': 'Could not parse SMTP host', 'extra': [], 'rich': {}}
+            port = int(port_s) if port_s.isdigit() else 587
+            srv = _smtp.SMTP(host, port, timeout=10)
+            srv.ehlo()
+            if srv.has_extn('STARTTLS'):
+                srv.starttls()
+                srv.ehlo()
+            srv.login(user, password)
+            live = True
+            info = f"Authenticated as {user}@{host}:{port}"
+            extra = [
+                {'key': 'HOST', 'value': f'{host}:{port}'},
+                {'key': 'USER', 'value': user},
+                {'key': 'TLS', 'value': 'STARTTLS' if port != 465 else 'SSL'},
+            ]
+            srv.quit()
+            rich['smtpHost'] = host
+            rich['smtpPort'] = port
+            rich['smtpUser'] = user
+
         else:
             return {'live': False, 'info': f'{cred_type} validation not implemented', 'extra': [], 'rich': {}}
 
@@ -8383,10 +8420,23 @@ def api_findings_stripe_refresh(finding_id: int):
 
 
 @app.route('/api/findings/crypto/<int:finding_id>/refresh', methods=['POST'])
+def _derive_eth_address(private_key_hex: str) -> str | None:
+    """Derive the checksummed Ethereum address from a 32-byte (64 hex char) private key."""
+    try:
+        from eth_keys import keys as _eth_keys
+        pk_bytes = bytes.fromhex(private_key_hex.strip().lstrip('0x'))
+        if len(pk_bytes) != 32:
+            return None
+        pk = _eth_keys.PrivateKey(pk_bytes)
+        return pk.public_key.to_checksum_address()
+    except Exception:
+        return None
+
+
 def api_findings_crypto_refresh(finding_id: int):
-    """Re-check the on-chain balance for a crypto finding. Expects either
-    a stored address in `verify_meta.address` or accepts ?address=&chain=
-    overrides from the operator (e.g. derived from a mnemonic offline)."""
+    """Re-check the on-chain balance for a crypto finding.
+    Auto-derives the ETH address from the private key stored in metadata
+    when no address is explicitly provided."""
     try:
         address = (request.args.get('address') or (request.json or {}).get('address') or '').strip()
         chain = ((request.args.get('chain') or (request.json or {}).get('chain') or 'eth')
@@ -8401,20 +8451,32 @@ def api_findings_crypto_refresh(finding_id: int):
             conn.close()
             return jsonify({'error': 'finding not found'}), 404
 
-        # Fall back to any address already known on the finding.
+        key_value, metadata, verify_meta_raw = row
+
+        # Priority: 1) explicit override, 2) stored in verify_meta, 3) derive from private key
         if not address:
-            prev = {}
             try:
-                prev = json.loads(row[2] or '{}')
+                address = (json.loads(verify_meta_raw or '{}').get('address') or '').strip()
             except Exception:
-                prev = {}
-            address = (prev.get('address') or '').strip()
+                pass
+
+        if not address:
+            # Try metadata first (scanner stores private key there for Crypto type)
+            for candidate in [metadata or '', key_value or '']:
+                candidate = candidate.strip()
+                # Looks like a 32-byte hex private key
+                if len(candidate) in (64, 66) and all(c in '0123456789abcdefABCDEF' for c in candidate.lstrip('0x')):
+                    derived = _derive_eth_address(candidate.lstrip('0x'))
+                    if derived:
+                        address = derived
+                        chain = 'eth'
+                        break
 
         if not address:
             conn.close()
             return jsonify({
                 'ok': False,
-                'error': 'no address known for this finding — pass ?address=0x...',
+                'error': 'no address known — pass ?address=0x... or ensure private key is 64 hex chars',
             }), 400
 
         # Delegate to the verify-balance endpoint logic by calling internally.
