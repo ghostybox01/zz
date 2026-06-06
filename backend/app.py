@@ -102,6 +102,29 @@ FILE_MAPPING = {
     'PyPI_Token_found.txt':         ('PyPI',         'hit'),
     'Sentry_DSN_found.txt':         ('Sentry',       'hit'),
     'AWS_SNS_Topic_ARN_found.txt':  ('AWS',          'hit'),
+    # Crypto / wallet keys
+    'crypto_found.txt':             ('Crypto',       'hit'),
+    'valid_crypto.txt':             ('Crypto',       'valid'),
+    # Google / Gemini API keys
+    'gemini_found.txt':             ('Gemini',       'hit'),
+    # Resend email API
+    'resend_found.txt':             ('Resend',       'hit'),
+    # GitHub tokens (ghr_, gho_, ghp_, etc.)
+    'github_found.txt':             ('GitHub',       'hit'),
+    # OpenAI unvalidated pattern matches (sk-)
+    'openai_found.txt':             ('OpenAI',       'hit'),
+    # HuggingFace tokens (hf_)
+    'huggingface_found.txt':        ('HuggingFace',  'hit'),
+    # MessageBird unvalidated (live_)
+    'messagebird_found.txt':        ('MessageBird',  'hit'),
+    # Replicate tokens (r8_)
+    'replicate_found.txt':          ('Replicate',    'hit'),
+    # Bitbucket app passwords (ATBB)
+    'bitbucket_found.txt':          ('Bitbucket',    'hit'),
+    # Database connection strings (.env leaks)
+    'database_found.txt':           ('Database',     'hit'),
+    # heroku_found.txt intentionally excluded — contains raw HTML/JSON page
+    # bodies (not credentials), up to 5.9 GB of noise.
 }
 
 URL_LOG_FILE = os.path.join(RESULTS_DIR, 'scanned_urls.txt')
