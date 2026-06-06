@@ -8294,6 +8294,288 @@ def _rich_recheck(cred_type: str, key_value: str, source_url: str, metadata: str
             rich['smtpPort'] = port
             rich['smtpUser'] = user
 
+        # ── Brevo ────────────────────────────────────────────────────────
+        elif cred_type == 'Brevo':
+            req = _ur.Request('https://api.brevo.com/v3/account',
+                              headers={'api-key': key_value, 'Accept': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            email = body.get('email', '')
+            plan_list = body.get('plan', [])
+            plan_name = plan_list[0].get('type', '') if plan_list else ''
+            send_limit = next((p.get('credits', 0) for p in plan_list if 'limit' in p.get('type', '').lower()), 0)
+            company = body.get('companyName', '')
+            info = f"Account: {email} | Plan: {plan_name}"
+            extra = [
+                {'key': 'EMAIL', 'value': email},
+                {'key': 'PLAN', 'value': plan_name or '—'},
+                {'key': 'SEND LIMIT', 'value': f"{send_limit:,}" if send_limit else '—'},
+            ]
+            if company:
+                extra.append({'key': 'COMPANY', 'value': company})
+            rich['brevoEmail'] = email
+            rich['brevoPlan'] = plan_name
+
+        # ── MailerSend ───────────────────────────────────────────────────
+        elif cred_type == 'MailerSend':
+            req = _ur.Request('https://api.mailersend.com/v1/me',
+                              headers={'Authorization': f'Bearer {key_value}',
+                                       'Accept': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            data = body.get('data', {})
+            name = data.get('name', '')
+            email = data.get('email', '')
+            role = data.get('role', '')
+            info = f"User: {name} ({email}) | Role: {role}"
+            extra = [
+                {'key': 'NAME', 'value': name or '—'},
+                {'key': 'EMAIL', 'value': email},
+                {'key': 'ROLE', 'value': role or '—'},
+            ]
+            rich['mailerSendUser'] = email
+
+        # ── SparkPost ────────────────────────────────────────────────────
+        elif cred_type == 'SparkPost':
+            req = _ur.Request('https://api.sparkpost.com/api/v1/account',
+                              headers={'Authorization': key_value, 'Accept': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            results = body.get('results', {})
+            company = results.get('company_name', '')
+            subs = results.get('subscription', {})
+            plan = subs.get('name', '')
+            monthly = results.get('monthly_threshold', 0)
+            usage = results.get('usage', {}).get('month', {})
+            used = usage.get('used', 0)
+            info = f"Company: {company} | Plan: {plan} | Used: {used:,}/{monthly:,}"
+            extra = [
+                {'key': 'COMPANY', 'value': company or '—'},
+                {'key': 'PLAN', 'value': plan or '—'},
+                {'key': 'MONTHLY LIMIT', 'value': f"{monthly:,}"},
+                {'key': 'USED THIS MONTH', 'value': f"{used:,}"},
+            ]
+            rich['sparkPostPlan'] = plan
+            rich['monthlyCredits'] = monthly
+
+        # ── Mailjet ──────────────────────────────────────────────────────
+        elif cred_type == 'Mailjet':
+            import base64 as _b64
+            if ':' in key_value:
+                api_key, secret = key_value.split(':', 1)
+            else:
+                api_key, secret = key_value, (metadata or '')
+            if not (api_key and secret):
+                return {'live': False, 'info': 'Need apiKey:secretKey format', 'extra': [], 'rich': {}}
+            token = _b64.b64encode(f'{api_key}:{secret}'.encode()).decode()
+            req = _ur.Request('https://api.mailjet.com/v3/REST/apikey',
+                              headers={'Authorization': f'Basic {token}',
+                                       'Accept': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            data = body.get('Data', [{}])
+            entry = data[0] if data else {}
+            name = entry.get('Name', '')
+            quota = entry.get('Quota', 0)
+            run_level = entry.get('RunLevel', '')
+            info = f"Key: {name} | Daily quota: {quota:,} | Level: {run_level}"
+            extra = [
+                {'key': 'KEY NAME', 'value': name or '—'},
+                {'key': 'DAILY QUOTA', 'value': f"{quota:,}"},
+                {'key': 'RUN LEVEL', 'value': str(run_level)},
+            ]
+            rich['mailjetQuota'] = quota
+
+        # ── Gemini ───────────────────────────────────────────────────────
+        elif cred_type == 'Gemini':
+            req = _ur.Request(
+                f'https://generativelanguage.googleapis.com/v1beta/models?key={key_value}',
+                headers={'Accept': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            models = [m.get('name', '').replace('models/', '') for m in body.get('models', [])]
+            flash = [m for m in models if 'flash' in m.lower()]
+            pro = [m for m in models if 'pro' in m.lower()]
+            info = f"{len(models)} models accessible"
+            extra = [
+                {'key': 'MODEL COUNT', 'value': str(len(models))},
+                {'key': 'FLASH MODELS', 'value': ', '.join(flash[:3]) or '—'},
+                {'key': 'PRO MODELS', 'value': ', '.join(pro[:3]) or '—'},
+            ]
+            rich['geminiModels'] = models[:10]
+
+        # ── HuggingFace ──────────────────────────────────────────────────
+        elif cred_type == 'HuggingFace':
+            req = _ur.Request('https://huggingface.co/api/whoami-v2',
+                              headers={'Authorization': f'Bearer {key_value}'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            name = body.get('name', '')
+            fullname = body.get('fullname', '')
+            is_pro = body.get('isPro', False)
+            orgs = [o.get('name', '') for o in body.get('orgs', [])]
+            info = f"User: {fullname or name} | Pro: {is_pro}"
+            extra = [
+                {'key': 'USERNAME', 'value': name},
+                {'key': 'FULL NAME', 'value': fullname or '—'},
+                {'key': 'PRO', 'value': 'Yes' if is_pro else 'No'},
+                {'key': 'ORGS', 'value': ', '.join(orgs[:5]) or '—'},
+            ]
+            rich['hfUsername'] = name
+            rich['hfIsPro'] = is_pro
+
+        # ── GitHub ───────────────────────────────────────────────────────
+        elif cred_type == 'GitHub':
+            req = _ur.Request('https://api.github.com/user',
+                              headers={'Authorization': f'Bearer {key_value}',
+                                       'Accept': 'application/vnd.github+json',
+                                       'X-GitHub-Api-Version': '2022-11-28'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+                scopes = r.headers.get('X-OAuth-Scopes', '')
+            live = True
+            login = body.get('login', '')
+            name = body.get('name', '')
+            company = body.get('company', '')
+            public_repos = body.get('public_repos', 0)
+            followers = body.get('followers', 0)
+            info = f"User: {login} | Repos: {public_repos} | Followers: {followers}"
+            extra = [
+                {'key': 'LOGIN', 'value': login},
+                {'key': 'NAME', 'value': name or '—'},
+                {'key': 'COMPANY', 'value': company or '—'},
+                {'key': 'PUBLIC REPOS', 'value': str(public_repos)},
+                {'key': 'FOLLOWERS', 'value': str(followers)},
+            ]
+            if scopes:
+                extra.append({'key': 'TOKEN SCOPES', 'value': scopes[:120]})
+            rich['ghLogin'] = login
+            rich['ghCompany'] = company
+
+        # ── Replicate ────────────────────────────────────────────────────
+        elif cred_type == 'Replicate':
+            req = _ur.Request('https://api.replicate.com/v1/account',
+                              headers={'Authorization': f'Token {key_value}'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            username = body.get('username', '')
+            name = body.get('name', '')
+            github_url = body.get('github_url', '')
+            info = f"User: {username} ({name})"
+            extra = [
+                {'key': 'USERNAME', 'value': username},
+                {'key': 'NAME', 'value': name or '—'},
+            ]
+            if github_url:
+                extra.append({'key': 'GITHUB', 'value': github_url})
+            rich['replicateUser'] = username
+
+        # ── Slack ────────────────────────────────────────────────────────
+        elif cred_type == 'Slack':
+            data = b''
+            req = _ur.Request('https://slack.com/api/auth.test',
+                              data=data, method='POST',
+                              headers={'Authorization': f'Bearer {key_value}',
+                                       'Content-Type': 'application/x-www-form-urlencoded'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            if not body.get('ok'):
+                return {'live': False, 'info': body.get('error', 'Invalid token'), 'extra': [], 'rich': {}}
+            live = True
+            team = body.get('team', '')
+            user = body.get('user', '')
+            bot_id = body.get('bot_id', '')
+            token_type = body.get('token_type', '')
+            info = f"Team: {team} | User: {user} | Type: {token_type}"
+            extra = [
+                {'key': 'TEAM', 'value': team},
+                {'key': 'USER', 'value': user or '—'},
+                {'key': 'BOT ID', 'value': bot_id or '—'},
+                {'key': 'TOKEN TYPE', 'value': token_type},
+            ]
+            rich['slackTeam'] = team
+            rich['slackUser'] = user
+
+        # ── Cloudflare ───────────────────────────────────────────────────
+        elif cred_type == 'Cloudflare':
+            req = _ur.Request('https://api.cloudflare.com/client/v4/user',
+                              headers={'Authorization': f'Bearer {key_value}',
+                                       'Content-Type': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            if not body.get('success'):
+                errors = body.get('errors', [])
+                msg = errors[0].get('message', 'Invalid token') if errors else 'Invalid token'
+                return {'live': False, 'info': msg, 'extra': [], 'rich': {}}
+            live = True
+            result = body.get('result', {})
+            email = result.get('email', '')
+            username = result.get('username', '')
+            first_name = result.get('first_name', '')
+            info = f"User: {email} | Handle: {username}"
+            extra = [
+                {'key': 'EMAIL', 'value': email},
+                {'key': 'USERNAME', 'value': username or '—'},
+                {'key': 'NAME', 'value': first_name or '—'},
+            ]
+            try:
+                req2 = _ur.Request('https://api.cloudflare.com/client/v4/zones?per_page=1',
+                                   headers={'Authorization': f'Bearer {key_value}'})
+                with _ur.urlopen(req2, timeout=10) as r2:
+                    zones_body = _j.loads(r2.read())
+                total_zones = zones_body.get('result_info', {}).get('total_count', 0)
+                extra.append({'key': 'ZONES', 'value': str(total_zones)})
+                rich['cfZones'] = total_zones
+            except Exception:
+                pass
+            rich['cfEmail'] = email
+
+        # ── DigitalOcean ─────────────────────────────────────────────────
+        elif cred_type == 'DigitalOcean':
+            req = _ur.Request('https://api.digitalocean.com/v2/account',
+                              headers={'Authorization': f'Bearer {key_value}',
+                                       'Content-Type': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            acct = body.get('account', {})
+            email = acct.get('email', '')
+            droplet_limit = acct.get('droplet_limit', 0)
+            volume_limit = acct.get('volume_limit', 0)
+            status = acct.get('status', '')
+            info = f"Account: {email} | Status: {status} | Droplet limit: {droplet_limit}"
+            extra = [
+                {'key': 'EMAIL', 'value': email},
+                {'key': 'STATUS', 'value': status},
+                {'key': 'DROPLET LIMIT', 'value': str(droplet_limit)},
+                {'key': 'VOLUME LIMIT', 'value': str(volume_limit)},
+            ]
+            rich['doEmail'] = email
+            rich['doStatus'] = status
+
+        # ── MessageBird ──────────────────────────────────────────────────
+        elif cred_type == 'MessageBird':
+            req = _ur.Request('https://rest.messagebird.com/balance',
+                              headers={'Authorization': f'AccessKey {key_value}'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            amount = body.get('amount', 0)
+            currency = body.get('type', 'credits')
+            info = f"Balance: {amount} {currency}"
+            extra = [
+                {'key': 'BALANCE', 'value': str(amount)},
+                {'key': 'TYPE', 'value': currency},
+            ]
+            rich['mbBalance'] = amount
+
         else:
             return {'live': False, 'info': f'{cred_type} validation not implemented', 'extra': [], 'rich': {}}
 
