@@ -23,17 +23,13 @@ export function useScanTick({ scanning, setScans, setShards }: Args) {
           const pps = jitter(s.parsingPerSec, 8, 12)
           const validBump = Math.floor(rps * 0.6 + Math.random() * 8)
           const invalidBump = Math.floor(rps * 0.18 + Math.random() * 3)
-          const hitsBump = Math.random() > 0.75 ? Math.floor(Math.random() * 3) : 0
           return {
             ...s,
             requestsPerSec: +rps.toFixed(1),
             parsingPerSec: +pps.toFixed(1),
             validHosts: Math.min(s.targetCount, s.validHosts + validBump),
             invalidHosts: s.invalidHosts + invalidBump,
-            hitsFound: s.hitsFound + hitsBump,
-            validHits: s.validHits + (hitsBump > 0 && Math.random() > 0.45 ? 1 : 0),
             rpsHistory: [...s.rpsHistory.slice(-23), Math.round(rps)],
-            lastEvent: hitsBump > 0 ? `+${hitsBump} match${hitsBump > 1 ? 'es' : ''} routed` : s.lastEvent,
           }
         }),
       )

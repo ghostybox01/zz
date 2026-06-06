@@ -158,9 +158,8 @@ export function CrackerWorkspace({
       startedAt:     s.created_at,
       endedAt:       s.finished_at,
       targetCount:    s.targets ?? 0,
-      // scanned = total URLs processed (valid + invalid). validHosts = alive responses.
       invalidHosts:   s.invalid_hosts ?? 0,
-      validHosts:     Math.max(0, (s.scanned ?? 0) - (s.invalid_hosts ?? 0)),
+      validHosts:     s.valid_hosts ?? 0,
       hitsFound:      s.hits ?? 0,
       validHits:      s.valid_hits ?? 0,
       // Prefer live RPS/PPS from stats.json (via Go rate tracker).
@@ -613,7 +612,7 @@ export function CrackerWorkspace({
                                 crack.restart(s.id)
                                   .then((r) => {
                                     if (r.ok) {
-                                      onToast({ kind: 'success', title: `Restarted on ${Object.keys(r.started ?? {}).length} worker(s)` })
+                                      onToast({ kind: 'info', title: `Restarted on ${Object.keys(r.started ?? {}).length} worker(s)` })
                                       crack.list().then((rr) => { if (Array.isArray(rr?.sessions)) setSessions(rr.sessions) }).catch(() => { /* swallow */ })
                                     } else {
                                       onToast({ kind: 'error', title: r.error ?? 'Restart failed' })
