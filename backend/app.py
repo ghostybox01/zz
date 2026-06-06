@@ -8102,6 +8102,72 @@ def _rich_recheck(cred_type: str, key_value: str, source_url: str, metadata: str
                 pass
             rich['monthlyCredits'] = hourly_quota * 24 * 30
 
+        # ── Twilio ───────────────────────────────────────────────────────
+        elif cred_type == 'Twilio':
+            import base64 as _b64
+            # Format: SID:AuthToken, or SID in source_url and token in key_value
+            sid, auth_token = '', ''
+            if ':' in key_value and key_value.startswith('AC'):
+                sid, auth_token = key_value.split(':', 1)
+            elif source_url and source_url.startswith('AC'):
+                sid = source_url.strip()
+                auth_token = key_value.strip()
+            elif metadata and metadata.startswith('AC'):
+                sid = metadata.strip()
+                auth_token = key_value.strip()
+            else:
+                # last resort — try key_value as token alone (some scanners store just token)
+                sid = key_value.strip()
+                auth_token = metadata.strip() if metadata else ''
+            if not (sid and auth_token):
+                return {'live': False, 'info': 'Could not parse Twilio SID/AuthToken', 'extra': [], 'rich': {}}
+            token = _b64.b64encode(f'{sid}:{auth_token}'.encode()).decode()
+            req = _ur.Request(
+                f'https://api.twilio.com/2010-04-01/Accounts/{sid}.json',
+                headers={'Authorization': f'Basic {token}'})
+            with _ur.urlopen(req, timeout=10) as r:
+                acct = _j.loads(r.read())
+            live = True
+            status = acct.get('status', '')
+            acct_type = acct.get('type', '')
+            friendly = acct.get('friendly_name', '')
+            info = f"Account: {friendly} | Status: {status} | Type: {acct_type}"
+            extra = [
+                {'key': 'ACCOUNT SID', 'value': sid},
+                {'key': 'FRIENDLY NAME', 'value': friendly},
+                {'key': 'STATUS', 'value': status},
+                {'key': 'TYPE', 'value': acct_type},
+            ]
+            rich['twilioSid'] = sid
+            rich['twilioStatus'] = status
+            rich['twilioType'] = acct_type
+            # Balance
+            try:
+                req2 = _ur.Request(
+                    f'https://api.twilio.com/2010-04-01/Accounts/{sid}/Balance.json',
+                    headers={'Authorization': f'Basic {token}'})
+                with _ur.urlopen(req2, timeout=10) as r2:
+                    bal = _j.loads(r2.read())
+                balance = float(bal.get('balance', 0))
+                currency = bal.get('currency', 'USD')
+                extra.append({'key': 'BALANCE', 'value': f'{balance:.2f} {currency}'})
+                rich['twilioBalance'] = balance
+                rich['twilioCurrency'] = currency
+            except Exception:
+                pass
+            # Phone numbers count
+            try:
+                req3 = _ur.Request(
+                    f'https://api.twilio.com/2010-04-01/Accounts/{sid}/IncomingPhoneNumbers.json?PageSize=1',
+                    headers={'Authorization': f'Basic {token}'})
+                with _ur.urlopen(req3, timeout=10) as r3:
+                    nums = _j.loads(r3.read())
+                total = nums.get('meta', {}).get('total', None) or nums.get('page_size', 0)
+                extra.append({'key': 'PHONE NUMBERS', 'value': str(total)})
+                rich['twilioNumbers'] = total
+            except Exception:
+                pass
+
         else:
             return {'live': False, 'info': f'{cred_type} validation not implemented', 'extra': [], 'rich': {}}
 
