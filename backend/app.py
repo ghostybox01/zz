@@ -188,7 +188,7 @@ def init_db():
     conn.close()
     print("✅ Database initialized")
 
-def import_from_files():
+def import_from_files(session_id=None):
     global total_urls_scanned
     
     if not os.path.exists(RESULTS_DIR):
@@ -265,10 +265,23 @@ def import_from_files():
                     # would vanish on restart.  Storing them as status='hit'
                     # lets the stats query count them and the admin inspect
                     # them if needed.
-                    cursor.execute('''
-                        INSERT OR IGNORE INTO credentials (type, key_value, source_url, metadata, status)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (cred_type, key_value, source_url, metadata, status))
+                    if session_id:
+                        cursor.execute(
+                            'INSERT OR IGNORE INTO credentials '
+                            '(type, key_value, source_url, metadata, status, session_id) '
+                            'VALUES (?, ?, ?, ?, ?, ?)',
+                            (cred_type, key_value, source_url, metadata, status, session_id))
+                        if cursor.rowcount == 0:
+                            cursor.execute(
+                                'UPDATE credentials SET session_id = ? '
+                                'WHERE type = ? AND key_value = ? AND session_id IS NULL',
+                                (session_id, cred_type, key_value))
+                    else:
+                        cursor.execute(
+                            'INSERT OR IGNORE INTO credentials '
+                            '(type, key_value, source_url, metadata, status) '
+                            'VALUES (?, ?, ?, ?, ?)',
+                            (cred_type, key_value, source_url, metadata, status))
 
                     if cursor.rowcount > 0:
                         if status == 'valid':
@@ -379,7 +392,37 @@ def background_file_monitor():
     while True:
         time.sleep(2)
         try:
-            imported_valid, imported_hits = import_from_files()
+            # Find the active running crack session so file-monitor inserts
+            # are attributed to it instead of landing with session_id = NULL.
+            active_sid = None
+            active_created_at = None
+            try:
+                with _crack_lock:
+                    _reload_crack_state_if_changed()
+                    for _sid, _s in _crack_sessions.items():
+                        if _s.get('status') == 'running':
+                            active_sid = _sid
+                            active_created_at = _s.get('created_at')
+                            break
+            except Exception:
+                pass
+
+            imported_valid, imported_hits = import_from_files(session_id=active_sid)
+
+            # Retro-attribute any NULL-session rows inserted during this session.
+            if active_sid and active_created_at:
+                try:
+                    _conn_ra = sqlite3.connect(DB_PATH, timeout=10)
+                    _cur_ra = _conn_ra.cursor()
+                    _cur_ra.execute(
+                        'UPDATE credentials SET session_id = ? '
+                        'WHERE session_id IS NULL AND timestamp >= datetime(?)',
+                        (active_sid, active_created_at))
+                    _conn_ra.commit()
+                    _conn_ra.close()
+                except Exception:
+                    pass
+
             stats = get_statistics()
             current_count = stats['total_valid']
 
@@ -4329,7 +4372,7 @@ def _crack_session_view(sess: dict) -> dict:
         'targets':          targets,
         'hits':             hits,
         'valid_hits':       valid_hits,
-        'invalid_hosts':    int(sess.get('last_invalid') or 0),
+        'invalid_hosts':    int(sess.get('last_invalid_hosts') or 0),
         'rps':              float(sess.get('last_rps') or 0),
         'pps':              float(sess.get('last_pps') or 0),
         'avg_rps':          float(sess.get('last_avg_rps') or 0),
