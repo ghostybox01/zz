@@ -63,6 +63,8 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
   const [query, setQuery] = useState('')
   const [pageSize, setPageSize] = useState(50)
   const [activeId, setActiveId] = useState<string | null>(null)
+  type RecheckOverride = { extra: ReadonlyArray<{ key: string; value: string }>; live: boolean }
+  const [recheckResults, setRecheckResults] = useState<Map<string, RecheckOverride>>(new Map())
   // Effect D — bulk select + per-row trash. `filter` is the table-toolbar
   // search; `query` above is the legacy hits-toolbar search and remains
   // wired so existing UI continues to work; both narrow the same row set.
@@ -209,6 +211,7 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
     if (isNaN(numId)) return
     try {
       const res = await credApi.recheck(numId)
+      setRecheckResults((prev) => new Map(prev).set(f.id, { extra: res.extra ?? [], live: res.live }))
       if (res.live) {
         onToast?.('Credential LIVE', res.info || 'Credential is valid.', 'info')
       } else {
@@ -236,10 +239,21 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
 
   if (activeFinding) {
     const numId = parseInt(activeFinding.id, 10)
+    const override = recheckResults.get(activeFinding.id)
+    const displayFinding = override
+      ? {
+          ...activeFinding,
+          details: {
+            ...activeFinding.details,
+            extra: override.extra,
+            validated: override.live,
+          },
+        }
+      : activeFinding
     return (
       <section className="card-block card-block--hits card-block--detail">
         <FindingDetail
-          finding={activeFinding}
+          finding={displayFinding}
           onBack={() => setActiveId(null)}
           onRecheck={!isNaN(numId) ? handleRecheck : undefined}
           onResend={!isNaN(numId) ? handleResend : undefined}
