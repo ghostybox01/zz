@@ -3977,8 +3977,8 @@ def _background_crypto_balance_checker():
                     address = None
                     for candidate in [metadata or '', key_value or '']:
                         clean = candidate.strip().lstrip('0x')
-                        if len(clean) == 64 and all(ch in '0123456789abcdefABCDEF' for ch in clean):
-                            address = _derive_eth_address(clean)
+                        if 40 <= len(clean) <= 64 and all(ch in '0123456789abcdefABCDEF' for ch in clean):
+                            address = _derive_eth_address(clean.zfill(64))
                             if address:
                                 break
 
@@ -8545,10 +8545,9 @@ def api_findings_crypto_refresh(finding_id: int):
         if not address:
             # Try metadata first (scanner stores private key there for Crypto type)
             for candidate in [metadata or '', key_value or '']:
-                candidate = candidate.strip()
-                # Looks like a 32-byte hex private key
-                if len(candidate) in (64, 66) and all(c in '0123456789abcdefABCDEF' for c in candidate.lstrip('0x')):
-                    derived = _derive_eth_address(candidate.lstrip('0x'))
+                clean = candidate.strip().lstrip('0x')
+                if 40 <= len(clean) <= 64 and all(c in '0123456789abcdefABCDEF' for c in clean):
+                    derived = _derive_eth_address(clean.zfill(64))
                     if derived:
                         address = derived
                         chain = 'eth'
