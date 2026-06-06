@@ -1,4 +1,6 @@
-/** Drip-feeds running scan stats so the dashboard feels alive. Pure browser-side simulation. */
+/** Animates RPS/PPS so the dashboard feels alive while a scan runs.
+ *  Counts (validHosts, invalidHosts, done, hits) are intentionally NOT
+ *  bumped here — they come from the real API and must only go up. */
 import { useEffect } from 'react'
 import type { Scan, ScanShard } from '../types'
 
@@ -21,36 +23,23 @@ export function useScanTick({ scanning, setScans, setShards }: Args) {
           if (s.status !== 'running') return s
           const rps = jitter(s.requestsPerSec, 2.5, 4)
           const pps = jitter(s.parsingPerSec, 8, 12)
-          const validBump = Math.floor(rps * 0.6 + Math.random() * 8)
-          const invalidBump = Math.floor(rps * 0.18 + Math.random() * 3)
           return {
             ...s,
             requestsPerSec: +rps.toFixed(1),
             parsingPerSec: +pps.toFixed(1),
-            validHosts: Math.min(s.targetCount, s.validHosts + validBump),
-            invalidHosts: s.invalidHosts + invalidBump,
             rpsHistory: [...s.rpsHistory.slice(-23), Math.round(rps)],
           }
         }),
       )
       setShards((prev) =>
         prev.map((sh) => {
-          // Tick will be reconciled with the parent scan's status by the consumer;
-          // here we just keep numbers moving for any shard that has done < assigned.
           if (sh.done >= sh.assigned) return sh
           const rps = jitter(sh.requestsPerSec, 1.2, 2)
           const pps = jitter(sh.parsingPerSec, 4, 6)
-          const validBump = Math.floor(rps * 0.55 + Math.random() * 4)
-          const invalidBump = Math.floor(rps * 0.15 + Math.random() * 2)
-          const hitsBump = Math.random() > 0.85 ? Math.floor(Math.random() * 2) : 0
           return {
             ...sh,
             requestsPerSec: +rps.toFixed(1),
             parsingPerSec: +pps.toFixed(1),
-            validHosts: Math.min(sh.assigned, sh.validHosts + validBump),
-            invalidHosts: sh.invalidHosts + invalidBump,
-            done: Math.min(sh.assigned, sh.done + validBump + invalidBump),
-            hits: sh.hits + hitsBump,
           }
         }),
       )

@@ -186,8 +186,39 @@ export function CrackerWorkspace({
   const [tickedScans, setTickedScans] = useState<Scan[]>(() => sessionScans as Scan[])
   const [tickedShards, setTickedShards] = useState<ScanShard[]>(() => shards as ScanShard[])
 
-  useEffect(() => { setTickedScans(sessionScans as Scan[]) }, [sessionScans])
-  useEffect(() => { setTickedShards(shards as ScanShard[]) }, [shards])
+  useEffect(() => {
+    setTickedScans((prev) => {
+      const prevMap = new Map(prev.map((s) => [s.id, s]))
+      return (sessionScans as Scan[]).map((incoming) => {
+        const cur = prevMap.get(incoming.id)
+        if (!cur) return incoming
+        return {
+          ...incoming,
+          validHosts:  Math.max(cur.validHosts,  incoming.validHosts),
+          invalidHosts: Math.max(cur.invalidHosts, incoming.invalidHosts),
+          hitsFound:   Math.max(cur.hitsFound,   incoming.hitsFound),
+          validHits:   Math.max(cur.validHits,   incoming.validHits),
+        }
+      })
+    })
+  }, [sessionScans])
+
+  useEffect(() => {
+    setTickedShards((prev) => {
+      const prevMap = new Map(prev.map((s) => [`${s.scanId}:${s.vpsId}`, s]))
+      return (shards as ScanShard[]).map((incoming) => {
+        const cur = prevMap.get(`${incoming.scanId}:${incoming.vpsId}`)
+        if (!cur) return incoming
+        return {
+          ...incoming,
+          validHosts:   Math.max(cur.validHosts,   incoming.validHosts),
+          invalidHosts: Math.max(cur.invalidHosts,  incoming.invalidHosts),
+          done:         Math.max(cur.done,          incoming.done),
+          hits:         Math.max(cur.hits,          incoming.hits),
+        }
+      })
+    })
+  }, [shards])
 
   const anyRunning = sessionScans.some((s) => s.status === 'running')
   useScanTick({ scanning: anyRunning, setScans: setTickedScans, setShards: setTickedShards })
