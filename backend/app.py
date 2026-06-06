@@ -361,6 +361,13 @@ def get_statistics():
     cursor.execute('''
         SELECT type, key_value, source_url, timestamp, metadata, status, id
         FROM credentials
+        WHERE type NOT IN ('Crypto', 'Mnemonic')
+           OR (
+               type IN ('Crypto', 'Mnemonic')
+               AND verify_meta IS NOT NULL
+               AND json_extract(verify_meta, '$.balance_native') IS NOT NULL
+               AND json_extract(verify_meta, '$.balance_native') > 0
+           )
         ORDER BY id DESC LIMIT 500
     ''')
     recent_findings = cursor.fetchall()
