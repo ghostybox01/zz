@@ -949,6 +949,8 @@ export const findings = {
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/webpanels'),
   listSSH: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/ssh'),
+  listEmail: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/email'),
   refreshStripe: (id: number) =>
     postJson<StripeRefreshResult>(`/findings/stripe/${id}/refresh`, {}),
   refreshCrypto: (id: number, address?: string, chain?: 'eth' | 'btc' | 'bnb') =>

