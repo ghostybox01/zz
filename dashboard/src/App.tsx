@@ -30,7 +30,6 @@ import { WarcPanel } from './components/WarcPanel'
 import { DorksPanel } from './components/DorksPanel'
 import { StripePanel } from './components/StripePanel'
 import { CryptoPanel } from './components/CryptoPanel'
-import { EmailPanel } from './components/EmailPanel'
 import { DatabasePanel } from './components/DatabasePanel'
 import { WebPanelsPanel } from './components/WebPanelsPanel'
 import { PrefilterPanel } from './components/PrefilterPanel'
@@ -424,7 +423,6 @@ export default function App() {
   const findingsHidden = tab !== 'findings'
   const stripeHidden = tab !== 'stripe'
   const cryptoHidden = tab !== 'crypto'
-  const emailHidden = tab !== 'email'
   const databaseHidden = tab !== 'database'
   const webpanelsHidden = tab !== 'webpanels'
   const prefilterHidden = tab !== 'prefilter'
@@ -805,16 +803,6 @@ export default function App() {
               className="tab-panel"
             >
               <CryptoPanel onToast={pushAlertToast} />
-            </section>
-
-            <section
-              id="panel-email"
-              role="tabpanel"
-              aria-labelledby="tab-email"
-              hidden={emailHidden}
-              className="tab-panel"
-            >
-              <EmailPanel onToast={pushAlertToast} />
             </section>
 
             <section

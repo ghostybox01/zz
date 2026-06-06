@@ -173,7 +173,7 @@ function IcoFilter(props: SVGProps<SVGSVGElement>) {
   )
 }
 
-export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'email' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'logs' | 'settings' | 'help'
+export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'logs' | 'settings' | 'help'
 
 type Item = { id: DashboardTab; label: string; Ico: typeof IcoDash; goldWhenActive?: boolean }
 
@@ -186,7 +186,6 @@ const ITEMS: Item[] = [
   { id: 'findings', label: 'Hits', Ico: IcoTrophy },
   { id: 'stripe', label: 'Stripe', Ico: IcoTrophy },
   { id: 'crypto', label: 'Crypto', Ico: IcoCrypto },
-  { id: 'email', label: 'Email / SMS', Ico: IcoPanel },
   { id: 'database', label: 'Database', Ico: IcoDatabase },
   { id: 'webpanels', label: 'Web Panels', Ico: IcoPanel },
   { id: 'prefilter', label: 'Pre-filter', Ico: IcoFilter },
@@ -210,7 +209,6 @@ const TAB_TITLE: Record<DashboardTab, string> = {
   findings: 'Hits ledger',
   stripe: 'Stripe keys',
   crypto: 'Crypto keys',
-  email: 'Email & messaging credentials',
   database: 'Database credentials',
   webpanels: 'Web panel credentials',
   prefilter: 'Target pre-filter',
