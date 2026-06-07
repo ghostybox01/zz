@@ -37,7 +37,7 @@ var (
 // ── CheckGemini ──────────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckGemini(key, sourceURL string) bool {
-	if !a.Config.APIValidation.Gemini {
+	if !a.Config.APIValidation.Gemini && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -82,7 +82,7 @@ func (a *AWSScanner) CheckGemini(key, sourceURL string) bool {
 // ── CheckXAI ─────────────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckXAI(key, sourceURL string) bool {
-	if !a.Config.APIValidation.XAI {
+	if !a.Config.APIValidation.XAI && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -127,7 +127,7 @@ func (a *AWSScanner) CheckXAI(key, sourceURL string) bool {
 // ── CheckMistral ─────────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckMistral(key, sourceURL string) bool {
-	if !a.Config.APIValidation.Mistral {
+	if !a.Config.APIValidation.Mistral && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -172,7 +172,7 @@ func (a *AWSScanner) CheckMistral(key, sourceURL string) bool {
 // ── CheckElevenLabs ──────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckElevenLabs(key, sourceURL string) bool {
-	if !a.Config.APIValidation.ElevenLabs {
+	if !a.Config.APIValidation.ElevenLabs && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -217,7 +217,7 @@ func (a *AWSScanner) CheckElevenLabs(key, sourceURL string) bool {
 // ── CheckGroq ────────────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckGroq(key, sourceURL string) bool {
-	if !a.Config.APIValidation.Groq {
+	if !a.Config.APIValidation.Groq && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -262,7 +262,7 @@ func (a *AWSScanner) CheckGroq(key, sourceURL string) bool {
 // ── CheckPerplexity ──────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckPerplexity(key, sourceURL string) bool {
-	if !a.Config.APIValidation.Perplexity {
+	if !a.Config.APIValidation.Perplexity && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -310,7 +310,7 @@ func (a *AWSScanner) CheckPerplexity(key, sourceURL string) bool {
 // ── CheckOpenRouter ──────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckOpenRouter(key, sourceURL string) bool {
-	if !a.Config.APIValidation.OpenRouter {
+	if !a.Config.APIValidation.OpenRouter && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -355,7 +355,7 @@ func (a *AWSScanner) CheckOpenRouter(key, sourceURL string) bool {
 // ── CheckHuggingFace ─────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckHuggingFace(key, sourceURL string) bool {
-	if !a.Config.APIValidation.HuggingFace {
+	if !a.Config.APIValidation.HuggingFace && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -400,7 +400,7 @@ func (a *AWSScanner) CheckHuggingFace(key, sourceURL string) bool {
 // ── CheckReplicate ───────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckReplicate(key, sourceURL string) bool {
-	if !a.Config.APIValidation.Replicate {
+	if !a.Config.APIValidation.Replicate && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -445,7 +445,7 @@ func (a *AWSScanner) CheckReplicate(key, sourceURL string) bool {
 // ── CheckCohere ──────────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckCohere(key, sourceURL string) bool {
-	if !a.Config.APIValidation.Cohere {
+	if !a.Config.APIValidation.Cohere && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -490,7 +490,7 @@ func (a *AWSScanner) CheckCohere(key, sourceURL string) bool {
 // ── CheckTogetherAI ──────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckTogetherAI(key, sourceURL string) bool {
-	if !a.Config.APIValidation.TogetherAI {
+	if !a.Config.APIValidation.TogetherAI && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {
@@ -535,7 +535,7 @@ func (a *AWSScanner) CheckTogetherAI(key, sourceURL string) bool {
 // ── CheckFireworks ───────────────────────────────────────────────────────────
 
 func (a *AWSScanner) CheckFireworks(key, sourceURL string) bool {
-	if !a.Config.APIValidation.Fireworks {
+	if !a.Config.APIValidation.Fireworks && !a.Config.APIValidation.AIAll {
 		return false
 	}
 	if _, loaded := a.KnownKeys.LoadOrStore(key, true); loaded {

@@ -9,6 +9,14 @@ import {
   type AddonEntry,
   type CrackerAddonEnabledMap,
 } from '../data/addonCatalog'
+
+type VisualGroup = { key: string; label: string; cats: AddonCategory[] }
+const VISUAL_GROUPS: VisualGroup[] = [
+  { key: 'ai',    label: 'AI',          cats: ['ai'] },
+  { key: 'email', label: 'Email & SMTP', cats: ['email-api', 'smtp'] },
+  { key: 'cloud', label: 'Cloud',        cats: ['cloud'] },
+  { key: 'other', label: 'Pay · SMS · Other', cats: ['payment', 'sms', 'database', 'web-panels', 'infrastructure'] },
+]
 import {
   BrandLogo,
   GlyphAI,
@@ -93,10 +101,11 @@ type Props = {
 }
 
 export function AddonsStrip({ config, onPatch }: Props) {
-  // Operator's catalog-level enabled map. Same surface Settings writes to.
-  // If the backend doesn't surface it (whitelist drops the key) we fall
-  // through to `defaultOn` per `getEnabledAddons`.
   const [enabledMap, setEnabledMap] = useState<CrackerAddonEnabledMap | null>(null)
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
+    const small = typeof window !== 'undefined' && window.innerWidth < 1024
+    return small ? Object.fromEntries(VISUAL_GROUPS.map((g) => [g.key, true])) : {}
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -113,11 +122,6 @@ export function AddonsStrip({ config, onPatch }: Props) {
   const visible = getEnabledAddons(enabledMap)
   const states = visible.map((a) => ({ entry: a, on: readFlag(a, config) }))
   const selected = states.filter((s) => s.on).length
-  // Auto-balance into two rows: ceil(N/2) columns gives a near-equal
-  // split for any N (15 → 8/7, 14 → 7/7, 16 → 8/8). CSS variable is
-  // consumed by `.cw-addons__row` at viewport ≥1024px; narrower screens
-  // fall through to the auto-fit minmax layout in App.css.
-  const cols = Math.max(1, Math.ceil(visible.length / 2))
 
   return (
     <section className="cw-addons">
@@ -128,41 +132,64 @@ export function AddonsStrip({ config, onPatch }: Props) {
         </div>
         <span className="cw-addons__count">{selected} / {visible.length} ACTIVE</span>
       </header>
-      <div
-        className="cw-addons__row"
-        style={{ ['--cw-addon-cols' as string]: cols }}
-      >
-        {states.map(({ entry, on }) => {
-          const { domain, Glyph } = brandFor(entry)
-          const parsed = parseScannerKey(entry.scannerKey)
-          return (
+
+      {VISUAL_GROUPS.map((group) => {
+        const groupStates = states.filter((s) => group.cats.includes(s.entry.category))
+        if (groupStates.length === 0) return null
+        const isCollapsed = !!collapsed[group.key]
+        const onCount = groupStates.filter((s) => s.on).length
+        return (
+          <div
+            key={group.key}
+            className="cw-addons__group"
+            data-collapsed={isCollapsed ? 'true' : undefined}
+          >
             <button
-              key={entry.id}
               type="button"
-              className={`cw-addon${on ? ' cw-addon--on' : ''}`}
-              onClick={() => {
-                if (!parsed) return
-                const [section, key] = parsed
-                onPatch({ [section]: { [key]: !on } } as ReconScannerConfigPatch)
-              }}
-              title={config ? `${entry.label} — ${entry.scannerKey}` : `Loading config…  ${entry.label}`}
-              aria-pressed={on}
+              className="cw-addons__group-head"
+              onClick={() => setCollapsed((s) => ({ ...s, [group.key]: !isCollapsed }))}
+              aria-expanded={!isCollapsed}
             >
-              <span className="cw-addon__logo" aria-hidden>
-                {domain ? (
-                  <BrandLogo domain={domain} Fallback={Glyph} alt={entry.label} size={42} />
-                ) : (
-                  <Glyph width={42} height={42} />
-                )}
-              </span>
-              <span className="cw-addon__label">{entry.label}</span>
-              <span className={`cw-addon__state cw-addon__state--${on ? 'on' : 'off'}`}>
-                {on ? 'ON' : 'OFF'}
-              </span>
+              <span className="cw-addons__group-label">{group.label}</span>
+              <span className="cw-addons__group-count">{onCount}/{groupStates.length}</span>
+              <span className="cw-addons__group-sep" aria-hidden />
+              <span className="cw-addons__group-chevron" aria-hidden>{isCollapsed ? '▸' : '▾'}</span>
             </button>
-          )
-        })}
-      </div>
+            <div className="cw-addons__row">
+              {groupStates.map(({ entry, on }) => {
+                const { domain, Glyph } = brandFor(entry)
+                const parsed = parseScannerKey(entry.scannerKey)
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    className={`cw-addon${on ? ' cw-addon--on' : ''}`}
+                    onClick={() => {
+                      if (!parsed) return
+                      const [section, key] = parsed
+                      onPatch({ [section]: { [key]: !on } } as ReconScannerConfigPatch)
+                    }}
+                    title={config ? `${entry.label} — ${entry.scannerKey}` : `Loading config…  ${entry.label}`}
+                    aria-pressed={on}
+                  >
+                    <span className="cw-addon__logo" aria-hidden>
+                      {domain ? (
+                        <BrandLogo domain={domain} Fallback={Glyph} alt={entry.label} size={42} />
+                      ) : (
+                        <Glyph width={42} height={42} />
+                      )}
+                    </span>
+                    <span className="cw-addon__label">{entry.label}</span>
+                    <span className={`cw-addon__state cw-addon__state--${on ? 'on' : 'off'}`}>
+                      {on ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
     </section>
   )
 }

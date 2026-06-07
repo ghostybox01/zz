@@ -16,7 +16,7 @@ var (
 	mailchimpAPIKeyPattern        = regexp.MustCompile(`[a-f0-9]{32}-us[0-9]{1,2}`)
 	mailchimpContextAPIKeyPattern = regexp.MustCompile(`(?i)(?:mailchimp[_-]?(?:api[_-]?)?key|MC_API_KEY)\s*[:=]\s*["']?([a-f0-9]{32}-us[0-9]+)["']?`)
 
-	resendAPIKeyPattern = regexp.MustCompile(`re_[A-Za-z0-9_-]{24,40}`)
+	resendAPIKeyPattern = regexp.MustCompile(`re_[A-Za-z0-9]{24,40}`)
 )
 
 // ── CheckMailchimp ────────────────────────────────────────────────────────────

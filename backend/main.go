@@ -480,11 +480,15 @@ func NewAWSScanner(configPath string) *AWSScanner {
 	}
 
 	client = &http.Client{
-		Timeout: time.Duration(requestTimeoutSeconds) * time.Second * 2,
+		// Per-request context already enforces requestTimeoutSeconds; this is a
+		// backstop for any request that escapes context cancellation.
+		Timeout: time.Duration(requestTimeoutSeconds+2) * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-			MaxIdleConns:        1000,
-			MaxIdleConnsPerHost: 1000,
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			DialContext: (&net.Dialer{
+				Timeout: 3 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: 4 * time.Second,
 			DisableKeepAlives:   true,
 		},
 	}
@@ -3411,6 +3415,16 @@ func (a *AWSScanner) CheckCryptoWallet(key, sourceURL string) bool {
 		raw == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" {
 		return false
 	}
+	// Low-entropy rejection: JS bundles and hash constants often produce 64-char
+	// hex strings that are clearly not random. A real 256-bit private key should
+	// have ≥10 distinct hex digits. Fewer than 8 means the string is repetitive.
+	distinctNibbles := map[byte]struct{}{}
+	for i := 0; i < len(raw); i++ {
+		distinctNibbles[raw[i]] = struct{}{}
+	}
+	if len(distinctNibbles) < 8 {
+		return false
+	}
 
 	// Derive the ETH address from this private key
 	address := ethAddressFromPrivKey(raw)
@@ -5788,10 +5802,10 @@ func interactiveMode() string {
 
 func (a *AWSScanner) processBatch(urls []string) {
 	var wg sync.WaitGroup
-	// 80 concurrent goroutines: reduces peak RAM by ~60% vs 200.
-	// Each goroutine holds a response body buffer (up to 128KB) + stack (~8KB).
-	// 80 × 136KB ≈ 11MB vs 200 × 520KB ≈ 104MB at the old 512KB limit.
-	sem := make(chan struct{}, 80)
+	// 120 concurrent goroutines: 120 × 136KB ≈ 16MB peak buffer — safe on 1.92GB workers.
+	// Dial timeout (3s) + TLS timeout (4s) ensure dead IPs free goroutines well before
+	// the 5s request timeout, keeping the slot busy only while data is actually flowing.
+	sem := make(chan struct{}, 120)
 
 	for _, u := range urls {
 		wg.Add(1)
@@ -5988,6 +6002,21 @@ func (a *AWSScanner) runBatched(listFile string) {
 	if err != nil {
 		pterm.Error.Printfln("Failed to count lines: %v", err)
 		os.Exit(1)
+	}
+
+	// If a checkpoint file exists and has a positive value, advance the effective
+	// offset so the scanner resumes from where the previous run stopped.
+	// The watchdog (bash) does NOT delete the checkpoint on restart, so this
+	// fires automatically after any crash restart.  The Python redistribution
+	// restart intentionally removes checkpoint.txt before relaunching (to start
+	// fresh on the redistributed slice), which keeps this path a no-op there.
+	if checkpointFile != "" {
+		if ckData, ckErr := os.ReadFile(checkpointFile); ckErr == nil {
+			if ckN, ckConv := strconv.Atoi(strings.TrimSpace(string(ckData))); ckConv == nil && ckN > 0 {
+				lineOffset += ckN
+				pterm.Info.Printfln("Resuming from checkpoint: skipping %d already-scanned lines (total offset now %d)", ckN, lineOffset)
+			}
+		}
 	}
 
 	// Clamp effective range to the portion this worker is responsible for.

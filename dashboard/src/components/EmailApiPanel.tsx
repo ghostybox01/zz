@@ -7,8 +7,8 @@ type Props = {
 
 const ALL_PROVIDERS = [
   'SendGrid', 'Mailgun', 'Mandrill', 'Postmark', 'Brevo', 'MailerSend',
-  'SparkPost', 'Mailtrap', 'Mailjet', 'Resend', 'Twilio',
-  'Nexmo', 'Telnyx', 'MessageBird', 'Plivo',
+  'SparkPost', 'Mailtrap', 'Mailjet', 'Resend', 'Mailchimp', 'AWS',
+  'Twilio', 'Nexmo', 'Telnyx', 'MessageBird', 'Plivo',
 ] as const
 
 const PROVIDER_COLOR: Record<string, string> = {
@@ -22,6 +22,8 @@ const PROVIDER_COLOR: Record<string, string> = {
   Mailtrap:    '#16c79a',
   Mailjet:     '#9b5de5',
   Resend:      '#00d084',
+  Mailchimp:   '#ffe01b',
+  AWS:         '#ff9900',
   Twilio:      '#f22f46',
   Nexmo:       '#00b2ff',
   Telnyx:      '#00cc66',

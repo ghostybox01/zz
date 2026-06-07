@@ -951,14 +951,20 @@ export const findings = {
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/ssh'),
   listEmail: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/email'),
-  listHits: () =>
-    getJson<{ ok: boolean; findings: ReconRecentFinding[] }>('/findings/hits'),
+  listHits: (limit = 2000, offset = 0) =>
+    getJson<{ ok: boolean; findings: ReconRecentFinding[]; total?: number; offset?: number; limit?: number }>(
+      `/findings/hits?limit=${limit}&offset=${offset}`
+    ),
   listAiKeys: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/aikeys'),
   listEmailApi: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/emailapi'),
   listSmtp: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/smtp'),
+  bulkRecheck: (types: string[]) =>
+    postJson<{ ok: boolean; started: boolean; error?: string }>('/findings/bulk-recheck', { types }),
+  bulkRecheckStatus: () =>
+    getJson<{ running: boolean }>('/findings/bulk-recheck/status'),
   refreshStripe: (id: number) =>
     postJson<StripeRefreshResult>(`/findings/stripe/${id}/refresh`, {}),
   refreshCrypto: (id: number, address?: string, chain?: 'eth' | 'btc' | 'bnb') =>

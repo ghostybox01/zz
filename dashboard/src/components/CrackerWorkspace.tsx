@@ -1,14 +1,16 @@
 // Created by https://t.me/boxxboyy
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { Finding, Scan, ScanShard, TargetList, VpsNode } from '../types'
 import {
   scannerConfig,
   crack,
+  findings as findingsApi,
   vps as reconVps,
   type CrackSession,
   type ReconScannerConfig,
   type ReconScannerConfigPatch,
 } from '../lib/reconApi'
+import { mapRecent } from '../hooks/useReconStats'
 import { useScanTick } from '../hooks/useScanTick'
 import { getListBody } from '../lib/listBodyCache'
 import {
@@ -80,6 +82,17 @@ export function CrackerWorkspace({
   const [pickedAddons, setPickedAddons] = useState<ReadonlySet<string>>(() => new Set())
   const [pickedVpsIds, setPickedVpsIds] = useState<ReadonlySet<string>>(() => new Set())
   const [submitting, setSubmitting] = useState(false)
+
+  // Self-load full findings (prop is capped at 200 by the stats endpoint)
+  const [ownFindings, setOwnFindings] = useState<Finding[] | null>(null)
+  const loadOwnFindings = useCallback(async () => {
+    try {
+      const r = await findingsApi.listHits(2000, 0)
+      setOwnFindings(r.findings.map((row, i) => mapRecent(row, i)))
+    } catch { /* silently ignore; prop data is fallback */ }
+  }, [])
+  useEffect(() => { void loadOwnFindings() }, [loadOwnFindings])
+  const allFindings = ownFindings ?? findings
 
   // ── Scanner config (existing live-flag patch path) ─────────────────
   useEffect(() => {
@@ -222,6 +235,13 @@ export function CrackerWorkspace({
 
   const anyRunning = sessionScans.some((s) => s.status === 'running')
   useScanTick({ scanning: anyRunning, setScans: setTickedScans, setShards: setTickedShards })
+
+  // Auto-refresh hit counts every 60s while a scan is running
+  useEffect(() => {
+    if (!anyRunning) return
+    const t = window.setInterval(() => { void loadOwnFindings() }, 60_000)
+    return () => window.clearInterval(t)
+  }, [anyRunning, loadOwnFindings])
 
   const activeScan = useMemo(() => {
     const pick = activeScanId ? tickedScans.find((s) => s.id === activeScanId) : null
@@ -367,9 +387,9 @@ export function CrackerWorkspace({
   }
 
   const filteredFindings = useMemo(() => {
-    if (statusFilter === 'all') return findings
-    return findings.filter((f) => f.status === statusFilter)
-  }, [findings, statusFilter])
+    if (statusFilter === 'all') return allFindings
+    return allFindings.filter((f) => f.status === statusFilter)
+  }, [allFindings, statusFilter])
 
   if (viewStats && activeScan) {
     return (
@@ -445,10 +465,10 @@ export function CrackerWorkspace({
               onClick={() => setStatusFilter(tab)}
             >
               {tab === 'all'
-                ? `All (${findings.length})`
+                ? `All (${allFindings.length})`
                 : tab === 'valid'
-                  ? `Valid (${findings.filter((f) => f.status === 'valid').length})`
-                  : `Unvalidated (${findings.filter((f) => f.status === 'hit').length})`}
+                  ? `Valid (${allFindings.filter((f) => f.status === 'valid').length})`
+                  : `Unvalidated (${allFindings.filter((f) => f.status === 'hit').length})`}
             </button>
           ))}
         </div>

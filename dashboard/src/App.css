@@ -3630,9 +3630,9 @@
 .fdv-section {
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
-  padding: 1.25rem 1.4rem 1.4rem;
-  border-radius: 14px;
+  gap: 0.55rem;
+  padding: 0.85rem 1rem 1rem;
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--surface-2);
 }
@@ -3678,14 +3678,14 @@
 
 .fdv-field__value {
   position: relative;
-  padding: 0.65rem 0.85rem;
-  border-radius: 10px;
+  padding: 0.4rem 0.7rem;
+  border-radius: 8px;
   background: rgba(0, 0, 0, 0.28);
   border: 1px solid var(--border);
   color: var(--text-strong);
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   word-break: break-all;
-  min-height: 38px;
+  min-height: 30px;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -5041,8 +5041,12 @@
 .cw__body { display:grid; grid-template-columns:200px minmax(0,1fr); gap:1rem; align-items:start; margin-bottom:1rem; }
 @media (max-width:980px){ .cw__body{ grid-template-columns:1fr; } }
 .cw__main { display:flex; flex-direction:column; gap:1rem; min-width:0; }
-.cw__below { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; margin-top:1rem; align-items:stretch; }
+.cw__below { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; margin-top:1rem; align-items:start; }
 @media (max-width:1180px){ .cw__below{ grid-template-columns:1fr; } }
+.status-tabs { display:flex; flex-wrap:wrap; gap:.35rem; padding:.2rem 0 .5rem; align-content:flex-start; }
+.status-tab { padding:.28rem .85rem; font-size:.78rem; font-weight:500; color:var(--muted); background:rgba(255,255,255,.04); border:1px solid var(--hairline); border-radius:999px; cursor:pointer; white-space:nowrap; line-height:1.4; transition:color .12s,border-color .12s,background .12s; }
+.status-tab:hover { color:var(--text-strong); border-color:rgba(255,255,255,.2); }
+.status-tab--active { color:var(--accent); border-color:color-mix(in srgb,var(--accent),transparent 55%); background:rgba(0,200,150,.06); font-weight:700; }
 .cw__lists { display:flex; flex-direction:column; min-width:0; border-radius:14px; border:1px solid var(--hairline); padding:.85rem 1rem; }
 .cw__lists-head { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:.35rem .75rem; margin-bottom:.65rem; }
 .cw__lists-title { margin:0; font-size:.95rem; }
@@ -5140,13 +5144,29 @@
 .cw-addons__head h3 { margin:0 0 .15rem; font-size:1rem; }
 .cw-addons__head p { margin:0; font-size:.72rem; }
 .cw-addons__count { font-size:.62rem; font-weight:700; letter-spacing:.1em; color:var(--gold); white-space:nowrap; }
-/* Two-row balanced layout. Component sets `--cw-addon-cols` to
-   ceil(N/2) so 15 tiles → 8 cols (8+7 split), 14 → 7 cols (7+7), etc.
-   Auto-fit fallback for narrow viewports where ceil(N/2) shrinks tiles
-   below ~7rem and the grid wraps to more rows organically. */
-.cw-addons__row { display:grid; grid-template-columns:repeat(auto-fit,minmax(7rem,1fr)); gap:.6rem; }
+/* Category groups with collapsible headers on narrow screens */
+.cw-addons__group { margin-bottom:.8rem; }
+.cw-addons__group:last-child { margin-bottom:0; }
+.cw-addons__group-head { display:flex; align-items:center; gap:.45rem; width:100%; padding:.15rem 0 .5rem; background:none; border:none; text-align:left; cursor:default; }
+.cw-addons__group-label { font-size:.6rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); white-space:nowrap; }
+.cw-addons__group-count { font-size:.6rem; color:var(--gold); font-weight:600; white-space:nowrap; }
+.cw-addons__group-sep { flex:1; height:1px; background:var(--hairline); }
+.cw-addons__group-chevron { display:none; font-size:.65rem; color:var(--muted); line-height:1; }
+/* Grid: auto-fill; large screens cap tile max at 9rem so small groups
+   don't stretch. Small screens compact to 5rem min for density. */
+.cw-addons__row { display:grid; grid-template-columns:repeat(auto-fill,minmax(5rem,1fr)); gap:.5rem; }
 @media (min-width: 1024px) {
-  .cw-addons__row { grid-template-columns: repeat(var(--cw-addon-cols, 8), minmax(0, 1fr)); }
+  .cw-addons__row { grid-template-columns:repeat(auto-fill,minmax(8rem,9rem)); gap:.55rem; }
+}
+/* Narrow: collapsible groups + compact tiles */
+@media (max-width: 1023px) {
+  .cw-addons__group-head { cursor:pointer; padding:.25rem 0 .4rem; }
+  .cw-addons__group-head:hover .cw-addons__group-label { color:var(--text-strong); }
+  .cw-addons__group-chevron { display:inline; }
+  .cw-addons__group[data-collapsed] .cw-addons__row { display:none; }
+  .cw-addon { padding:.7rem .4rem .75rem; }
+  .cw-addon__logo { width:36px; height:36px; margin-bottom:.35rem; }
+  .cw-addon__label { font-size:.72rem; }
 }
 /* Symmetric horizontal padding so the centered flex column visually
    sits in the middle of the tile. The ON/OFF badge is absolute on
@@ -5752,6 +5772,8 @@
 .findings-actions { display: flex; gap: .25rem; align-items: center; flex-wrap: wrap; }
 .findings-addr-input { width: 8rem; font-family: var(--mono); font-size: .7rem; }
 .findings-chain-select { width: 4rem; font-size: .7rem; }
+.hits-pagination { display: flex; align-items: center; gap: .4rem; padding: .6rem .5rem .2rem; flex-wrap: wrap; }
+.hits-pagination__info { font-size: .78rem; color: var(--text); padding: 0 .25rem; }
 .btn-glass--on { color: #7dd3af !important; border-color: color-mix(in srgb, #7dd3af, transparent 55%) !important; }
 .btn-glass--danger { color: var(--danger) !important; }
 

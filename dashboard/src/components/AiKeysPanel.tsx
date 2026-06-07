@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { findings as findingsApi, credentials as credApi, type DiscoveredKey } from '../lib/reconApi'
 
 type Props = {
@@ -6,14 +6,27 @@ type Props = {
 }
 
 const PROVIDER_COLOR: Record<string, string> = {
-  OpenAI:     '#10a37f',
-  Anthropic:  '#d4964f',
-  HuggingFace:'#ff9d00',
-  Gemini:     '#4285f4',
-  Replicate:  '#ee4433',
+  OpenAI:      '#10a37f',
+  Anthropic:   '#d4964f',
+  HuggingFace: '#ff9d00',
+  Gemini:      '#4285f4',
+  Replicate:   '#ee4433',
+  xAI:         '#8b5cf6',
+  Mistral:     '#f97316',
+  ElevenLabs:  '#00c2a8',
+  Groq:        '#f43f5e',
+  Perplexity:  '#0ea5e9',
+  OpenRouter:  '#7c3aed',
+  Cohere:      '#3b82f6',
+  TogetherAI:  '#06b6d4',
+  Fireworks:   '#fb923c',
 }
 
-const ALL_PROVIDERS = ['OpenAI', 'Anthropic', 'HuggingFace', 'Gemini', 'Replicate'] as const
+const ALL_PROVIDERS = [
+  'OpenAI', 'Anthropic', 'HuggingFace', 'Gemini', 'Replicate',
+  'xAI', 'Mistral', 'ElevenLabs', 'Groq', 'Perplexity',
+  'OpenRouter', 'Cohere', 'TogetherAI', 'Fireworks',
+] as const
 
 function parseRecheckMeta(raw: string | null): Record<string, string> {
   if (!raw) return {}
@@ -46,6 +59,8 @@ export function AiKeysPanel({ onToast }: Props) {
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all')
   const [recheckState, setRecheckState] = useState<Record<number, { loading: boolean; meta?: string }>>({})
+  const [bulkRunning, setBulkRunning] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -75,6 +90,28 @@ export function AiKeysPanel({ onToast }: Props) {
     }
   }, [onToast])
 
+  const recheckAll = useCallback(async () => {
+    try {
+      const r = await findingsApi.bulkRecheck(['OpenAI', 'Anthropic', 'HuggingFace', 'Gemini', 'Replicate'])
+      if (!r.ok) { onToast('Recheck All failed', r.error, 'error'); return }
+      setBulkRunning(true)
+      pollRef.current = setInterval(async () => {
+        try {
+          const s = await findingsApi.bulkRecheckStatus()
+          if (!s.running) {
+            clearInterval(pollRef.current!)
+            pollRef.current = null
+            setBulkRunning(false)
+            void reload()
+            onToast('Recheck All done', 'Results updated', 'info')
+          }
+        } catch { /* ignore */ }
+      }, 4000)
+    } catch (e) {
+      onToast('Recheck All failed', (e as Error).message, 'error')
+    }
+  }, [onToast, reload])
+
   const remove = useCallback(async (id: number) => {
     if (!window.confirm('Delete this key?')) return
     try {
@@ -103,6 +140,10 @@ export function AiKeysPanel({ onToast }: Props) {
         </div>
         <div style={{ display: 'flex', gap: '.5rem', alignItems: 'center' }}>
           <span className="muted" style={{ fontSize: '.8rem' }}>{items.length} total</span>
+          <button type="button" className="btn-glass btn-glass--xs" onClick={() => void recheckAll()} disabled={bulkRunning || loading}
+            title="Validate all unverified keys and fetch subscription info">
+            {bulkRunning ? '⟳ Checking…' : '⚡ Recheck All'}
+          </button>
           <button type="button" className="btn-glass btn-glass--xs" onClick={() => void reload()} disabled={loading}>
             {loading ? '…' : '↻ Reload'}
           </button>

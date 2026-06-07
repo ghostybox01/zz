@@ -61,6 +61,8 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
   const [sortKey, setSortKey] = useState<SortKey>('provider')
   const [dir, setDir] = useState<'asc' | 'desc'>('asc')
   const [addon, setAddon] = useState<string>('all')
+  const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [vulnFilter, setVulnFilter] = useState<string>('all')
   const [query, setQuery] = useState('')
   const [pageSize, setPageSize] = useState(50)
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -75,13 +77,15 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
   const [ownFindings, setOwnFindings] = useState<Finding[] | null>(null)
   const [ownLoading, setOwnLoading] = useState(true)
   const [ownError, setOwnError] = useState<string | null>(null)
+  const [dbTotal, setDbTotal] = useState<number | null>(null)
 
   const loadOwnFindings = useCallback(async () => {
     setOwnLoading(true)
     setOwnError(null)
     try {
-      const r = await findingsApi.listHits()
+      const r = await findingsApi.listHits(2000, 0)
       setOwnFindings(r.findings.map((row, i) => mapRecent(row, i)))
+      if (r.total != null) setDbTotal(r.total)
     } catch (e) {
       setOwnError((e as Error).message)
     } finally {
@@ -97,6 +101,12 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
   const addonChoices = useMemo(() => {
     const s = new Set<string>()
     for (const f of allFindings) s.add(f.provider)
+    return ['all', ...[...s].sort((a, b) => a.localeCompare(b))]
+  }, [allFindings])
+
+  const vulnChoices = useMemo(() => {
+    const s = new Set<string>()
+    for (const f of allFindings) s.add(vulnTag(f.ruleLabel, f.discoveryMethod))
     return ['all', ...[...s].sort((a, b) => a.localeCompare(b))]
   }, [allFindings])
 
@@ -123,6 +133,8 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
     const tf = filter.trim().toLowerCase()
     return copy.filter((f) => {
       if (addon !== 'all' && f.provider !== addon) return false
+      if (statusFilter !== 'all' && f.status !== statusFilter) return false
+      if (vulnFilter !== 'all' && vulnTag(f.ruleLabel, f.discoveryMethod) !== vulnFilter) return false
       const matchesText = (needle: string) =>
         f.hostname.toLowerCase().includes(needle) ||
         f.detail.toLowerCase().includes(needle) ||
@@ -134,10 +146,15 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
       if (tf && !matchesText(tf)) return false
       return true
     })
-  }, [allFindings, sortKey, dir, addon, query, filter])
+  }, [allFindings, sortKey, dir, addon, statusFilter, vulnFilter, query, filter])
 
-  const activeFilters = (addon !== 'all' ? 1 : 0) + (query.trim() ? 1 : 0)
-  const rows = sortedFiltered.slice(0, Math.max(1, pageSize))
+  const activeFilters = (addon !== 'all' ? 1 : 0) + (statusFilter !== 'all' ? 1 : 0) + (vulnFilter !== 'all' ? 1 : 0) + (query.trim() ? 1 : 0)
+  const [page, setPage] = useState(0)
+  // Reset to page 0 whenever the filtered set changes
+  useEffect(() => setPage(0), [sortedFiltered.length, pageSize, addon, statusFilter, vulnFilter, query, filter])
+  const pageCount = Math.max(1, Math.ceil(sortedFiltered.length / pageSize))
+  const safePage = Math.min(page, pageCount - 1)
+  const rows = sortedFiltered.slice(safePage * pageSize, (safePage + 1) * pageSize)
 
   function toggle(head: SortKey) {
     if (sortKey !== head) {
@@ -157,6 +174,44 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
     a.click()
     URL.revokeObjectURL(url)
   }
+
+  const exportCsv = () => {
+    const header = ['provider', 'credential', 'source_url', 'status', 'severity', 'discovered_at']
+    const rows = sortedFiltered.map((f) => [
+      f.provider,
+      findingCredentialText(f),
+      f.hostname,
+      f.status ?? '',
+      f.severity,
+      f.at,
+    ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+    const csv = [header.join(','), ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `hits-export-${sortedFiltered.length}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const [loadingMore, setLoadingMore] = useState(false)
+  const loadMore = useCallback(async () => {
+    if (!ownFindings || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const r = await findingsApi.listHits(2000, ownFindings.length)
+      if (r.findings.length > 0) {
+        const newRows = r.findings.map((row, i) => mapRecent(row, ownFindings.length + i))
+        setOwnFindings((prev) => (prev ? [...prev, ...newRows] : newRows))
+      }
+      if (r.total != null) setDbTotal(r.total)
+    } catch (e) {
+      onToast?.('Load more failed', (e as Error).message, 'error')
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [ownFindings, loadingMore, onToast])
 
   const openFinding = (id: string) => setActiveId(id)
 
@@ -324,10 +379,33 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
               </option>
             ))}
           </select>
+          <select
+            className="hits-select"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            aria-label="Filter by status"
+          >
+            <option value="all">All status</option>
+            <option value="hit">Hit</option>
+            <option value="valid">Valid</option>
+            <option value="dead">Dead</option>
+          </select>
+          <select
+            className="hits-select"
+            value={vulnFilter}
+            onChange={(e) => setVulnFilter(e.target.value)}
+            aria-label="Filter by vuln type"
+          >
+            {vulnChoices.map((v) => (
+              <option key={v} value={v}>
+                {v === 'all' ? 'All types' : v}
+              </option>
+            ))}
+          </select>
           <input
             className="hits-search"
             type="search"
-            placeholder="Search path, hostname, rule, id…"
+            placeholder="Search host, credential, rule…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             aria-label="Search hits"
@@ -349,8 +427,16 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
             </select>
           </label>
           <button type="button" className="btn-glass btn-hit-tool" onClick={exportFiltered}>
-            Export
+            JSON
           </button>
+          <button type="button" className="btn-glass btn-hit-tool" onClick={exportCsv}>
+            CSV
+          </button>
+          <a href="/api/export/hits.csv" download className="btn-glass btn-hit-tool"
+            style={{ textDecoration: 'none', lineHeight: '1' }}
+            title="Download all hits from DB (no row cap)">
+            All CSV
+          </a>
           <button
             type="button"
             className="btn-danger-outline btn-hit-tool"
@@ -377,7 +463,10 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
           }
         </span>
         {!ownLoading && allFindings.length !== sortedFiltered.length ? (
-          <span className="findings-meta__pipe"> · {allFindings.length} total</span>
+          <span className="findings-meta__pipe"> · {allFindings.length} loaded</span>
+        ) : null}
+        {!ownLoading && dbTotal != null && dbTotal > allFindings.length ? (
+          <span className="findings-meta__pipe" style={{ color: '#f59e0b' }}> · {dbTotal.toLocaleString()} in DB</span>
         ) : null}
         {ownError && (
           <span className="muted" style={{ color: '#f87171', marginLeft: '.5rem', fontSize: '.75rem' }}>
@@ -394,9 +483,21 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
         >
           {ownLoading ? '…' : '↻'}
         </button>
+        {!ownLoading && dbTotal != null && dbTotal > allFindings.length && (
+          <button
+            type="button"
+            className="btn-glass btn-glass--xs"
+            style={{ marginLeft: '.25rem', color: '#f59e0b', borderColor: 'rgba(245,158,11,.3)' }}
+            onClick={() => void loadMore()}
+            disabled={loadingMore}
+            title={`Load next 2000 (${dbTotal - allFindings.length} remaining)`}
+          >
+            {loadingMore ? '…' : `+ Load more (${(dbTotal - allFindings.length).toLocaleString()})`}
+          </button>
+        )}
       </div>
 
-      <div className="findings-scroll-wrap findings-scroll-wrap--tall">
+      <div className="findings-scroll-wrap findings-scroll-wrap--tall" key={safePage}>
         <div className="findings-shell">
           {rows.length === 0 ? (
             <div className="hits-empty">
@@ -522,6 +623,19 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
           )}
         </div>
       </div>
+
+      {pageCount > 1 && (
+        <div className="hits-pagination">
+          <button type="button" className="btn-glass btn-glass--xs" disabled={safePage === 0} onClick={() => setPage(0)} title="First page">«</button>
+          <button type="button" className="btn-glass btn-glass--xs" disabled={safePage === 0} onClick={() => setPage(p => Math.max(0, p - 1))} title="Previous page">‹</button>
+          <span className="hits-pagination__info">
+            Page {safePage + 1} of {pageCount}
+            <span className="muted"> · {sortedFiltered.length.toLocaleString()} rows</span>
+          </span>
+          <button type="button" className="btn-glass btn-glass--xs" disabled={safePage >= pageCount - 1} onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))} title="Next page">›</button>
+          <button type="button" className="btn-glass btn-glass--xs" disabled={safePage >= pageCount - 1} onClick={() => setPage(pageCount - 1)} title="Last page">»</button>
+        </div>
+      )}
 
       {confirmDialog && (
         <div className="confirm-overlay" onClick={() => setConfirmDialog(null)} role="dialog" aria-modal="true">
