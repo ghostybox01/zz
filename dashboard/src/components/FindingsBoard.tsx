@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Finding } from '../types'
 import { findingCredentialText } from '../lib/findingCredential'
 import { FindingDetail } from './FindingDetail'
 import { TableToolbar } from './TableToolbar'
-import { credentials as credApi } from '../lib/reconApi'
+import { credentials as credApi, findings as findingsApi } from '../lib/reconApi'
+import { mapRecent } from '../hooks/useReconStats'
 
 type SortKey = 'provider' | 'at' | 'severity'
 
@@ -65,21 +66,37 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
   const [activeId, setActiveId] = useState<string | null>(null)
   type RecheckOverride = { extra: ReadonlyArray<{ key: string; value: string }>; live: boolean }
   const [recheckResults, setRecheckResults] = useState<Map<string, RecheckOverride>>(new Map())
-  // Effect D — bulk select + per-row trash. `filter` is the table-toolbar
-  // search; `query` above is the legacy hits-toolbar search and remains
-  // wired so existing UI continues to work; both narrow the same row set.
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState('')
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null)
 
+  // Self-load full hits from dedicated endpoint — avoids the polling stats
+  // endpoint's LIMIT 200 cap that feeds the activity feed / overview widgets.
+  const [ownFindings, setOwnFindings] = useState<Finding[] | null>(null)
+  const [ownLoading, setOwnLoading] = useState(false)
+
+  const loadOwnFindings = useCallback(async () => {
+    setOwnLoading(true)
+    try {
+      const r = await findingsApi.listHits()
+      setOwnFindings(r.findings.map((row, i) => mapRecent(row, i)))
+    } catch { /* fall back to findings prop */ }
+    finally { setOwnLoading(false) }
+  }, [])
+
+  useEffect(() => { void loadOwnFindings() }, [loadOwnFindings])
+
+  // Prefer self-loaded data; fall back to prop data while loading
+  const allFindings = ownFindings ?? findings
+
   const addonChoices = useMemo(() => {
     const s = new Set<string>()
-    for (const f of findings) s.add(f.provider)
+    for (const f of allFindings) s.add(f.provider)
     return ['all', ...[...s].sort((a, b) => a.localeCompare(b))]
-  }, [findings])
+  }, [allFindings])
 
   const sortedFiltered = useMemo(() => {
-    const copy = [...findings]
+    const copy = [...allFindings]
     const mult = dir === 'asc' ? 1 : -1
     copy.sort((a, b) => {
       if (sortKey === 'at')
@@ -112,7 +129,7 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
       if (tf && !matchesText(tf)) return false
       return true
     })
-  }, [findings, sortKey, dir, addon, query, filter])
+  }, [allFindings, sortKey, dir, addon, query, filter])
 
   const activeFilters = (addon !== 'all' ? 1 : 0) + (query.trim() ? 1 : 0)
   const rows = sortedFiltered.slice(0, Math.max(1, pageSize))
@@ -158,13 +175,13 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
     }
   }
 
-  const activeFinding = activeId ? sortedFiltered.find((f) => f.id === activeId) ?? findings.find((f) => f.id === activeId) ?? null : null
+  const activeFinding = activeId ? sortedFiltered.find((f) => f.id === activeId) ?? allFindings.find((f) => f.id === activeId) ?? null : null
 
   // Prune stale selections when the underlying findings list shrinks.
   useEffect(() => {
     setSelected((prev) => {
       if (prev.size === 0) return prev
-      const valid = new Set(findings.map((f) => f.id))
+      const valid = new Set(allFindings.map((f) => f.id))
       let changed = false
       const next = new Set<string>()
       for (const id of prev) {
@@ -173,7 +190,7 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
       }
       return changed ? next : prev
     })
-  }, [findings])
+  }, [allFindings])
 
   const toggleOne = (id: string) =>
     setSelected((prev) => {
@@ -332,11 +349,11 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
           <button
             type="button"
             className="btn-danger-outline btn-hit-tool"
-            disabled={!onClearAll || findings.length === 0}
+            disabled={!onClearAll || allFindings.length === 0}
             onClick={() => {
               if (!onClearAll) return
               setConfirmDialog({
-                message: `Clear all ${findings.length} findings? This calls /api/clear on the backend.`,
+                message: `Clear all ${allFindings.length} findings? This calls /api/clear on the backend.`,
                 onConfirm: () => void onClearAll(),
               })
             }}
@@ -350,13 +367,24 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
       <div className="findings-meta">
         <span>
           Showing <strong>{rows.length}</strong> of <strong>{sortedFiltered.length}</strong>
+          {ownLoading && <span className="muted" style={{ marginLeft: '.5rem', fontSize: '.75rem' }}>loading…</span>}
         </span>
-        {findings.length !== sortedFiltered.length ? (
+        {allFindings.length !== sortedFiltered.length ? (
           <span className="findings-meta__pipe">
             {' '}
-            · {findings.length} total in inbox
+            · {allFindings.length} total in inbox
           </span>
         ) : null}
+        <button
+          type="button"
+          className="btn-glass btn-glass--xs"
+          style={{ marginLeft: '.5rem' }}
+          onClick={() => void loadOwnFindings()}
+          disabled={ownLoading}
+          title="Reload from database"
+        >
+          {ownLoading ? '…' : '↻'}
+        </button>
       </div>
 
       <div className="findings-scroll-wrap findings-scroll-wrap--tall">

@@ -951,6 +951,8 @@ export const findings = {
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/ssh'),
   listEmail: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/email'),
+  listHits: () =>
+    getJson<{ ok: boolean; findings: ReconRecentFinding[] }>('/findings/hits'),
   listAiKeys: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/aikeys'),
   listEmailApi: () =>

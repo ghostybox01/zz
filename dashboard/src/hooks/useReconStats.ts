@@ -96,7 +96,7 @@ function extractAkiaKey(s: string | null | undefined): string | null {
 }
 
 /** [type, key_value, source_url, timestamp, metadata, status, dbId?] from app.py's recent_findings tuple */
-function mapRecent(row: ReconRecentFinding, i: number): Finding {
+export function mapRecent(row: ReconRecentFinding, i: number): Finding {
   const [type, keyValue, sourceUrl, ts, metadata, dbStatus, dbId] = row
   const provider = String(type ?? 'Unknown')
 
