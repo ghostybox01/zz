@@ -6,8 +6,12 @@ import {
   GlyphAwsSes,
   GlyphAwsDeep,
   GlyphBrevo,
+  GlyphGcp,
   GlyphGitHub,
   GlyphMailgun,
+  GlyphMandrill,
+  GlyphOpenAI,
+  GlyphAnthropic,
   GlyphSendGrid,
   GlyphSmtp,
   GlyphStripe,
@@ -18,7 +22,9 @@ type IconCmp = ComponentType<SVGProps<SVGSVGElement>>
 
 type HubKey =
   | 'aws-ses' | 'stripe' | 'sendgrid' | 'mailgun' | 'brevo' | 'twilio'
-  | 'smtp' | 'github' | 'openai' | 'anthropic' | 'gcp' | 'other'
+  | 'smtp' | 'github' | 'openai' | 'anthropic' | 'gemini' | 'huggingface'
+  | 'replicate' | 'postmark' | 'mandrill' | 'resend' | 'sparkpost'
+  | 'cloudflare' | 'digitalocean' | 'slack' | 'gcp' | 'other'
 
 type HubMeta = {
   key: HubKey
@@ -111,13 +117,91 @@ const HUBS: readonly HubMeta[] = [
     },
   },
   {
+    key: 'gemini', label: 'Gemini', accent: '#4285f4',
+    match: (f) => f.provider === 'Gemini',
+    headline: (rs) => ({ k: 'KEYS', v: String(rs.length) }),
+  },
+  {
+    key: 'huggingface', label: 'HuggingFace', accent: '#ff9d00',
+    match: (f) => f.provider === 'HuggingFace',
+    headline: (rs) => {
+      const pro = rs.filter((f) => f.details?.hfIsPro).length
+      if (pro > 0) return { k: 'PRO ACCOUNTS', v: String(pro) }
+      return { k: 'TOKENS', v: String(rs.length) }
+    },
+  },
+  {
+    key: 'replicate', label: 'Replicate', accent: '#ee4433',
+    match: (f) => f.provider === 'Replicate',
+    headline: (rs) => ({ k: 'TOKENS', v: String(rs.length) }),
+  },
+  {
+    key: 'postmark', label: 'Postmark', accent: '#ffbe33',
+    match: (f) => f.provider === 'Postmark',
+    headline: (rs) => {
+      const sent = rs.reduce((s, f) => s + (f.details?.sentLast30d ?? 0), 0)
+      if (sent > 0) return { k: 'TOTAL SENT', v: fmtInt(sent) }
+      return { k: 'KEYS', v: String(rs.length) }
+    },
+  },
+  {
+    key: 'mandrill', label: 'Mandrill', accent: '#2a9d8f',
+    match: (f) => f.provider === 'Mandrill',
+    headline: (rs) => {
+      const quota = rs.reduce((s, f) => s + (f.details?.monthlyCredits ?? 0), 0)
+      if (quota > 0) return { k: 'HOURLY QUOTA', v: fmtInt(quota) }
+      return { k: 'KEYS', v: String(rs.length) }
+    },
+  },
+  {
+    key: 'resend', label: 'Resend', accent: '#00d084',
+    match: (f) => f.provider === 'Resend',
+    headline: (rs) => {
+      const domains = new Set(rs.flatMap((f) => f.details?.senderDomains ?? [])).size
+      if (domains > 0) return { k: 'DOMAINS', v: String(domains) }
+      return { k: 'KEYS', v: String(rs.length) }
+    },
+  },
+  {
+    key: 'sparkpost', label: 'SparkPost', accent: '#fa6423',
+    match: (f) => f.provider === 'SparkPost',
+    headline: (rs) => {
+      const credits = rs.reduce((s, f) => s + (f.details?.monthlyCredits ?? 0), 0)
+      if (credits > 0) return { k: 'MONTHLY LIMIT', v: fmtInt(credits) }
+      return { k: 'KEYS', v: String(rs.length) }
+    },
+  },
+  {
+    key: 'cloudflare', label: 'Cloudflare', accent: '#f48120',
+    match: (f) => f.provider === 'Cloudflare',
+    headline: (rs) => {
+      const zones = rs.reduce((s, f) => s + (f.details?.cfZones ?? 0), 0)
+      if (zones > 0) return { k: 'ZONES', v: String(zones) }
+      return { k: 'TOKENS', v: String(rs.length) }
+    },
+  },
+  {
+    key: 'digitalocean', label: 'DigitalOcean', accent: '#0080ff',
+    match: (f) => f.provider === 'DigitalOcean',
+    headline: (rs) => ({ k: 'TOKENS', v: String(rs.length) }),
+  },
+  {
+    key: 'slack', label: 'Slack', accent: '#4a154b',
+    match: (f) => f.provider === 'Slack',
+    headline: (rs) => {
+      const teams = new Set(rs.map((f) => f.details?.slackTeam).filter(Boolean)).size
+      if (teams > 0) return { k: 'WORKSPACES', v: String(teams) }
+      return { k: 'TOKENS', v: String(rs.length) }
+    },
+  },
+  {
     key: 'gcp', label: 'GCP', accent: '#4285f4',
     match: (f) => f.provider === 'GCP',
     headline: (rs) => ({ k: 'KEYS', v: String(rs.length) }),
   },
   {
     key: 'smtp', label: 'SMTP', accent: '#fbbf24',
-    match: (f) => f.provider === 'SMTP',
+    match: (f) => f.provider === 'SMTP' || f.provider === 'XSMTP',
     headline: (rs) => {
       const hosts = new Set(rs.map((f) => f.details?.smtp?.host).filter(Boolean)).size
       if (hosts > 0) return { k: 'HOSTS', v: String(hosts) }
@@ -127,7 +211,13 @@ const HUBS: readonly HubMeta[] = [
   {
     key: 'other', label: 'Other', accent: '#8b5cf6',
     match: (f) => {
-      const covered = ['AWS', 'AWS SNS', 'Stripe', 'SendGrid', 'Mailgun', 'Brevo', 'Twilio', 'SMTP', 'GitHub', 'OpenAI', 'Anthropic', 'GCP']
+      const covered = [
+        'AWS', 'AWS SNS', 'Stripe', 'SendGrid', 'Mailgun', 'Brevo', 'Twilio',
+        'SMTP', 'XSMTP', 'GitHub', 'OpenAI', 'Anthropic', 'GCP',
+        'Gemini', 'HuggingFace', 'Replicate',
+        'Postmark', 'Mandrill', 'Resend', 'SparkPost',
+        'Cloudflare', 'DigitalOcean', 'Slack',
+      ]
       return !covered.includes(f.provider)
     },
     headline: (rs) => ({ k: 'PROVIDERS', v: String(new Set(rs.map((f) => f.provider)).size) }),
@@ -135,18 +225,28 @@ const HUBS: readonly HubMeta[] = [
 ]
 
 const PROVIDER_ICONS: Record<HubKey, IconCmp> = {
-  'aws-ses': GlyphAwsSes,
-  stripe: GlyphStripe,
-  sendgrid: GlyphSendGrid,
-  mailgun: GlyphMailgun,
-  brevo: GlyphBrevo,
-  twilio: GlyphTwilio,
-  smtp: GlyphSmtp,
-  github: GlyphGitHub,
-  openai: GlyphAI,
-  anthropic: GlyphAI,
-  gcp: GlyphAwsDeep,
-  other: GlyphAwsDeep,
+  'aws-ses':     GlyphAwsSes,
+  stripe:        GlyphStripe,
+  sendgrid:      GlyphSendGrid,
+  mailgun:       GlyphMailgun,
+  brevo:         GlyphBrevo,
+  twilio:        GlyphTwilio,
+  smtp:          GlyphSmtp,
+  github:        GlyphGitHub,
+  openai:        GlyphOpenAI,
+  anthropic:     GlyphAnthropic,
+  gemini:        GlyphAI,
+  huggingface:   GlyphAI,
+  replicate:     GlyphAI,
+  postmark:      GlyphSmtp,
+  mandrill:      GlyphMandrill,
+  resend:        GlyphSmtp,
+  sparkpost:     GlyphSmtp,
+  cloudflare:    GlyphAwsDeep,
+  digitalocean:  GlyphAwsDeep,
+  slack:         GlyphAI,
+  gcp:           GlyphGcp,
+  other:         GlyphAwsDeep,
 }
 
 type Props = {

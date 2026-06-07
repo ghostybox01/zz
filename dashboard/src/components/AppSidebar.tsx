@@ -173,7 +173,40 @@ function IcoFilter(props: SVGProps<SVGSVGElement>) {
   )
 }
 
-export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'logs' | 'settings' | 'help'
+function IcoAi(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <rect x="3" y="7" width="18" height="13" rx="2" />
+      <path d="M8 7V4M16 7V4M3 11h18" strokeLinecap="round" />
+      <circle cx="8.5" cy="16" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="15.5" cy="16" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+function IcoEnvelopeApi(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <rect x="2" y="5" width="20" height="14" rx="2" />
+      <path d="M2 5l10 8 10-8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M17 13l2 2-2 2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function IcoSmtp(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" {...props}>
+      <rect x="2" y="3" width="20" height="5" rx="1.5" />
+      <rect x="2" y="11" width="20" height="5" rx="1.5" />
+      <circle cx="6.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="6.5" cy="13.5" r="1" fill="currentColor" stroke="none" />
+      <path d="M10 19.5h4M12 19.5v2.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'aikeys' | 'emailapi' | 'smtp' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'logs' | 'settings' | 'help'
 
 type Item = { id: DashboardTab; label: string; Ico: typeof IcoDash; goldWhenActive?: boolean }
 
@@ -186,6 +219,9 @@ const ITEMS: Item[] = [
   { id: 'findings', label: 'Hits', Ico: IcoTrophy },
   { id: 'stripe', label: 'Stripe', Ico: IcoTrophy },
   { id: 'crypto', label: 'Crypto', Ico: IcoCrypto },
+  { id: 'aikeys', label: 'AI Keys', Ico: IcoAi },
+  { id: 'emailapi', label: 'Email API', Ico: IcoEnvelopeApi },
+  { id: 'smtp', label: 'SMTP', Ico: IcoSmtp },
   { id: 'database', label: 'Database', Ico: IcoDatabase },
   { id: 'webpanels', label: 'Web Panels', Ico: IcoPanel },
   { id: 'prefilter', label: 'Pre-filter', Ico: IcoFilter },
@@ -209,6 +245,9 @@ const TAB_TITLE: Record<DashboardTab, string> = {
   findings: 'Hits ledger',
   stripe: 'Stripe keys',
   crypto: 'Crypto keys',
+  aikeys: 'AI API keys',
+  emailapi: 'Email & SMS APIs',
+  smtp: 'SMTP servers',
   database: 'Database credentials',
   webpanels: 'Web panel credentials',
   prefilter: 'Target pre-filter',

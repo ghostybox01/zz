@@ -9052,6 +9052,73 @@ def api_findings_ssh():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/findings/aikeys', methods=['GET'])
+def api_findings_aikeys():
+    """AI provider API keys — OpenAI, Anthropic, Gemini, HuggingFace, Replicate."""
+    AI_TYPES = ('OpenAI', 'Anthropic', 'HuggingFace', 'Gemini', 'Replicate')
+    try:
+        placeholders = ','.join('?' * len(AI_TYPES))
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute(f'''SELECT id, type, key_value, source_url, status, metadata,
+                             timestamp, reported, last_verified, verify_meta
+                      FROM credentials
+                      WHERE type IN ({placeholders})
+                        AND status IN ('valid', 'hit')
+                      ORDER BY id DESC LIMIT 5000''', AI_TYPES)
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/emailapi', methods=['GET'])
+def api_findings_emailapi():
+    """Email and SMS API provider credentials — all API-based providers (no raw SMTP)."""
+    EMAIL_API_TYPES = (
+        'SendGrid', 'Mailgun', 'Mandrill', 'Postmark', 'Brevo',
+        'MailerSend', 'SparkPost', 'Mailtrap', 'Mailjet', 'Resend', 'Plivo',
+        'Nexmo', 'Telnyx', 'MessageBird', 'Twilio',
+    )
+    try:
+        placeholders = ','.join('?' * len(EMAIL_API_TYPES))
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute(f'''SELECT id, type, key_value, source_url, status, metadata,
+                             timestamp, reported, last_verified, verify_meta
+                      FROM credentials
+                      WHERE type IN ({placeholders})
+                        AND status IN ('valid', 'hit')
+                      ORDER BY id DESC LIMIT 5000''', EMAIL_API_TYPES)
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/findings/smtp', methods=['GET'])
+def api_findings_smtp():
+    """Raw SMTP / XSMTP server credentials."""
+    SMTP_TYPES = ('SMTP', 'XSMTP')
+    try:
+        placeholders = ','.join('?' * len(SMTP_TYPES))
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        c = conn.cursor()
+        c.execute(f'''SELECT id, type, key_value, source_url, status, metadata,
+                             timestamp, reported, last_verified, verify_meta
+                      FROM credentials
+                      WHERE type IN ({placeholders})
+                        AND status IN ('valid', 'hit')
+                      ORDER BY id DESC LIMIT 5000''', SMTP_TYPES)
+        rows = [_serialize_credential(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({'ok': True, 'findings': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/findings/email', methods=['GET'])
 def api_findings_email():
     """Unified email / messaging credential findings — all providers in one endpoint."""

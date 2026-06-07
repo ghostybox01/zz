@@ -125,6 +125,15 @@ export type FindingDetails = {
 
   // Twilio
   twilio?: TwilioInfo
+
+  // New provider-specific fields used by DiscoveryHubs
+  hfIsPro?: boolean
+  cfZones?: number
+  slackTeam?: string
+  doStatus?: string
+  ghLogin?: string
+  replicateUser?: string
+  geminiModels?: ReadonlyArray<string>
 }
 
 export type Finding = {

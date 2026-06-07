@@ -951,6 +951,12 @@ export const findings = {
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/ssh'),
   listEmail: () =>
     getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/email'),
+  listAiKeys: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/aikeys'),
+  listEmailApi: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/emailapi'),
+  listSmtp: () =>
+    getJson<{ ok: boolean; findings: DiscoveredKey[] }>('/findings/smtp'),
   refreshStripe: (id: number) =>
     postJson<StripeRefreshResult>(`/findings/stripe/${id}/refresh`, {}),
   refreshCrypto: (id: number, address?: string, chain?: 'eth' | 'btc' | 'bnb') =>

@@ -30,6 +30,9 @@ import { WarcPanel } from './components/WarcPanel'
 import { DorksPanel } from './components/DorksPanel'
 import { StripePanel } from './components/StripePanel'
 import { CryptoPanel } from './components/CryptoPanel'
+import { AiKeysPanel } from './components/AiKeysPanel'
+import { EmailApiPanel } from './components/EmailApiPanel'
+import { SmtpPanel } from './components/SmtpPanel'
 import { DatabasePanel } from './components/DatabasePanel'
 import { WebPanelsPanel } from './components/WebPanelsPanel'
 import { PrefilterPanel } from './components/PrefilterPanel'
@@ -423,6 +426,9 @@ export default function App() {
   const findingsHidden = tab !== 'findings'
   const stripeHidden = tab !== 'stripe'
   const cryptoHidden = tab !== 'crypto'
+  const aikeysHidden = tab !== 'aikeys'
+  const emailapiHidden = tab !== 'emailapi'
+  const smtpHidden = tab !== 'smtp'
   const databaseHidden = tab !== 'database'
   const webpanelsHidden = tab !== 'webpanels'
   const prefilterHidden = tab !== 'prefilter'
@@ -803,6 +809,36 @@ export default function App() {
               className="tab-panel"
             >
               <CryptoPanel onToast={pushAlertToast} />
+            </section>
+
+            <section
+              id="panel-aikeys"
+              role="tabpanel"
+              aria-labelledby="tab-aikeys"
+              hidden={aikeysHidden}
+              className="tab-panel"
+            >
+              <AiKeysPanel onToast={pushAlertToast} />
+            </section>
+
+            <section
+              id="panel-emailapi"
+              role="tabpanel"
+              aria-labelledby="tab-emailapi"
+              hidden={emailapiHidden}
+              className="tab-panel"
+            >
+              <EmailApiPanel onToast={pushAlertToast} />
+            </section>
+
+            <section
+              id="panel-smtp"
+              role="tabpanel"
+              aria-labelledby="tab-smtp"
+              hidden={smtpHidden}
+              className="tab-panel"
+            >
+              <SmtpPanel onToast={pushAlertToast} />
             </section>
 
             <section
