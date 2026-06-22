@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RavenX — Scanner Internals Reference</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d; --border-subtle: #21262d;
+    --text: #e6edf3; --text-muted: #8b949e; --text-dim: #6e7681;
+    --accent: #58a6ff; --accent-soft: #1f6feb;
+    --green: #3fb950; --green-bg: #0d2618; --green-border: #196c2e;
+    --yellow: #d29922; --yellow-bg: #272115; --yellow-border: #4a3010;
+    --red: #f85149; --red-bg: #2a1518; --red-border: #6e1c1f;
+    --purple: #bc8cff; --purple-bg: #1b1229; --purple-border: #553098;
+    --orange: #e3b341; --orange-bg: #271e0e; --orange-border: #5a3e1b;
+    --teal: #39d353; --cyan: #79c0ff; --pink: #f78166;
+    --sidebar-w: 280px;
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.6; display: flex; min-height: 100vh; }
+
+  /* Sidebar */
+  nav { width: var(--sidebar-w); min-height: 100vh; background: var(--surface); border-right: 1px solid var(--border); position: sticky; top: 0; height: 100vh; overflow-y: auto; flex-shrink: 0; padding: 20px 0; }
+  nav .logo { padding: 0 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+  nav .logo h1 { font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: .5px; }
+  nav .logo span { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+  nav .section-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-dim); padding: 8px 20px 4px; }
+  nav a { display: block; padding: 5px 20px; color: var(--text-muted); text-decoration: none; font-size: 12.5px; border-left: 2px solid transparent; transition: all .15s; }
+  nav a:hover { color: var(--text); background: rgba(88,166,255,.07); border-left-color: var(--accent-soft); }
+  nav a.active { color: var(--accent); border-left-color: var(--accent); }
+  nav a.sub { padding-left: 32px; font-size: 12px; }
+
+  /* Main content */
+  main { flex: 1; max-width: 960px; padding: 40px 48px; }
+  section { margin-bottom: 56px; }
+  h2 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: var(--text); padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 16px; font-weight: 600; margin: 28px 0 10px; color: var(--cyan); }
+  h4 { font-size: 13px; font-weight: 600; margin: 18px 0 6px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .6px; }
+  p { margin-bottom: 10px; color: var(--text-muted); }
+  p strong { color: var(--text); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Code */
+  code { font-family: var(--font-mono); font-size: 12px; background: var(--surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 5px; color: var(--pink); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; margin: 12px 0; }
+  pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 12px; line-height: 1.7; }
+  .kw { color: #ff7b72; } .fn { color: #d2a8ff; } .str { color: #a5d6ff; }
+  .cm { color: var(--text-dim); font-style: italic; } .num { color: var(--orange); }
+  .type { color: #ffa657; }
+
+  /* Badges */
+  .badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; padding: 2px 7px; border-radius: 3px; font-family: var(--font-mono); vertical-align: middle; }
+  .badge-live    { background: var(--green-bg);   color: var(--green);   border: 1px solid var(--green-border); }
+  .badge-new     { background: var(--purple-bg);  color: var(--purple);  border: 1px solid var(--purple-border); }
+  .badge-crit    { background: var(--red-bg);     color: var(--red);     border: 1px solid var(--red-border); }
+  .badge-high    { background: var(--orange-bg);  color: var(--orange);  border: 1px solid var(--orange-border); }
+  .badge-med     { background: var(--yellow-bg);  color: var(--yellow);  border: 1px solid var(--yellow-border); }
+  .badge-async   { background: #131c2e; color: var(--cyan); border: 1px solid #1a3a5c; }
+  .badge-file    { background: var(--surface); color: var(--text-muted); border: 1px solid var(--border); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12.5px; }
+  th { text-align: left; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); color: var(--text-muted); vertical-align: top; }
+  td:first-child { font-family: var(--font-mono); font-size: 11.5px; color: var(--text); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin-bottom: 12px; }
+  .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .card-header h4 { margin: 0; text-transform: none; font-size: 14px; color: var(--text); letter-spacing: 0; }
+  .card p { margin-bottom: 4px; font-size: 12.5px; }
+  .card .meta { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); margin-top: 6px; }
+  .card .meta span { margin-right: 14px; }
+
+  /* Pipeline flow */
+  .flow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+  .flow-box { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 12px; font-family: var(--font-mono); color: var(--text); white-space: nowrap; }
+  .flow-box.highlight { border-color: var(--accent-soft); color: var(--accent); }
+  .flow-box.alert-box { border-color: var(--green-border); color: var(--green); }
+  .flow-arrow { color: var(--text-dim); font-size: 16px; }
+
+  /* Grid */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  @media (max-width: 800px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+  /* Alert box */
+  .alert { border-radius: 6px; padding: 12px 16px; margin: 14px 0; font-size: 12.5px; }
+  .alert-info  { background: #0c1b2e; border-left: 3px solid var(--accent); }
+  .alert-warn  { background: var(--yellow-bg); border-left: 3px solid var(--yellow); }
+  .alert-crit  { background: var(--red-bg); border-left: 3px solid var(--red); }
+
+  /* File chip */
+  .file-chip { display: inline-flex; align-items: center; gap: 5px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; font-family: var(--font-mono); font-size: 11px; color: var(--cyan); margin: 2px; }
+  .file-chip::before { content: "📄"; font-size: 10px; }
+
+  /* Anchor offset */
+  [id] { scroll-margin-top: 24px; }
+  .page-title { font-size: 28px; font-weight: 800; margin-bottom: 4px; }
+  .page-sub { color: var(--text-muted); font-size: 14px; margin-bottom: 36px; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">
+    <h1>RavenX 2.0</h1>
+    <span>Scanner Internals Reference</span>
+  </div>
+  <div class="section-label">Architecture</div>
+  <a href="#overview">System Overview</a>
+  <a href="#pipeline">Detection Pipeline</a>
+  <a href="#config">Config &amp; Feature Flags</a>
+
+  <div class="section-label">Discovery</div>
+  <a href="#prefilter">Prefilter &amp; Queue</a>
+  <a href="#crawler">Crawler (Enhancer)</a>
+  <a href="#path-scan">Path Scan Loop</a>
+
+  <div class="section-label">Scanners</div>
+  <a href="#js-scan" class="sub">JS Scanner</a>
+  <a href="#jsext-scan" class="sub">JS Extended</a>
+  <a href="#config-scan" class="sub">Config File</a>
+  <a href="#backup-scan" class="sub">Backup File</a>
+  <a href="#lib-scan" class="sub">LIB Scanner</a>
+  <a href="#nvca-scan" class="sub">NVCA Scanner</a>
+  <a href="#gpl-scan" class="sub">GPL (GraphQL)</a>
+  <a href="#gitconfig-scan" class="sub">Git Config</a>
+  <a href="#docker-scan" class="sub">Docker Compose</a>
+  <a href="#phpinfo-scan" class="sub">PHP / phpinfo</a>
+  <a href="#ssh-scan" class="sub">SSH Keys</a>
+
+  <div class="section-label">Detectors</div>
+  <a href="#checkAndSaveKeys">checkAndSaveKeys</a>
+  <a href="#entropy" class="sub">Entropy Detection</a>
+  <a href="#webhooks" class="sub">Webhook URLs</a>
+  <a href="#firebase" class="sub">Firebase Open Rules</a>
+  <a href="#tfstate" class="sub">Terraform State</a>
+  <a href="#dss" class="sub">.DS_Store Parser</a>
+  <a href="#fpp" class="sub">False-Positive Filter</a>
+
+  <div class="section-label">Validators</div>
+  <a href="#validators">Validator Overview</a>
+  <a href="#aws-val" class="sub">AWS (STS + IAM + SES)</a>
+  <a href="#email-val" class="sub">Email APIs</a>
+  <a href="#ai-val" class="sub">AI Keys</a>
+  <a href="#comm-val" class="sub">Comms &amp; Payments</a>
+  <a href="#github-val" class="sub">GitHub Token</a>
+  <a href="#crypto-val" class="sub">Crypto Wallets</a>
+
+  <div class="section-label">Supply Chain</div>
+  <a href="#osv">OSV CVE Integration</a>
+  <a href="#supply-chain">npm Supply Chain</a>
+  <a href="#js-sast">JS SAST Patterns</a>
+  <a href="#license">License Compliance</a>
+
+  <div class="section-label">Output</div>
+  <a href="#output-files">Output Files</a>
+  <a href="#telegram">Telegram Alerts</a>
+</nav>
+
+<main>
+  <p class="page-title">RavenX 2.0 — Internals Reference</p>
+  <p class="page-sub">Complete engineering reference for the scanner pipeline, all detectors, validators, and supply-chain modules. Use this document to understand, audit, and improve scanner logic.</p>
+
+  <!-- ═══════════════════════════════════════════════════════ OVERVIEW -->
+  <section id="overview">
+    <h2>System Overview</h2>
+    <p>RavenX is a <strong>Go binary</strong> that discovers exposed credentials and security misconfigurations across web surfaces. It is not a passive SAST tool — it makes live HTTP requests against real targets and validates every candidate credential against the issuing API.</p>
+
+    <div class="flow">
+      <div class="flow-box highlight">Target IP / domain</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">Prefilter (alive + fingerprint)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">Crawler (links, JS, headers)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">Path scanners (11 types)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">checkAndSaveKeys</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">Regex extraction</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box highlight">Validator (live API call)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box alert-box">Output + Telegram</div>
+    </div>
+
+    <h3>Core Struct: AWSScanner</h3>
+    <p>All scanner state lives in a single <code>AWSScanner</code> struct. Key fields:</p>
+    <table>
+      <tr><th>Field</th><th>Type</th><th>Purpose</th></tr>
+      <tr><td>Config</td><td>Config</td><td>Loaded from <code>config.json</code> — all feature flags, API validation toggles, Telegram settings</td></tr>
+      <tr><td>KnownKeys</td><td>sync.Map</td><td>Global deduplication store — any key/pair seen before is skipped. Also used as a per-run OSV cache key.</td></tr>
+      <tr><td>BlacklistPattern</td><td>*regexp.Regexp</td><td>Compiled from config blacklist — domains that should never be requested</td></tr>
+      <tr><td>ProgressBar</td><td>*pterm.ProgressbarPrinter</td><td>Live TUI progress bar for scan progress</td></tr>
+    </table>
+
+    <h3>Concurrency Model</h3>
+    <p>RavenX is <strong>highly concurrent</strong>. Each target gets a goroutine pool. Within a target, path probing runs per-path goroutines capped by a <code>sync.WaitGroup</code>. Validators run in goroutines spawned with <code>go a.Check*()</code>. Gap-closer detectors run <code>go a.scanWebhookURLs()</code>, <code>go a.checkFirebaseOpenRules()</code>, etc. — all async, non-blocking.</p>
+    <p>Rate limiting uses <code>do429Retry()</code> — exponential backoff on 429 responses, up to configurable max attempts. The 429 sleep duration is read from the <code>Retry-After</code> header when present.</p>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ PIPELINE -->
+  <section id="pipeline">
+    <h2>Detection Pipeline</h2>
+    <p>Every fetched HTTP response body passes through the same pipeline. Understanding this flow is essential for adding new detectors.</p>
+
+    <h3 id="checkAndSaveKeys">checkAndSaveKeys (main.go:3903)</h3>
+    <p>The central dispatcher. Every scan path ends here. Execution order:</p>
+
+    <pre><code><span class="cm">// 1. Honeypot / bait detection — bail immediately if triggered</span>
+<span class="kw">if</span> a.HoneypotPattern.MatchString(text) { <span class="kw">return</span> }
+
+<span class="cm">// 2. DS_Store short-circuit — binary content, send to dedicated parser</span>
+<span class="kw">if</span> strings.Contains(sourceURL, <span class="str">"DS_Store"</span>) {
+    a.extractDSStoreFilenames(text, sourceURL); <span class="kw">return</span>
+}
+
+<span class="cm">// 3. Terraform state short-circuit — check signature before regex</span>
+<span class="kw">if</span> strings.Contains(sourceURL, <span class="str">"(tfstate:"</span>) {
+    <span class="kw">return</span> <span class="cm">// recursion guard</span>
+}
+
+<span class="cm">// 4. Base64 decode attempt — catches obfuscated keys in JS</span>
+tryDecodeBase64(text)
+
+<span class="cm">// 5. Core regex battery — 200+ patterns across all credential types</span>
+<span class="cm">// Each match dispatches to its specific Check*() validator</span>
+
+<span class="cm">// 6. SMTP credential extraction</span>
+a.extractAndTestSMTP(text, sourceURL)
+
+<span class="cm">// 7. Gap-closer detectors (all async)</span>
+<span class="kw">go</span> a.scanEntropyPass(contentToScan, sourceURL)
+<span class="kw">go</span> a.scanWebhookURLs(contentToScan, sourceURL)
+<span class="kw">go</span> a.checkFirebaseOpenRules(contentToScan, sourceURL)
+<span class="kw">go</span> a.parseTerraformStateContent(contentToScan, sourceURL)</code></pre>
+
+    <div class="alert alert-info">
+      <strong>AST content path:</strong> When the JS scanner finds a source map URL (<code>//# sourceMappingURL=</code>), it fetches the <code>.map</code> file and passes its <code>sources[*]</code> content back through <code>checkAndSaveKeys</code> with a <code>(from AST: url)</code> suffix in the sourceURL. This prevents infinite recursion.
+    </div>
+
+    <h3>Regex Battery Overview</h3>
+    <p>Patterns are compiled at package init time. Key categories matched inside <code>checkAndSaveKeys</code>:</p>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="badge badge-crit">AWS</span><h4>AWS / Cloud Keys</h4></div>
+        <p><code>AKIA[0-9A-Z]{16}</code> (long-term), <code>ASIA[0-9A-Z]{16}</code> (session), Alibaba <code>LTAI</code> prefix, GCP <code>AIza</code> prefix, Tencent <code>AKI</code> prefix</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="badge badge-high">EMAIL</span><h4>Email API Keys</h4></div>
+        <p>SendGrid <code>SG.</code>, Mailgun <code>key-</code>, Brevo bearer, Mandrill, Twilio <code>AC</code>+<code>SK</code>, Telnyx, MessageBird, Plivo, SparkPost, MailerSend, Mailtrap, Mailjet, XSMTP</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="badge badge-high">AI</span><h4>AI / ML Keys</h4></div>
+        <p>OpenAI <code>sk-</code>, Anthropic <code>sk-ant-</code>, Hugging Face <code>hf_</code>, Replicate, Stability AI, Cohere, AssemblyAI, DeepL, Mistral</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="badge badge-med">DEVOPS</span><h4>Infra / DevOps</h4></div>
+        <p>GitHub PAT <code>ghp_</code>/<code>gho_</code>/<code>ghs_</code>, Stripe <code>sk_live_</code>/<code>pk_live_</code>, HubSpot, Heroku, Datadog, Cloudflare, DigitalOcean, Slack <code>xoxb-</code>/<code>xoxp-</code>, Discord Bot</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ CONFIG -->
+  <section id="config">
+    <h2>Config &amp; Feature Flags</h2>
+    <p>All runtime behaviour is driven by <code>config.json</code>. The <code>ScanningFeatures</code> block controls which path scanners run; <code>APIValidation</code> controls which credentials are validated (vs. just found and saved).</p>
+
+    <h3>ScanningFeatures</h3>
+    <table>
+      <tr><th>JSON key</th><th>Controls</th></tr>
+      <tr><td>aws_main_scan</td><td>AWS key detection and full deep-scan (STS, IAM, SES, SNS, SSM, S3, Fargate)</td></tr>
+      <tr><td>smtp_credentials_scan</td><td>SMTP credential extraction and live connection test</td></tr>
+      <tr><td>github_token_deep_scan</td><td>Repo enumeration on validated GitHub tokens</td></tr>
+      <tr><td>js_scan</td><td>Fetch &lt;script src&gt; files, scan contents, follow source maps</td></tr>
+      <tr><td>js_extended_scan</td><td>Scan raw page HTML for inline credentials in &lt;script&gt; blocks and data attributes</td></tr>
+      <tr><td>phpinfo_scan</td><td>Probe <code>/phpinfo.php</code> paths, extract DB passwords from phpinfo table</td></tr>
+      <tr><td>git_config_scan</td><td>Fetch <code>/.git/config</code> and <code>/.gitconfig</code>, extract remote URLs with embedded tokens</td></tr>
+      <tr><td>docker_scan</td><td>Fetch <code>docker-compose.yml</code> and variants, extract env vars</td></tr>
+      <tr><td>config_file_scan</td><td>Probe .env, .npmrc, .pypirc, Swagger/OpenAPI, CI/CD configs, source maps</td></tr>
+      <tr><td>backup_file_scan</td><td>Probe backup extensions (.bak, .old, ~), .DS_Store, Terraform state files</td></tr>
+      <tr><td>ssh_scan</td><td>Probe common private key paths, detect RSA/EC/ED25519 preambles</td></tr>
+      <tr><td>nvca_scan</td><td>Probe <code>/package.json</code>, <code>/_nuxt/config.js</code>, Next.js/Vue/Angular build artefacts</td></tr>
+      <tr><td>gpl_scan</td><td>POST GraphQL introspection queries to any <code>/graphql</code> or <code>/gql</code> path</td></tr>
+      <tr><td>lib_scan</td><td>Fetch package manifests; also triggers OSV CVE check, npm supply chain, license compliance</td></tr>
+    </table>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ PREFILTER -->
+  <section id="prefilter">
+    <h2>Prefilter &amp; Target Queue</h2>
+    <p>Before any deep scanning, each target passes through a <strong>prefilter</strong> that checks liveness and classifies the surface:</p>
+    <div class="flow">
+      <div class="flow-box">IP / Domain list</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">HEAD + GET / (timeout 8s)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box highlight">Status 200/30x?</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">Fingerprint (Server, X-Powered-By)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">Blacklist check</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box alert-box">prefilter_hits.txt → scan queue</div>
+    </div>
+    <p>Targets that return honeypot bait patterns (configurable regex) are permanently skipped and logged to <code>honeypot_detected.txt</code>.</p>
+    <p>The <strong>deduplication file</strong> <code>dedup.txt</code> is loaded at startup — any target already in it is skipped. After a successful scan, the target is appended. This makes resumable scans safe across binary restarts.</p>
+
+    <h3 id="crawler">Crawler — Enhancer (main.go:783)</h3>
+    <p>The <code>Enhancer</code> struct performs breadth-first crawling from the root URL up to a configurable depth. It extracts:</p>
+    <ul style="margin: 8px 0 8px 20px; color: var(--text-muted); font-size: 13px;">
+      <li>All <code>&lt;a href&gt;</code> links within the same origin</li>
+      <li>All <code>&lt;script src&gt;</code> references (feeds the JS scanner)</li>
+      <li>Sitemap URLs from <code>/sitemap.xml</code> and <code>/robots.txt</code></li>
+      <li>Response headers (Server, X-Powered-By, CF-Ray, Strict-Transport-Security, Set-Cookie)</li>
+    </ul>
+    <p>Headers are scanned by <code>scanHeaders()</code> which checks <code>Set-Cookie</code> for session tokens and API keys embedded in cookie values.</p>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ PATH SCAN -->
+  <section id="path-scan">
+    <h2>Path Scan Loop (main.go:5460)</h2>
+    <p>After crawling, a consolidated <code>commonPaths</code> slice is assembled from all enabled scanners. Each path is probed concurrently (goroutine-per-path, <code>sync.WaitGroup</code> controlled). On a 200/206 response the body is dispatched:</p>
+
+    <pre><code><span class="kw">if</span> strings.Contains(pth, <span class="str">".git/config"</span>) {
+    a.extractGitCredentials(string(b), fullURL)    <span class="cm">// git-specific parser</span>
+} <span class="kw">else</span> {
+    a.checkAndSaveKeys(string(b), fullURL)          <span class="cm">// main credential detector</span>
+}
+
+<span class="cm">// Post-body hooks — fire regardless of which branch above ran</span>
+<span class="kw">if</span> GPLScan &amp;&amp; isGraphQL(pth) { <span class="kw">go</span> a.probeGraphQLIntrospection(fullURL) }
+<span class="kw">if</span> LibScan &amp;&amp; isPackageManifest(pth) {
+    <span class="kw">go</span> a.checkPackageManifestCVEs(content, fullURL, pth)
+    <span class="kw">go</span> a.checkNPMSupplyChain(content, fullURL, pth)
+}</code></pre>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ SCANNERS -->
+  <section>
+    <h2>Scanners</h2>
+
+    <div class="card" id="js-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>JS Scanner <code>js_scan</code></h4></div>
+      <p>Extracts all <code>&lt;script src="…"&gt;</code> references from the crawled HTML, fetches each <code>.js</code> file (up to 128 KB), passes content through <code>checkAndSaveKeys</code>, then recursively extracts sub-<code>script</code> references up to 10 per file. Also follows <code>//# sourceMappingURL=</code> to fetch the corresponding <code>.map</code> file and re-scans the original pre-minified sources.</p>
+      <p>JS SAST patterns (<code>eval</code>, <code>innerHTML</code>, <code>child_process.exec</code>, prototype pollution, etc.) run on the same content via <code>checkJSSAST()</code>.</p>
+      <div class="meta">
+        <span>Output: <span class="file-chip">js_sast_findings.txt</span></span>
+        <span>Hook: <code>main.go:5486</code></span>
+      </div>
+    </div>
+
+    <div class="card" id="jsext-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>JS Extended <code>js_extended_scan</code></h4></div>
+      <p>Scans raw page HTML for credentials embedded in <code>&lt;script&gt;</code> blocks, data attributes, <code>window.__NEXT_DATA__</code>, and similar inline JS. Calls <code>checkAndSaveKeys(htmlBody, mainURL)</code> directly without any path probing.</p>
+      <div class="meta"><span>Hook: <code>main.go:5482</code></span></div>
+    </div>
+
+    <div class="card" id="config-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>Config File Scanner <code>config_file_scan</code></h4></div>
+      <p>Probes 30+ well-known config paths. Key groups:</p>
+      <ul style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li><strong>Env files:</strong> <code>/.env</code>, <code>/.env.production</code>, <code>/.env.local</code>, <code>/config/.env</code></li>
+        <li><strong>Auth stores:</strong> <code>/.npmrc</code>, <code>/.pypirc</code>, <code>/pip.conf</code>, <code>/.yarnrc</code></li>
+        <li><strong>Swagger/OpenAPI:</strong> <code>/swagger.json</code>, <code>/openapi.json</code>, <code>/api-docs</code>, <code>/v1-v3/swagger.json</code></li>
+        <li><strong>CI/CD:</strong> <code>/.circleci/config.yml</code>, <code>/Jenkinsfile</code>, <code>/.gitlab-ci.yml</code>, <code>/.github/workflows/deploy.yml</code>, <code>/bitbucket-pipelines.yml</code></li>
+        <li><strong>Source maps:</strong> <code>/static/js/main.js.map</code>, <code>/bundle.js.map</code></li>
+      </ul>
+      <div class="meta"><span>Hook: <code>main.go:5608</code></span></div>
+    </div>
+
+    <div class="card" id="backup-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>Backup File Scanner <code>backup_file_scan</code></h4></div>
+      <p>Appends backup suffixes (<code>.bak</code>, <code>.old</code>, <code>.orig</code>, <code>~</code>, <code>.copy</code>, <code>.backup</code>, <code>.save</code>) to every path found during crawling. Also directly probes:</p>
+      <ul style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li><strong>.DS_Store:</strong> <code>/.DS_Store</code>, <code>/public/.DS_Store</code>, <code>/static/.DS_Store</code>, <code>/assets/.DS_Store</code></li>
+        <li><strong>Terraform state:</strong> <code>/terraform.tfstate</code>, <code>/terraform.tfstate.backup</code>, <code>/.terraform/terraform.tfstate</code>, <code>/infra/terraform.tfstate</code>, <code>/deploy/terraform.tfstate</code></li>
+      </ul>
+      <p>.DS_Store hits trigger <code>extractDSStoreFilenames()</code> which parses the binary format to extract a server directory listing. Terraform state hits trigger <code>parseTerraformStateContent()</code> which walks the JSON tree.</p>
+      <div class="meta">
+        <span>Output: <span class="file-chip">ds_store_found.txt</span> <span class="file-chip">ds_store_paths.txt</span> <span class="file-chip">terraform_state_found.txt</span></span>
+      </div>
+    </div>
+
+    <div class="card" id="lib-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>LIB Scanner <code>lib_scan</code></h4></div>
+      <p>Fetches 17 package manifest paths including <code>/package.json</code>, <code>/requirements.txt</code>, <code>/go.mod</code>, <code>/Gemfile.lock</code>, <code>/composer.json</code>, <code>/Pipfile.lock</code>, <code>/pyproject.toml</code>. Content passes through <code>checkAndSaveKeys</code> (credential regex) and three additional async hooks:</p>
+      <ol style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li><strong>OSV CVE check</strong> — parses versions, queries <code>api.osv.dev/v1/querybatch</code></li>
+        <li><strong>npm supply chain</strong> — typosquat + license + registry age/R2S (package.json only)</li>
+        <li><strong>Credential regex</strong> — catches hardcoded tokens in manifest fields</li>
+      </ol>
+      <div class="meta">
+        <span>Output: <span class="file-chip">cve_found.txt</span> <span class="file-chip">npm_supply_chain.txt</span> <span class="file-chip">license_issues.txt</span></span>
+      </div>
+    </div>
+
+    <div class="card" id="nvca-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>NVCA Scanner <code>nvca_scan</code></h4></div>
+      <p>Targets Node/Vue/Next/Nuxt build artefacts: <code>/_next/static/chunks/pages/_app.js</code>, <code>/_nuxt/config.js</code>, React <code>/build/static/js/main.js</code>, Angular <code>/main.*.js</code>. These bundles often contain runtime config objects with API keys compiled in at build time.</p>
+    </div>
+
+    <div class="card" id="gpl-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>GPL (GraphQL) Scanner <code>gpl_scan</code></h4></div>
+      <p>On any path containing <code>graphql</code>, <code>/gql</code>, or literally <code>/query</code>, POSTs a standard introspection query (<code>{ __schema { types { name } } }</code>). A successful response is saved to <code>graphql_found.txt</code> along with the full type list — which often reveals internal resolver names and business logic fields.</p>
+      <div class="meta"><span>Output: <span class="file-chip">graphql_found.txt</span></span></div>
+    </div>
+
+    <div class="card" id="gitconfig-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>Git Config Scanner <code>git_config_scan</code></h4></div>
+      <p>Fetches <code>/.git/config</code> and <code>/.gitconfig</code>. The dedicated <code>extractGitCredentials()</code> parser (rather than <code>checkAndSaveKeys</code>) extracts remote URLs in the form <code>https://token@github.com/org/repo</code>, strips and validates the token.</p>
+      <p>ScanRepo uses <code>git clone --no-single-branch --depth 50</code> so the last 50 commits across all branches are checked — catching keys that were committed then reverted.</p>
+      <div class="meta"><span>Output: <span class="file-chip">git_credentials_found.txt</span></span></div>
+    </div>
+
+    <div class="card" id="docker-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>Docker Compose Scanner <code>docker_scan</code></h4></div>
+      <p>Probes <code>/docker-compose.yml</code>, <code>/docker-compose.yaml</code>, <code>/docker-compose.prod.yml</code>, and <code>/.docker/docker-compose.yml</code>. The YAML is passed through <code>checkAndSaveKeys</code> which extracts <code>environment:</code> block values via the same credential regex battery.</p>
+    </div>
+
+    <div class="card" id="phpinfo-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>PHP / phpinfo Scanner <code>phpinfo_scan</code></h4></div>
+      <p>Probes 8 common phpinfo paths. The HTML table parser <code>extractValueFromPhpInfoTable()</code> specifically extracts <code>mysql.default_password</code>, <code>mysqli.default_pw</code>, and any environment variable rows — phpinfo leaks the full <code>$_SERVER</code> superglobal including credentials passed as env vars to the PHP process.</p>
+    </div>
+
+    <div class="card" id="ssh-scan">
+      <div class="card-header"><span class="badge badge-live">LIVE</span><h4>SSH Key Scanner <code>ssh_scan</code></h4></div>
+      <p>Probes paths like <code>/.ssh/id_rsa</code>, <code>/.ssh/id_ed25519</code>, <code>/.ssh/id_ecdsa</code>. Detects the PEM preamble <code>-----BEGIN * PRIVATE KEY-----</code>. Optionally extracts the key fingerprint for identification without storing the key material in plaintext output.</p>
+      <div class="meta"><span>Output: <span class="file-chip">ssh_keys_found.txt</span></span></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ DETECTORS -->
+  <section>
+    <h2>Gap-Closer Detectors</h2>
+    <p>These run <em>after</em> the main regex battery, all asynchronously. They catch credential classes that don't match any fixed pattern.</p>
+
+    <div class="card" id="entropy">
+      <div class="card-header"><span class="badge badge-new">DETECTOR</span><h4>Shannon Entropy Detection</h4></div>
+      <p>Scans for <code>key|token|secret|auth|api|credential = "HIGH_ENTROPY_STRING"</code> patterns. Any value ≥ 4.5 bits/character (calculated via Shannon's formula over the character frequency distribution) that isn't already matched by a named regex is saved as a high-entropy finding.</p>
+      <p>The threshold of 4.5 bits/char catches Base64-encoded 128-bit+ keys while excluding natural-language values and UUIDs. Pure random hex (5.0 bits/char) and Base64 (5.95 bits/char theoretical) both pass the gate comfortably.</p>
+      <div class="meta"><span>Output: <span class="file-chip">entropy_found.txt</span></span> <span>Gate: not called recursively (<code>sourceURL</code> check)</span></div>
+    </div>
+
+    <div class="card" id="webhooks">
+      <div class="card-header"><span class="badge badge-new">DETECTOR</span><h4>Webhook URL Extraction + Validation</h4></div>
+      <p>Three regexes match inline webhook URLs:</p>
+      <ul style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li><strong>Slack:</strong> <code>hooks.slack.com/services/T.../B.../...</code> — validated by POSTing <code>{"text":"."}</code> and checking for response <code>"ok"</code></li>
+        <li><strong>Discord:</strong> <code>discord.com/api/webhooks/ID/TOKEN</code> — validated by GET 200 response</li>
+        <li><strong>PagerDuty:</strong> <code>events.pagerduty.com/integration/.../enqueue</code> — saved, not live-tested (would page someone)</li>
+      </ul>
+      <div class="meta"><span>Output: <span class="file-chip">slack_webhook_found.txt</span> <span class="file-chip">valid_slack_webhook.txt</span> <span class="file-chip">discord_webhook_found.txt</span> <span class="file-chip">pagerduty_webhook_found.txt</span></span></div>
+    </div>
+
+    <div class="card" id="firebase">
+      <div class="card-header"><span class="badge badge-new">DETECTOR</span><h4>Firebase Open Rules Testing</h4></div>
+      <p>Detects Firebase config blocks in JS source (pattern: <code>projectId: "..."</code>). For each discovered project ID, two goroutines probe unauthenticated access:</p>
+      <ol style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li><strong>Firestore REST:</strong> <code>GET firestore.googleapis.com/v1/projects/{id}/databases/(default)/documents</code> without auth header — open if 200</li>
+        <li><strong>Realtime DB:</strong> <code>GET {id}.firebaseio.com/.json</code> and <code>{id}-default-rtdb.firebaseio.com/.json</code> — open if non-401</li>
+      </ol>
+      <div class="meta"><span>Output: <span class="file-chip">firebase_open_found.txt</span></span></div>
+    </div>
+
+    <div class="card" id="tfstate">
+      <div class="card-header"><span class="badge badge-new">DETECTOR</span><h4>Terraform State JSON Walker</h4></div>
+      <p>Triggered when <code>fetchedContent</code> contains both <code>"terraform_version"</code> and <code>"resources"</code> strings (fast pre-check before full parse). Regex-walks the JSON extracting values from any attribute key matching: <code>access_key</code>, <code>secret_key</code>, <code>password</code>, <code>private_key_pem</code>, <code>service_account_key</code>, <code>auth_token</code>, <code>client_secret</code>, <code>sas_token</code>.</p>
+      <p>Each extracted value is re-dispatched to <code>checkAndSaveKeys</code> with a <code>(tfstate:attrKey)</code> suffix in the URL — this triggers the full validator battery on each found value, and the suffix prevents infinite recursion back into the Terraform parser.</p>
+      <div class="meta"><span>Output: <span class="file-chip">terraform_state_found.txt</span></span></div>
+    </div>
+
+    <div class="card" id="dss">
+      <div class="card-header"><span class="badge badge-new">DETECTOR</span><h4>.DS_Store Binary Parser</h4></div>
+      <p><code>checkAndSaveKeys</code> early-returns for .DS_Store URLs, handing off to <code>extractDSStoreFilenames()</code> which scans the binary for printable ASCII strings of length 4–255 characters (the format stores filename strings as Pascal-length-prefixed records). Result: a full server directory listing extracted from a single 10–30 KB binary file — invaluable for discovering hidden paths to probe.</p>
+      <div class="meta"><span>Output: <span class="file-chip">ds_store_found.txt</span> <span class="file-chip">ds_store_paths.txt</span></span></div>
+    </div>
+
+    <div class="card" id="fpp">
+      <div class="card-header"><span class="badge badge-new">FPP</span><h4>False-Positive Prevention (isFalsePositiveCred)</h4></div>
+      <p>Before any credential candidate is sent to a validator, <code>isFalsePositiveCred()</code> gates it. Current filter rules:</p>
+      <ul style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li>Substring match against 30+ placeholder terms: <code>example</code>, <code>changeme</code>, <code>placeholder</code>, <code>your_</code>, <code>${</code>, <code>%(</code>, <code>todo</code>, <code>replace_me</code>, etc.</li>
+        <li>All-same-character strings (e.g. <code>AAAAAAAAAAAAAAAA</code>)</li>
+        <li>Pure numeric strings ≥ 8 digits</li>
+        <li>UUID-format strings (<code>/^[0-9a-f]{8}-…/</code>) — valid format but not API keys</li>
+        <li>Known example domain fragments: <code>example.com</code>, <code>test.com</code>, <code>localhost</code></li>
+      </ul>
+      <p>Additionally, <code>isTestFilePath(sourceURL)</code> detects test/spec/fixture file paths — findings from these sources should be treated with lower confidence.</p>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ VALIDATORS -->
+  <section id="validators">
+    <h2>Validators</h2>
+    <p>Every candidate key passes through <code>KnownKeys.LoadOrStore</code> first — duplicates are discarded before any network call is made. Validators are live API calls with timeouts and 429-retry logic.</p>
+
+    <div class="card" id="aws-val">
+      <div class="card-header"><span class="badge badge-crit">AWS</span><h4>AWS Validator — Deep Scan</h4></div>
+      <p><strong>Stage 1 — Identity:</strong> <code>sts:GetCallerIdentity</code> — confirms key is valid, extracts ARN, account ID, user/role name.</p>
+      <p><strong>Stage 2 — IAM Audit:</strong> <code>iam:GetUser</code> + <code>iam:ListAttachedUserPolicies</code> + <code>iam:ListUserPolicies</code> — builds a policy summary showing what the key can actually do.</p>
+      <p><strong>Stage 3 — Parallel service probes</strong> (all async):</p>
+      <ul style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li><strong>SES:</strong> <code>ses:GetSendQuota</code> across all regions — identifies sending limits (high quota = high spam value)</li>
+        <li><strong>SNS:</strong> <code>sns:GetSMSSandboxAccountStatus</code> + spending limits</li>
+        <li><strong>S3:</strong> <code>s3:ListBuckets</code> — full bucket list with public-access flags</li>
+        <li><strong>SSM:</strong> <code>ssm:DescribeParameters</code> — lists Parameter Store entries (often contain secrets)</li>
+        <li><strong>Fargate:</strong> <code>ecs:DescribeClusters</code> across regions — detects running workloads</li>
+        <li><strong>Federation URL:</strong> signs a temporary console URL valid for 12 hours — direct web console access</li>
+      </ul>
+      <p><strong>Stage 4 — IAM Role Escalation:</strong> <code>iam:ListRoles</code> (max 100) then <code>sts:AssumeRole</code> per role — finds privilege escalation paths where a limited key can assume an admin role.</p>
+      <div class="meta"><span>Output: <span class="file-chip">aws_valid.txt</span> <span class="file-chip">aws_deep_scan.txt</span> <span class="file-chip">aws_ssm.txt</span> <span class="file-chip">aws_iam_escalation.txt</span></span></div>
+    </div>
+
+    <div class="card" id="email-val">
+      <div class="card-header"><span class="badge badge-high">EMAIL</span><h4>Email API Validators</h4></div>
+      <p>All email validators follow the same pattern: authenticate with the API, extract sending quota/limits, then (if enabled) send a probe email to a controlled address. Validated providers:</p>
+      <div class="grid-3" style="margin-top: 10px;">
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">SendGrid</strong><br><code>/v3/user/profile</code> + quota</div>
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">Mailgun</strong><br><code>/v3/domains</code> + sending limits</div>
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">Brevo (Sendinblue)</strong><br><code>/v3/account</code> + plan details</div>
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">Mandrill</strong><br><code>/api/1.0/users/info</code></div>
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">MailerSend</strong><br><code>/v1/me</code> token info</div>
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">Mailtrap / Mailjet</strong><br>SMTP auth test</div>
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">SparkPost</strong><br><code>/api/v1/account</code></div>
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">Plivo</strong><br><code>/v1/Account/{id}/</code></div>
+        <div style="font-size: 12px; color: var(--text-muted)"><strong style="color:var(--text)">Postmark</strong><br><code>/account</code> API</div>
+      </div>
+    </div>
+
+    <div class="card" id="ai-val">
+      <div class="card-header"><span class="badge badge-high">AI</span><h4>AI Key Validators</h4></div>
+      <p><strong>OpenAI:</strong> <code>GET /v1/models</code> — a 200 response confirms the key works. Org ID, model list, and usage tier are extracted.</p>
+      <p><strong>Anthropic:</strong> <code>POST /v1/messages</code> with a 1-token prompt — validates the key is active and has API access (not just an account key).</p>
+      <p>Both validators respect <code>AIAll</code> flag which runs all AI validators even if the specific flag is off.</p>
+    </div>
+
+    <div class="card" id="comm-val">
+      <div class="card-header"><span class="badge badge-high">COMMS</span><h4>Communications &amp; Payments</h4></div>
+      <p><strong>Twilio:</strong> <code>GET /2010-04-01/Accounts/{SID}</code> — confirms SID+auth token pair. Extracts account status and friendly name.</p>
+      <p><strong>Stripe:</strong> Detects both <code>sk_live_</code> (secret) and <code>pk_live_</code> (publishable) keys. Secret keys call <code>/v1/balance</code> to confirm billing access.</p>
+      <p><strong>Telnyx / MessageBird / Nexmo:</strong> Each calls its respective account info endpoint; validates the key class (test vs. live) from the response.</p>
+      <p><strong>Slack:</strong> <code>auth.test</code> API call — confirms token, extracts workspace name, team ID, and bot user ID. <code>xoxb-</code> (bot) and <code>xoxp-</code> (user) tokens are handled differently.</p>
+      <p><strong>Discord:</strong> <code>GET /api/users/@me</code> — bot token validation. Also detects webhook tokens separately via the webhook detector.</p>
+    </div>
+
+    <div class="card" id="github-val">
+      <div class="card-header"><span class="badge badge-high">GITHUB</span><h4>GitHub Token Validator</h4></div>
+      <p>Calls <code>GET /user</code> with the token. On success:</p>
+      <ol style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li>Extracts <code>X-OAuth-Scopes</code> header — the full list of granted permissions (e.g. <code>repo, admin:org, workflow</code>)</li>
+        <li>Risk-tiers the scopes: any of <code>admin:org</code>, <code>delete_repo</code>, <code>workflow</code>, <code>admin:repo_hook</code> → <strong>🔴 HIGH-VALUE</strong></li>
+        <li>If <code>github_token_deep_scan</code> enabled: enumerates all repos the token can see, then calls <code>ScanRepo()</code> on each — git clone at depth 50 across all branches</li>
+      </ol>
+      <div class="meta"><span>Output: <span class="file-chip">valid_github.txt</span></span></div>
+    </div>
+
+    <div class="card" id="crypto-val">
+      <div class="card-header"><span class="badge badge-crit">CRYPTO</span><h4>Crypto Wallet Validator</h4></div>
+      <p>Detects Ethereum private keys (64-char hex, often preceded by <code>0x</code>). For each candidate:</p>
+      <ol style="margin: 6px 0 6px 18px; color: var(--text-muted); font-size: 12.5px;">
+        <li>Derives the public address using <code>ethAddressFromPrivKey()</code> (secp256k1 ECDSA, Keccak-256 hash)</li>
+        <li>Queries <code>ethWalletStatus(address)</code> against a public Ethereum RPC endpoint — returns ETH balance and nonce</li>
+        <li>Non-zero balance wallets generate a Telegram CRITICAL alert</li>
+      </ol>
+      <div class="alert alert-warn" style="margin-top: 8px;">Findings are displayed only. No transactions are ever initiated. The private key material is only used for address derivation.</div>
+      <div class="meta"><span>Output: <span class="file-chip">valid_crypto.txt</span></span></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ SUPPLY CHAIN -->
+  <section>
+    <h2>Supply Chain Modules</h2>
+
+    <div class="card" id="osv">
+      <div class="card-header"><span class="badge badge-new">NEW</span><h4>OSV CVE Integration — <code>detectors_osv_cve.go</code></h4></div>
+      <p>Runs when a package manifest is fetched and <code>lib_scan</code> is enabled. Parses exact package versions and queries <code>api.osv.dev/v1/querybatch</code> (free, no auth, up to 200 packages per batch).</p>
+      <p><strong>Supported ecosystems:</strong> npm (<code>package.json</code>, <code>yarn.lock</code>, <code>package-lock.json</code>), PyPI (<code>requirements.txt</code>, <code>Pipfile.lock</code>, <code>pyproject.toml</code>), Go (<code>go.mod</code>), Packagist (<code>composer.json</code>), RubyGems (<code>Gemfile.lock</code>)</p>
+      <p><strong>Severity classification</strong> from CVSS vector: counts <code>:H</code> (High) and <code>:C</code> (Complete) impact markers. Network-reachable (AV:N) + all-high impacts → CRITICAL. Three high markers → HIGH. Others → MEDIUM/LOW.</p>
+      <p>Telegram alerts fire for CRITICAL and HIGH findings only (capped at 10 lines per message to stay within Telegram's 4096-char limit).</p>
+      <div class="meta"><span>Output: <span class="file-chip">cve_found.txt</span></span></div>
+    </div>
+
+    <div class="card" id="supply-chain">
+      <div class="card-header"><span class="badge badge-new">NEW</span><h4>npm Supply Chain — <code>detectors_npm_supply_chain.go</code></h4></div>
+      <p>Three checks on every fetched <code>package.json</code>:</p>
+      <p><strong>1. Typosquat Detection</strong> — Levenshtein edit distance ≤ 1 (or ≤ 2 for short names ≤ 8 chars) against a curated list of 80 commonly impersonated npm packages. Runs locally with no API calls — result is immediate.</p>
+      <p><strong>2. npm Registry Metadata</strong> (async, fires only for typosquat hits) — queries <code>registry.npmjs.org/{package}</code> for: package age (flag if &lt; 30 days old), maintainer count (flag if zero), missing repository URL.</p>
+      <p><strong>3. R2S Passive</strong> — for packages that declare a repository URL, sends a HEAD request to verify the source code repository is reachable. A 404/410 response means the declared source no longer exists — the package may have been taken over or the repo deleted post-publish.</p>
+      <div class="meta"><span>Output: <span class="file-chip">npm_supply_chain.txt</span></span></div>
+    </div>
+
+    <div class="card" id="js-sast">
+      <div class="card-header"><span class="badge badge-new">NEW</span><h4>JS SAST Patterns — <code>detectors_js_sast.go</code></h4></div>
+      <p>Advanced JS pattern analysis beyond credential hunting. Not a full AST (that requires Semgrep integration — Phase 2). These patterns have very low false-positive rates and fire on real vulnerabilities:</p>
+      <table style="margin-top: 10px;">
+        <tr><th>Pattern</th><th>Severity</th><th>What it catches</th></tr>
+        <tr><td>eval() dynamic input</td><td><span class="badge badge-crit">CRITICAL</span></td><td>eval() with request/user/cmd variables — RCE sink</td></tr>
+        <tr><td>new Function() dynamic</td><td><span class="badge badge-crit">CRITICAL</span></td><td>Dynamic function construction — equivalent to eval</td></tr>
+        <tr><td>child_process.exec()</td><td><span class="badge badge-crit">CRITICAL</span></td><td>Shell command execution — command injection sink</td></tr>
+        <tr><td>Hardcoded private key</td><td><span class="badge badge-crit">CRITICAL</span></td><td>PEM preamble compiled into a JS bundle</td></tr>
+        <tr><td>innerHTML/outerHTML =</td><td><span class="badge badge-high">HIGH</span></td><td>DOM XSS sink from non-literal assignment</td></tr>
+        <tr><td>document.write()</td><td><span class="badge badge-high">HIGH</span></td><td>Legacy DOM XSS sink</td></tr>
+        <tr><td>__proto__ mutation</td><td><span class="badge badge-high">HIGH</span></td><td>Prototype pollution attack vector</td></tr>
+        <tr><td>setTimeout(string…)</td><td><span class="badge badge-high">HIGH</span></td><td>String-eval code injection via timer APIs</td></tr>
+        <tr><td>location.href = variable</td><td><span class="badge badge-med">MEDIUM</span></td><td>Open redirect via unvalidated assignment</td></tr>
+        <tr><td>postMessage("*")</td><td><span class="badge badge-med">MEDIUM</span></td><td>Wildcard origin — cross-origin data exfiltration</td></tr>
+        <tr><td>process.env.VARNAME</td><td><span class="badge badge-med">MEDIUM</span></td><td>Server env variables compiled into client bundle</td></tr>
+        <tr><td>require(variable)</td><td><span class="badge badge-med">MEDIUM</span></td><td>Dynamic module loading — path manipulation risk</td></tr>
+      </table>
+      <p style="margin-top: 10px;">Minified files &gt; 256 KB with &lt; 50 newlines are skipped — one-liner bundles produce massive false-positive sets against these patterns.</p>
+      <div class="meta"><span>Output: <span class="file-chip">js_sast_findings.txt</span></span></div>
+    </div>
+
+    <div class="card" id="license">
+      <div class="card-header"><span class="badge badge-new">NEW</span><h4>License Compliance — embedded in supply chain module</h4></div>
+      <p>Checks the top-level <code>license</code> field of every fetched <code>package.json</code> against a blocklist of restrictive licenses. Supports both string format (<code>"license": "AGPL-3.0"</code>) and object format (<code>"license": {"type": "GPL-3.0"}</code>).</p>
+      <p>Flagged: <strong>AGPL-3.0</strong>, <strong>GPL-2/3.0</strong>, <strong>LGPL</strong>, <strong>SSPL-1.0</strong>, <strong>BUSL-1.1</strong>, <strong>Elastic License 2.0</strong>, <strong>CC-BY-NC</strong>, <strong>Commons Clause</strong></p>
+      <div class="meta"><span>Output: <span class="file-chip">license_issues.txt</span></span></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ OUTPUT -->
+  <section id="output-files">
+    <h2>Output Files</h2>
+    <p>All files are written to the scanner's working directory (configured in <code>config.json</code>). Format is one line per finding: <code>sourceURL | field=value | ...</code></p>
+
+    <h3>Credential Findings</h3>
+    <table>
+      <tr><th>File</th><th>Contents</th></tr>
+      <tr><td>aws_valid.txt</td><td>Validated AWS key pairs with ARN, account ID, IAM summary</td></tr>
+      <tr><td>aws_deep_scan.txt</td><td>Full service audit: SES quotas, SNS limits, S3 buckets, SSM params, Fargate clusters</td></tr>
+      <tr><td>aws_iam_escalation.txt</td><td>Roles assumeable by validated key — privilege escalation paths</td></tr>
+      <tr><td>valid_openai.txt</td><td>Live OpenAI keys with org ID and model access</td></tr>
+      <tr><td>valid_anthropic.txt</td><td>Live Anthropic keys</td></tr>
+      <tr><td>valid_stripe.txt</td><td>Live Stripe secret keys with balance data</td></tr>
+      <tr><td>valid_github.txt</td><td>GitHub tokens with username and scope list</td></tr>
+      <tr><td>valid_sendgrid.txt</td><td>Live SendGrid keys with sending quota</td></tr>
+      <tr><td>valid_mailgun.txt / valid_brevo.txt / valid_mailersend.txt</td><td>Email API keys — provider, domain list, daily quota</td></tr>
+      <tr><td>valid_twilio.txt</td><td>Twilio credentials with account status</td></tr>
+      <tr><td>valid_crypto.txt</td><td>Ethereum private keys with derived address and ETH balance</td></tr>
+      <tr><td>valid_slack.txt / valid_discord_bot.txt</td><td>Platform bot tokens with workspace/server name</td></tr>
+      <tr><td>smtp_valid.txt</td><td>SMTP credential pairs that successfully authenticated</td></tr>
+      <tr><td>ssh_keys_found.txt</td><td>RSA/EC/ED25519 private key preambles with source URL</td></tr>
+      <tr><td>git_credentials_found.txt</td><td>Git remote URLs with embedded tokens</td></tr>
+      <tr><td>entropy_found.txt</td><td>High-entropy (≥4.5 bits/char) credential-context strings not matched by named patterns</td></tr>
+    </table>
+
+    <h3>Security Findings</h3>
+    <table>
+      <tr><th>File</th><th>Contents</th></tr>
+      <tr><td>cve_found.txt</td><td>Known CVEs per package version: pkg@ver | vuln=CVE-XXXX | severity | summary</td></tr>
+      <tr><td>js_sast_findings.txt</td><td>Dangerous JS patterns: eval, XSS sinks, prototype pollution, etc.</td></tr>
+      <tr><td>npm_supply_chain.txt</td><td>Typosquat hits, new packages, zero-maintainer, dead repository URLs</td></tr>
+      <tr><td>license_issues.txt</td><td>Copyleft/restrictive licenses detected in package.json</td></tr>
+      <tr><td>firebase_open_found.txt</td><td>Firestore or Realtime DB accessible without authentication</td></tr>
+      <tr><td>terraform_state_found.txt</td><td>Credentials extracted from exposed Terraform state JSON</td></tr>
+      <tr><td>ds_store_found.txt / ds_store_paths.txt</td><td>.DS_Store URL and extracted directory listing</td></tr>
+      <tr><td>graphql_found.txt</td><td>GraphQL endpoints with introspection enabled + full type list</td></tr>
+      <tr><td>aws_ses_potential_unverified.txt</td><td>SES accounts with unverified sending domains (misconfiguration)</td></tr>
+    </table>
+
+    <h3>Webhook Findings</h3>
+    <table>
+      <tr><th>File</th><th>Contents</th></tr>
+      <tr><td>slack_webhook_found.txt / valid_slack_webhook.txt</td><td>Slack webhook URLs — found vs. live-validated</td></tr>
+      <tr><td>discord_webhook_found.txt / valid_discord_webhook.txt</td><td>Discord webhook URLs — found vs. live-validated</td></tr>
+      <tr><td>pagerduty_webhook_found.txt</td><td>PagerDuty integration URLs (not live-tested)</td></tr>
+    </table>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ TELEGRAM -->
+  <section id="telegram">
+    <h2>Telegram Alert System</h2>
+    <p>All high-value findings trigger an async Telegram message via Bot API. Key design decisions:</p>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><h4>Deduplication</h4></div>
+        <p>Each outbound message is SHA-256 hashed. A local <code>sync.Map</code> (<code>telegramSent</code>) prevents the same message from being sent twice within a session. Duplicate messages are logged with <code>pterm.Debug</code> as <code>[TELEGRAM SKIP]</code>.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><h4>Alert Tiers</h4></div>
+        <p>CRITICAL: AWS valid, crypto wallet balance, eval/exec SAST, IAM escalation, new CVE CRITICAL.<br>HIGH: Email API valid, GitHub HIGH-VALUE scope, typosquat hit, new package (&lt;30d), R2S 404.<br>MEDIUM: SMTP valid, open Firebase, Terraform state, webhook validated.</p>
+      </div>
+    </div>
+
+    <h3>Improving Alert Logic</h3>
+    <div class="alert alert-warn">
+      <strong>Current gap:</strong> All valid finds generate a Telegram message regardless of scan volume. At scale (1000+ targets/hour), this floods the channel. A recommended improvement is a <strong>batching layer</strong>: accumulate findings per-scan-session, flush a summary every N findings or every T seconds.
+    </div>
+    <div class="alert alert-info">
+      <strong>Dedup note:</strong> The in-session hash dedup prevents repeat alerts for the same key across different pages of the same target, but does NOT persist across binary restarts. If the scanner restarts mid-run, the same key found again will re-alert.
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ IMPROVEMENT IDEAS -->
+  <section>
+    <h2>Logic Improvement Opportunities</h2>
+    <p>Areas identified for the next iteration:</p>
+
+    <h3>Detection Quality</h3>
+    <div class="card">
+      <div class="card-header"><h4>1. Confidence Scoring</h4></div>
+      <p>Currently all credential candidates are treated equally. Adding a confidence tier (1–5) based on: source file type (config &gt; JS bundle &gt; minified), match pattern specificity (exact prefix match &gt; generic regex), proximity to other credentials (co-location boosts confidence) would let the UI surface the highest-confidence finds first.</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><h4>2. Context Window for FPP</h4></div>
+      <p>The current FPP checks the credential value in isolation. Adding a ±3-line context check — if the surrounding lines contain <code>test</code>, <code>mock</code>, <code>fake</code>, <code>example</code> — would catch test credentials embedded in real files without being in a test-path URL.</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><h4>3. Full AST JS SAST (Phase 2)</h4></div>
+      <p>The current JS SAST module uses high-signal regexes. A real AST-based approach would require either (a) bundling a Semgrep binary with the scanner and running it as a subprocess, or (b) using a Go-native JS parser (e.g. <code>github.com/nicholasgasior/gsfmt</code> or calling Node as a subprocess). This would enable taint tracking from user-controlled sources to dangerous sinks.</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><h4>4. OSV Cache Persistence</h4></div>
+      <p>Currently the OSV CVE check has no cross-session cache. A simple local SQLite or JSON file mapping <code>ecosystem:pkg@ver → []CVE-IDs</code> would avoid re-querying the same package across different targets in a long scan run.</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><h4>5. npm Supply Chain — Download Count Heuristic</h4></div>
+      <p>The registry API returns download statistics at <code>api.npmjs.org/downloads/point/last-month/{package}</code>. A package with &lt; 100 downloads/month that isn't a private internal package is significantly more suspicious than one with 10M+. Currently only checked for typosquat hits — could run on all dependencies.</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><h4>6. Telegram Alert Batching</h4></div>
+      <p>Add a channel-buffered goroutine that collects alerts and flushes them in digest format every 60 seconds or every 10 critical findings. This prevents alert fatigue on large scan runs and avoids hitting Telegram's rate limit (30 messages/second per bot).</p>
+    </div>
+  </section>
+
+</main>
+
+<script>
+  // Highlight active nav item based on scroll position
+  const sections = document.querySelectorAll('[id]');
+  const navLinks = document.querySelectorAll('nav a');
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        navLinks.forEach(l => l.classList.remove('active'));
+        const a = document.querySelector(`nav a[href="#${entry.target.id}"]`);
+        if (a) a.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

@@ -6,11 +6,11 @@ import (
 	"regexp"
 )
 
-// SparkPost API keys are 40-character lowercase hex strings. Validation
-// hits GET /api/v1/account with the key in the Authorization header
-// (no Bearer prefix — SparkPost uses raw-key auth).
-// Covers SPARKPOST_API_KEY, SPARKPOST_KEY, SP_API_KEY and bare sparkpost key context.
-var sparkpostPattern = regexp.MustCompile(`(?i)(?:sparkpost[_\-]?(?:api[_\-]?)?key|SP_API_KEY|SPARKPOST_KEY)["'\s:=]+([a-f0-9]{40})`)
+// SparkPost API keys are 40-character alphanumeric strings. TruffleHog production
+// detector uses [a-zA-Z0-9]{40} — hex-only was confirmed wrong by real key examples.
+// Covers SPARKPOST_API_KEY (canonical SDK env var), SPARKPOST_APIKEY (CLI variant),
+// SPARKPOST_KEY and bare sparkpost key context.
+var sparkpostPattern = regexp.MustCompile(`(?i)(?:SPARKPOST_API_KEY|SPARKPOST_APIKEY|sparkpost[_\-]?(?:api[_\-]?)?key|SPARKPOST_KEY)["'\s:=]+([a-zA-Z0-9]{40})`)
 
 // CheckSparkPost validates a SparkPost API key against the /account endpoint.
 // 200 = key is valid for the account; anything else = not confirmed.

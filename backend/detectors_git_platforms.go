@@ -8,14 +8,15 @@ import (
 	"regexp"
 )
 
-// GitLab personal access tokens carry the glpat- prefix which is globally
-// unique; no surrounding context is required to avoid false positives.
-var gitlabPattern = regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20}`)
+// GitLab personal access tokens carry the glpat- prefix. v2 tokens are exactly 20 chars;
+// v3 routable tokens (GitLab 16.x+) are 27-300+ chars and may contain dots.
+var gitlabPattern = regexp.MustCompile(`glpat-[A-Za-z0-9_.-]{20,300}`)
 
-// Bitbucket app passwords are prefixed with ATBB (32 chars following).
-// The context pattern covers env-file declarations like BB_APP_PASSWORD=...
-var bitbucketAppPasswordPattern = regexp.MustCompile(`ATBB[A-Za-z0-9]{28}`)
-var bitbucketContextPattern = regexp.MustCompile(`(?i)(?:bitbucket[_-]?(?:app[_-]?)?password|BB_APP_PASSWORD|BITBUCKET_APP_PASSWORD)\s*[:=]\s*["']?([A-Za-z0-9]{40,})["']?`)
+// Bitbucket: ATBB prefix was unconfirmed. New Bitbucket Cloud API tokens use ATAT prefix;
+// Atlassian account tokens (Jira/Confluence/Bitbucket) use ATATT3 prefix (~192 chars total).
+// ATAT prefix covers both since ATATT3 starts with ATAT and [A-Za-z0-9_-=] includes T3... chars.
+var bitbucketAppPasswordPattern = regexp.MustCompile(`ATAT[A-Za-z0-9_\-=]{28,200}`)
+var bitbucketContextPattern = regexp.MustCompile(`(?i)(?:bitbucket[_-]?(?:app[_-]?)?(?:password|token)|BB_APP_(?:PASSWORD|TOKEN)|BITBUCKET_(?:APP_PASSWORD|TOKEN))\s*[:=]\s*["']?([A-Za-z0-9_\-=]{28,})["']?`)
 
 // CheckGitLab validates a GitLab personal access token by hitting
 // GET /api/v4/user with the PRIVATE-TOKEN header. A 200 response

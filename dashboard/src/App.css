@@ -5833,3 +5833,22 @@
   font-size: .82rem;
   padding: .38rem .9rem;
 }
+.cred-meta-pill {
+  display: inline-block;
+  margin-left: 0.4em;
+  padding: 0.1em 0.45em;
+  border-radius: 4px;
+  background: rgba(251,191,36,0.15);
+  border: 1px solid rgba(251,191,36,0.3);
+  color: #fbbf24;
+  font-size: 0.68rem;
+  font-family: var(--mono, monospace);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.sub-bell {
+  margin-left: 0.3em;
+  font-size: 0.85em;
+  vertical-align: middle;
+  cursor: default;
+}

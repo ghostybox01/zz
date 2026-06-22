@@ -1,0 +1,1446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RavenX — Scanner Deep Dive</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+
+  :root {
+    --bg:        #0d0d0f;
+    --bg2:       #141418;
+    --bg3:       #1a1a20;
+    --border:    #2a2a35;
+    --gold:      #d4a847;
+    --gold-dim:  #8a6d2e;
+    --gold-glow: rgba(212,168,71,0.12);
+    --red:       #e05252;
+    --orange:    #e07a3a;
+    --yellow:    #d4c247;
+    --green:     #4caf70;
+    --blue:      #4a9edd;
+    --purple:    #9b6fe0;
+    --text:      #e8e8f0;
+    --text-dim:  #8888a0;
+    --text-faint:#444458;
+    --mono:      'JetBrains Mono', monospace;
+    --sans:      'Inter', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.65;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  .shell { display: flex; min-height: 100vh; }
+
+  .sidebar {
+    width: 240px;
+    min-width: 240px;
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+
+  .sidebar-header {
+    padding: 20px 16px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar-header .brand { font-size: 22px; margin-bottom: 6px; }
+  .sidebar-header h1 {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .sidebar-header p { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+
+  .scanner-nav { padding: 10px 8px; flex: 1; }
+
+  .nav-label {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 8px 8px 4px;
+  }
+
+  .nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 7px 10px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    border-radius: 6px;
+    text-align: left;
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-dim);
+    transition: all 0.15s;
+    margin-bottom: 1px;
+  }
+  .nav-btn:hover { background: var(--bg3); color: var(--text); }
+  .nav-btn.active {
+    background: var(--gold-glow);
+    color: var(--gold);
+    border: 1px solid var(--gold-dim);
+  }
+  .nav-btn .icon { font-size: 13px; width: 18px; text-align: center; }
+  .nav-btn .badge {
+    margin-left: auto;
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: var(--mono);
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .b-live    { background: rgba(76,175,112,0.2);  color: var(--green); }
+  .b-build   { background: rgba(212,168,71,0.2);  color: var(--gold); }
+  .b-plan    { background: rgba(74,158,221,0.2);  color: var(--blue); }
+  .b-diff    { background: rgba(224,82,82,0.2);   color: var(--red); }
+  .b-uniq    { background: rgba(155,111,224,0.2); color: var(--purple); }
+
+  .main { flex: 1; overflow-y: auto; padding: 0; }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  .page-header {
+    padding: 32px 40px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+    position: relative;
+    overflow: hidden;
+  }
+  .page-header::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at top left, var(--gold-glow), transparent 60%);
+    pointer-events: none;
+  }
+  .header-eyebrow {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-family: var(--mono);
+    margin-bottom: 8px;
+  }
+  .page-header h2 {
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .page-header .subtitle {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-top: 6px;
+    max-width: 680px;
+  }
+  .header-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .tag {
+    font-size: 10px;
+    font-family: var(--mono);
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .tag.gold { border-color: var(--gold-dim); color: var(--gold); }
+  .tag.green { border-color: #2d6b40; color: var(--green); }
+  .tag.red { border-color: #7a2929; color: var(--red); }
+  .tag.blue { border-color: #1e4d7a; color: var(--blue); }
+  .tag.purple { border-color: #5a3d8a; color: var(--purple); }
+
+  .content { padding: 32px 40px; max-width: 1000px; }
+
+  .section { margin-bottom: 36px; }
+  .section-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-family: var(--mono);
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 18px;
+  }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .card h4 {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card p, .card li { font-size: 12.5px; color: var(--text-dim); line-height: 1.6; }
+  .card ul { list-style: none; padding: 0; }
+  .card ul li::before { content: '→  '; color: var(--gold-dim); }
+  .card ul li { margin-bottom: 4px; }
+
+  .info-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .info-chip {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 12px;
+  }
+  .info-chip .lbl {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    margin-bottom: 2px;
+  }
+  .info-chip .val { font-weight: 600; color: var(--text); }
+  .info-chip .val.gold   { color: var(--gold); }
+  .info-chip .val.red    { color: var(--red); }
+  .info-chip .val.green  { color: var(--green); }
+  .info-chip .val.blue   { color: var(--blue); }
+  .info-chip .val.purple { color: var(--purple); }
+
+  .flow { display: flex; flex-direction: column; gap: 0; position: relative; }
+  .flow-step { display: flex; gap: 16px; align-items: flex-start; padding-bottom: 20px; position: relative; }
+  .flow-step:not(:last-child)::before {
+    content: '';
+    position: absolute;
+    left: 15px; top: 32px; bottom: 0;
+    width: 1px;
+    background: var(--border);
+  }
+  .step-num {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono);
+    font-size: 11px; font-weight: 700;
+    color: var(--gold);
+    flex-shrink: 0; z-index: 1;
+  }
+  .step-body h4 { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  .step-body p  { font-size: 12.5px; color: var(--text-dim); }
+
+  .sev {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 9px; font-weight: 700;
+    padding: 2px 6px; border-radius: 3px;
+    white-space: nowrap;
+  }
+  .sev-critical { background: rgba(224,82,82,0.2);  color: var(--red);    border: 1px solid rgba(224,82,82,0.3); }
+  .sev-high     { background: rgba(224,122,58,0.2); color: var(--orange); border: 1px solid rgba(224,122,58,0.3); }
+  .sev-medium   { background: rgba(212,194,71,0.2); color: var(--yellow); border: 1px solid rgba(212,194,71,0.3); }
+  .sev-low      { background: rgba(76,175,112,0.2); color: var(--green);  border: 1px solid rgba(76,175,112,0.3); }
+  .sev-info     { background: rgba(74,158,221,0.2); color: var(--blue);   border: 1px solid rgba(74,158,221,0.3); }
+  .sev-uniq     { background: rgba(155,111,224,0.2);color: var(--purple); border: 1px solid rgba(155,111,224,0.3); }
+
+  table.t { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.t th {
+    text-align: left; padding: 8px 12px;
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-faint); border-bottom: 1px solid var(--border);
+    font-family: var(--mono); font-weight: 600;
+  }
+  table.t td { padding: 10px 12px; border-bottom: 1px solid rgba(42,42,53,0.6); vertical-align: top; }
+  table.t tr:last-child td { border-bottom: none; }
+  table.t tr:hover td { background: var(--bg3); }
+  .mono { font-family: var(--mono); font-size: 11px; }
+
+  .code-block {
+    background: #0a0a0c;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: #a8b8d0;
+    overflow-x: auto;
+    line-height: 1.7;
+    margin: 10px 0;
+  }
+  .cm { color: #546878; }
+  .kw { color: #c792ea; }
+  .str { color: #c3e88d; }
+  .fn  { color: #82aaff; }
+  .num { color: #f78c6c; }
+
+  .callout {
+    border-radius: 7px;
+    padding: 14px 18px;
+    font-size: 12.5px;
+    margin-bottom: 14px;
+    display: flex;
+    gap: 12px;
+  }
+  .callout-warn { background: rgba(224,122,58,0.07); border: 1px solid rgba(224,122,58,0.25); }
+  .callout-info { background: rgba(74,158,221,0.07); border: 1px solid rgba(74,158,221,0.25); }
+  .callout-good { background: rgba(76,175,112,0.07); border: 1px solid rgba(76,175,112,0.25); }
+  .callout-diff { background: rgba(224,82,82,0.07);  border: 1px solid rgba(224,82,82,0.25); }
+  .callout-icon { font-size: 16px; flex-shrink: 0; }
+  .callout-body { color: var(--text-dim); }
+  .callout-body strong { color: var(--text); }
+
+  .hit-box {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: 0 8px 8px 0;
+    padding: 16px 18px;
+    margin-bottom: 12px;
+  }
+  .hit-box h4 { font-size: 12px; font-weight: 700; color: var(--green); margin-bottom: 6px; font-family: var(--mono); }
+  .hit-box p  { font-size: 12.5px; color: var(--text-dim); }
+  .hit-box .chain { font-family: var(--mono); font-size: 11px; color: var(--gold); margin-top: 8px; padding: 8px 10px; background: rgba(212,168,71,0.06); border-radius: 4px; }
+
+  .gap-box {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--red);
+    border-radius: 0 8px 8px 0;
+    padding: 16px 18px;
+    margin-bottom: 12px;
+  }
+  .gap-box h4 { font-size: 12px; font-weight: 700; color: var(--red); margin-bottom: 6px; font-family: var(--mono); }
+  .gap-box p  { font-size: 12.5px; color: var(--text-dim); }
+
+  .text { font-size: 13px; color: var(--text-dim); line-height: 1.7; margin-bottom: 14px; }
+  .text strong { color: var(--text); }
+
+  .ov-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 12px;
+  }
+  .ov-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .ov-card:hover { border-color: var(--gold-dim); background: var(--bg3); }
+  .ov-card .icon { font-size: 20px; margin-bottom: 8px; }
+  .ov-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .ov-card p  { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+  .ov-card .status { margin-top: 8px; }
+
+  .compare-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-family: var(--mono);
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 3px;
+  }
+  .cb-have { background: rgba(76,175,112,0.2); color: var(--green); }
+  .cb-build { background: rgba(212,168,71,0.2); color: var(--gold); }
+  .cb-gap  { background: rgba(224,82,82,0.2); color: var(--red); }
+  .cb-diff { background: rgba(74,158,221,0.2); color: var(--blue); }
+  .cb-uniq { background: rgba(155,111,224,0.2); color: var(--purple); }
+
+  .provider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+  }
+  .provider-chip {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+  .provider-chip .pname { color: var(--text); font-weight: 600; }
+  .provider-chip .pcat  { color: var(--text-faint); font-size: 9px; margin-top: 2px; }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--gold-dim); }
+
+  code { background: #1a1a20; padding: 1px 5px; border-radius: 2px; font-family: var(--mono); font-size: 11px; color: #c3e88d; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+<!-- SIDEBAR -->
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <div class="brand">🦅</div>
+    <h1>RavenX Scanner</h1>
+    <p>Deep Dive · All Scanner Modes</p>
+  </div>
+  <div class="scanner-nav">
+    <div class="nav-label">Overview</div>
+    <button class="nav-btn active" onclick="show('overview')"><span class="icon">⊞</span> Overview <span class="badge b-live">ALL</span></button>
+    <button class="nav-btn" onclick="show('compare')"><span class="icon">⚖</span> vs Niark <span class="badge b-diff">GAP</span></button>
+
+    <div class="nav-label" style="margin-top:10px;">Live — Discovery</div>
+    <button class="nav-btn" onclick="show('prefilter')"><span class="icon">⚡</span> Prefilter <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('gitconfig')"><span class="icon">🔷</span> Git Config <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('phpinfo')"><span class="icon">🐘</span> PHP Info <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('configfile')"><span class="icon">⚙</span> Config Files <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('backup')"><span class="icon">🗄</span> Backup Files <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('ssh')"><span class="icon">🔑</span> SSH Keys <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('docker')"><span class="icon">📦</span> Docker <span class="badge b-live">LIVE</span></button>
+
+    <div class="nav-label" style="margin-top:10px;">Live — Code Analysis</div>
+    <button class="nav-btn" onclick="show('js')"><span class="icon">🟨</span> JS Scanner <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('jsext')"><span class="icon">⭐</span> JS Extended <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('nvca')"><span class="icon">🖥</span> NVCA <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('gpl')"><span class="icon">🔗</span> GPL (GraphQL) <span class="badge b-live">LIVE</span></button>
+    <button class="nav-btn" onclick="show('lib')"><span class="icon">📋</span> LIB Scanner <span class="badge b-live">LIVE</span></button>
+
+    <div class="nav-label" style="margin-top:10px;">Live — Unique</div>
+    <button class="nav-btn" onclick="show('creds')"><span class="icon">🔐</span> Cred Validators <span class="badge b-uniq">40+</span></button>
+    <button class="nav-btn" onclick="show('smtp')"><span class="icon">📨</span> SMTP Validator <span class="badge b-uniq">LIVE</span></button>
+    <button class="nav-btn" onclick="show('webpanel')"><span class="icon">🖥</span> Web Panels <span class="badge b-live">LIVE</span></button>
+
+    <div class="nav-label" style="margin-top:10px;">Building Now</div>
+    <button class="nav-btn" onclick="show('path')"><span class="icon">🗂</span> Path Scanner <span class="badge b-build">BUILD</span></button>
+    <button class="nav-btn" onclick="show('fpp')"><span class="icon">🎯</span> FPP Scanner <span class="badge b-build">BUILD</span></button>
+    <button class="nav-btn" onclick="show('r2s')"><span class="icon">⚛</span> R2S (CVE RCE) <span class="badge b-build">BUILD</span></button>
+    <button class="nav-btn" onclick="show('org')"><span class="icon">🏢</span> ORG Scanner <span class="badge b-build">BUILD</span></button>
+
+    <div class="nav-label" style="margin-top:10px;">Planned</div>
+    <button class="nav-btn" onclick="show('planned')"><span class="icon">📐</span> Planned Scanners <span class="badge b-plan">8+</span></button>
+  </div>
+</nav>
+
+<!-- MAIN -->
+<main class="main">
+
+<!-- ══════════════════ OVERVIEW ══════════════════ -->
+<div id="page-overview" class="page active">
+  <div class="page-header">
+    <div class="header-eyebrow">RavenX · Full Scanner Inventory</div>
+    <h2>🦅 &nbsp;All Scanner Modes</h2>
+    <div class="subtitle">RavenX is a mass-scale web credential harvester and live validator. Unlike traditional SAST/SCA tools, it operates on URL lists — probing web-exposed files, extracting credentials, and validating them live against provider APIs. 40+ validators, 13 live scanner modes, 4 building, 8+ planned.</div>
+    <div class="header-tags">
+      <span class="tag gold">13 Live Scanners</span>
+      <span class="tag blue">4 Building Now</span>
+      <span class="tag">8+ Planned</span>
+      <span class="tag green">40+ Credential Validators</span>
+      <span class="tag purple">Unique: Live API Validation</span>
+    </div>
+  </div>
+  <div class="content">
+
+    <div class="section">
+      <div class="section-title">What Makes RavenX Different</div>
+      <div class="callout callout-good">
+        <div class="callout-icon">🟢</div>
+        <div class="callout-body"><strong>Core differentiator:</strong> RavenX doesn't just find credentials — it validates them live. When a Stripe key is found, RavenX hits the Stripe API and confirms whether it's active, what account it belongs to, and what permissions it has. No other open-source mass scanner does this across 40+ providers simultaneously.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Live Scanner Inventory</div>
+      <div class="ov-grid">
+        <div class="ov-card" onclick="show('prefilter')"><div class="icon">⚡</div><h4>Prefilter</h4><p>Mass .env probe at 500+ concurrent threads. Records 200-response hits for deep scan queue.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('gitconfig')"><div class="icon">🔷</div><h4>Git Config</h4><p>Exposed .git/config files with embedded auth tokens and CI credentials.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('phpinfo')"><div class="icon">🐘</div><h4>PHP Info</h4><p>phpinfo() pages dumping all ENV vars including API keys set server-side.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('configfile')"><div class="icon">⚙</div><h4>Config Files</h4><p>Web-accessible config paths across PHP, Python, Ruby, Node stacks.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('backup')"><div class="icon">🗄</div><h4>Backup Files</h4><p>.bak .old .orig copies of sensitive files forgotten on web servers.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('ssh')"><div class="icon">🔑</div><h4>SSH Keys</h4><p>Private key files exposed via web roots. PEM header confirmed before saving.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('docker')"><div class="icon">📦</div><h4>Docker</h4><p>docker-compose.yml files and exposed Docker daemon API on :2375.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('js')"><div class="icon">🟨</div><h4>JS Scanner</h4><p>Fetches linked .js files, runs credential regex battery against bundles.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('jsext')"><div class="icon">⭐</div><h4>JS Extended</h4><p>Inline &lt;script&gt; blocks in HTML — catches server-injected keys.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('nvca')"><div class="icon">🖥</div><h4>NVCA</h4><p>Node/Vue/Next/Nuxt config file scanning for framework credentials.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('gpl')"><div class="icon">🔗</div><h4>GPL (GraphQL)</h4><p>GraphQL endpoint detection + introspection + credential extraction.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('lib')"><div class="icon">📋</div><h4>LIB Scanner</h4><p>package.json, requirements.txt, Gemfile.lock for hardcoded creds.</p><div class="status"><span class="sev sev-low">LIVE</span></div></div>
+        <div class="ov-card" onclick="show('creds')"><div class="icon">🔐</div><h4>Cred Validators</h4><p>40+ live API validators — AWS, Stripe, OpenAI, GitHub, SMTP, and more.</p><div class="status"><span class="sev sev-uniq">UNIQUE</span></div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Coverage Map</div>
+      <table class="t">
+        <thead><tr><th>Scanner</th><th>What It Probes</th><th>Output Files</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Prefilter</td><td>5 .env paths per domain, 200-response harvest</td><td>prefilter_hits.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">Git Config</td><td>/.git/config /.git/HEAD exposed on web</td><td>gitconfig_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">PHP Info</td><td>/phpinfo.php /info.php — ENV var dump</td><td>phpinfo_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">Config Files</td><td>config.php application.yml database.yml settings.py</td><td>config_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">Backup Files</td><td>.env.bak .env.old wp-config.php~ config.bak</td><td>backup_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">SSH Keys</td><td>/.ssh/id_rsa /id_rsa /server.key — PEM match</td><td>ssh_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">Docker</td><td>docker-compose.yml .dockerenv :2375/version</td><td>docker_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">JS Scanner</td><td>All &lt;script src="*.js"&gt; linked files</td><td>js_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">JS Extended</td><td>Inline &lt;script&gt; blocks in raw HTML</td><td>jsext_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">NVCA</td><td>next.config.js nuxt.config.js .env.local vue.config.js</td><td>nvca_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">GPL / GraphQL</td><td>/graphql /api/graphql — introspection + cred leak</td><td>gql_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">LIB Scanner</td><td>package.json requirements.txt composer.json Gemfile.lock</td><td>lib_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">Cred Validators</td><td>Live API call per provider on every extracted key</td><td>valid_*.txt per provider</td><td><span class="sev sev-uniq">UNIQUE</span></td></tr>
+          <tr><td class="mono">SMTP Validator</td><td>Full SMTP handshake + AUTH LOGIN against found creds</td><td>valid_smtp.txt</td><td><span class="sev sev-uniq">UNIQUE</span></td></tr>
+          <tr><td class="mono">Web Panels</td><td>cPanel :2082 Plesk :8880 WHM :2086 Webmin :10000</td><td>webpanel_found.txt</td><td><span class="sev sev-low">LIVE</span></td></tr>
+          <tr><td class="mono">Path Scanner</td><td>Git API tree walk — sensitive filename matching</td><td>path_hits.txt</td><td><span class="sev sev-medium">BUILDING</span></td></tr>
+          <tr><td class="mono">FPP Scanner</td><td>Custom regex patterns on git file paths</td><td>fpp_hits.txt</td><td><span class="sev sev-medium">BUILDING</span></td></tr>
+          <tr><td class="mono">R2S (CVE-2025-55182)</td><td>Next.js middleware bypass → RCE → shell callback</td><td>valid_r2s.txt</td><td><span class="sev sev-medium">BUILDING</span></td></tr>
+          <tr><td class="mono">ORG Scanner</td><td>GitHub/GitLab/Bitbucket org → all repos → scan pipeline</td><td>org_repos_scanned.txt</td><td><span class="sev sev-medium">BUILDING</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ COMPARISON ══════════════════ -->
+<div id="page-compare" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Gap Analysis · RavenX vs Niark Tool</div>
+    <h2>⚖ &nbsp;Side-by-Side Comparison</h2>
+    <div class="subtitle">The niark tool is a SAST/SCA/supply-chain platform for code repositories. RavenX is a mass web credential harvester with live validation. Both share scanner names in places — but often mean completely different things. This page maps every gap and difference.</div>
+    <div class="header-tags">
+      <span class="tag green">We have it</span>
+      <span class="tag gold">Building</span>
+      <span class="tag red">Gap — missing</span>
+      <span class="tag blue">Different concept, same name</span>
+      <span class="tag purple">We have it, they don't</span>
+    </div>
+  </div>
+  <div class="content">
+
+    <div class="section">
+      <div class="section-title">Scanner-by-Scanner Comparison</div>
+      <table class="t">
+        <thead><tr><th>Niark Scanner</th><th>What Niark Does</th><th>RavenX Equivalent</th><th>Gap / Status</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Path Scanner</strong></td>
+            <td>Sensitive file detection in git repos (CWE-538, CWE-552)</td>
+            <td>Path Scanner (building) — git API tree walk for sensitive filenames</td>
+            <td><span class="compare-badge cb-build">BUILDING</span> — Same concept, 80% overlap</td>
+          </tr>
+          <tr>
+            <td><strong>JS Scanner</strong></td>
+            <td>AST-based SAST — XSS sinks, prototype pollution, injection (CWE-79, CWE-94)</td>
+            <td>JS Scanner — credential regex against fetched .js files</td>
+            <td><span class="compare-badge cb-diff">DIFFERENT</span> — We extract creds; they do code analysis. No AST in RavenX.</td>
+          </tr>
+          <tr>
+            <td><strong>JS Extended</strong></td>
+            <td>npm supply chain — typosquatting, dependency confusion, install scripts</td>
+            <td>JS Extended — inline &lt;script&gt; block credential extraction</td>
+            <td><span class="compare-badge cb-diff">DIFFERENT</span> — Completely different. We scan HTML, they audit npm packages.</td>
+          </tr>
+          <tr>
+            <td><strong>R2S Scanner</strong></td>
+            <td>Repository-to-Source integrity — hash verify tarball vs source (SLSA L3, CWE-506)</td>
+            <td>R2S Scanner (building) — CVE-2025-55182 Next.js middleware bypass → RCE</td>
+            <td><span class="compare-badge cb-diff">DIFFERENT</span> — Same name, opposite purpose. Ours is an active exploit chain; theirs is passive integrity verification.</td>
+          </tr>
+          <tr>
+            <td><strong>NVCA Scanner</strong></td>
+            <td>NVD CVE Analysis Engine — SBOM generation + NIST NVD CVE matching, CVSS scoring</td>
+            <td>NVCA Scanner — Node/Vue/Next/Nuxt config file scanning</td>
+            <td><span class="compare-badge cb-diff">DIFFERENT</span> — Same acronym, totally different. Theirs is a CVE database engine; ours scans framework config files.</td>
+          </tr>
+          <tr>
+            <td><strong>Git Scanner (3/3)</strong></td>
+            <td>Full git history forensic trawl — entropy + regex, all branches/tags/stashes</td>
+            <td>Git Config Scan + ScanRepo() — exposed .git/config + shallow clone scan</td>
+            <td><span class="compare-badge cb-diff">PARTIAL</span> — We scan web-exposed git files and shallow-clone repos. We don't trawl full git history.</td>
+          </tr>
+          <tr>
+            <td><strong>GPL Scanner</strong></td>
+            <td>License compliance — copyleft detection, SPDX matching, legal risk flagging</td>
+            <td>GPL Scanner — GraphQL endpoint introspection + credential extraction</td>
+            <td><span class="compare-badge cb-diff">DIFFERENT</span> — GPL = GraphQL for us, GNU General Public License for them. No license compliance in RavenX.</td>
+          </tr>
+          <tr>
+            <td><strong>FPP Scanner</strong></td>
+            <td>False Positive Prevention — reachability analysis, VEX, ML confidence scoring</td>
+            <td>FPP Scanner (building) — File Path Pattern, user-defined filename regexes</td>
+            <td><span class="compare-badge cb-diff">DIFFERENT</span> — Same badge, opposite purpose. Ours finds files; theirs filters noise.</td>
+          </tr>
+          <tr>
+            <td><strong>LIB Scanner</strong></td>
+            <td>SCA — OSV/NVD matching across npm, PyPI, Maven, Go, Cargo, NuGet transitive tree</td>
+            <td>LIB Scanner — extracts credentials from package.json, requirements.txt, etc.</td>
+            <td><span class="compare-badge cb-diff">PARTIAL</span> — We read manifests for hardcoded creds. We don't do CVE matching against dependency versions.</td>
+          </tr>
+          <tr>
+            <td><strong>ORG Scanner</strong></td>
+            <td>Enterprise risk aggregation — compliance mapping, team metrics, SBOM across all repos</td>
+            <td>ORG Scanner (building) — enumerate all repos in an org, feed into credential scan pipeline</td>
+            <td><span class="compare-badge cb-build">SIMILAR</span> — Shared concept (org-wide coverage) but different goals. Theirs reports risk posture; ours harvests credentials at org scale.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <div class="section-title">What They Have That We Are Missing</div>
+      <div class="gap-box">
+        <h4>✗ AST-BASED SAST (JavaScript / TypeScript)</h4>
+        <p>Their JS Scanner parses code into an Abstract Syntax Tree and traces data flow from source to sink — detecting XSS, prototype pollution, injection, and insecure API use. Our JS Scanner only runs credential regexes against bundled text. We have zero code flow analysis.</p>
+      </div>
+      <div class="gap-box">
+        <h4>✗ npm SUPPLY CHAIN ANALYSIS</h4>
+        <p>Their JS Extended detects typosquatted packages, dependency confusion attacks, malicious postinstall scripts, and behavioural anomalies across the full transitive npm dependency tree. We have nothing equivalent — our "JS Extended" scans inline HTML scripts for credentials.</p>
+      </div>
+      <div class="gap-box">
+        <h4>✗ CVE / NVD INTELLIGENCE ENGINE</h4>
+        <p>Their NVCA Scanner generates an SBOM from a codebase and cross-references every component against NIST NVD's 260,000+ CVEs with CVSS scoring. We have no CVE database integration — our "NVCA" refers to Node/Vue/Next/Nuxt framework config scanning.</p>
+      </div>
+      <div class="gap-box">
+        <h4>✗ REPO-TO-SOURCE INTEGRITY VERIFICATION</h4>
+        <p>Their R2S verifies that distributed package tarballs match their declared source code — the class of attack that enabled the XZ Utils backdoor (CVE-2024-3094). Our "R2S" is an active Next.js CVE exploit chain — completely different.</p>
+      </div>
+      <div class="gap-box">
+        <h4>✗ LICENSE COMPLIANCE (GPL / COPYLEFT DETECTION)</h4>
+        <p>Their GPL Scanner audits dependency licenses for copyleft risk — AGPL, GPL v2/v3, LGPL — protecting proprietary codebases from inadvertently shipping code that requires open-sourcing. We have no license scanning. Our "GPL" scans GraphQL endpoints.</p>
+      </div>
+      <div class="gap-box">
+        <h4>✗ FALSE POSITIVE PREVENTION ENGINE</h4>
+        <p>Their FPP Scanner uses reachability analysis, VEX documents, and ML confidence scoring to cut 70–80% of noise from raw scanner output. We have no false positive suppression layer — every hit from our regex scanners is treated equally regardless of exploitability.</p>
+      </div>
+      <div class="gap-box">
+        <h4>✗ FULL GIT HISTORY TRAWL</h4>
+        <p>Their Git Scanner forensically walks every branch, tag, stash, and commit since repo inception. Our ScanRepo() does a shallow clone (--depth 1) of HEAD only — we miss credentials that were committed and "deleted" in subsequent commits.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">What We Have That They Don't</div>
+      <div class="hit-box">
+        <h4>✓ LIVE CREDENTIAL VALIDATION (40+ PROVIDERS)</h4>
+        <p>Every extracted key is immediately tested against its provider's API. We report not just "found a Stripe key" but "this key is live, belongs to account X, is in Live mode, has these permissions." No other open-source scanner does this across 40+ services.</p>
+        <div class="chain">Key extracted → Provider API hit → 200 response confirmed → Telegram alert with account details</div>
+      </div>
+      <div class="hit-box">
+        <h4>✓ SMTP AUTHENTICATION TESTING</h4>
+        <p>We extract SMTP host/user/password tuples from config files and actually connect to the SMTP server, attempting AUTH LOGIN to confirm the credentials work. Catches email infrastructure access that no code-analysis tool would find.</p>
+        <div class="chain">SMTP creds in .env → Extract host/port/user/pass → TCP connect → AUTH LOGIN → Confirmed live SMTP access</div>
+      </div>
+      <div class="hit-box">
+        <h4>✓ MASS URL-LIST SCANNING AT SCALE</h4>
+        <p>We operate on lists of millions of URLs with batched parallel processing, checkpointing, and worker fleet distribution. Theirs is a per-repository tool. We can scan 69M+ targets in a single session.</p>
+        <div class="chain">69M URL list → Prefilter at 500 threads → 200 hits queued → Deep scan by worker fleet → Credentials extracted + validated</div>
+      </div>
+      <div class="hit-box">
+        <h4>✓ WEB PANEL DETECTION</h4>
+        <p>Detects exposed admin panels (cPanel, Plesk, WHM, Webmin, DirectAdmin) that represent privileged access to hosting infrastructure. Not in scope for a code-repository scanner.</p>
+      </div>
+      <div class="hit-box">
+        <h4>✓ CRYPTO WALLET DETECTION + BALANCE CHECK</h4>
+        <p>Finds Bitcoin, Ethereum, and other crypto wallet addresses in exposed files, then checks on-chain balance. A funded hot wallet in a config file is a high-value finding for self-owned infra auditing.</p>
+      </div>
+      <div class="hit-box">
+        <h4>✓ ACTIVE CVE EXPLOIT CHAIN (BUILDING)</h4>
+        <p>Our R2S scanner will test and exploit CVE-2025-55182 (Next.js RCE) end-to-end — detect, bypass, exploit, shell. This is active vulnerability testing, not passive analysis. They have nothing equivalent for active exploits.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Priority Gaps to Close</div>
+      <table class="t">
+        <thead><tr><th>Gap</th><th>Effort</th><th>Impact</th><th>Recommended Approach</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Full git history trawl</strong></td>
+            <td><span class="sev sev-low">LOW</span></td>
+            <td><span class="sev sev-critical">HIGH</span></td>
+            <td>Change <code>git clone --depth 1</code> to full clone in ScanRepo(). Add flag <code>--all-history</code>. Walk all commits via <code>git log --all -p</code>.</td>
+          </tr>
+          <tr>
+            <td><strong>CVE / NVD matching against deps</strong></td>
+            <td><span class="sev sev-high">HIGH</span></td>
+            <td><span class="sev sev-high">HIGH</span></td>
+            <td>Add OSV API integration to LIB Scanner. When package.json / requirements.txt is found, query osv.dev/query for each version. Report CVEs alongside extracted credentials.</td>
+          </tr>
+          <tr>
+            <td><strong>Entropy-based secret detection</strong></td>
+            <td><span class="sev sev-medium">MEDIUM</span></td>
+            <td><span class="sev sev-high">HIGH</span></td>
+            <td>Add Shannon entropy scanner as a parallel pass in checkAndSaveKeys(). High-entropy strings (>4.5 bits/char) in key-value contexts get flagged even without regex match.</td>
+          </tr>
+          <tr>
+            <td><strong>npm supply chain checks</strong></td>
+            <td><span class="sev sev-high">HIGH</span></td>
+            <td><span class="sev sev-medium">MEDIUM</span></td>
+            <td>New scanner_supply_chain.go: query npm registry API for postinstall scripts, maintainer changes, version anomalies. Typosquat matching against top-1000 package list.</td>
+          </tr>
+          <tr>
+            <td><strong>Confidence scoring / dedup</strong></td>
+            <td><span class="sev sev-medium">MEDIUM</span></td>
+            <td><span class="sev sev-medium">MEDIUM</span></td>
+            <td>Add a scoring pass before output — deduplicate same key from different sources, score by provider significance, suppress known-bad patterns (test keys, examples).</td>
+          </tr>
+          <tr>
+            <td><strong>License compliance</strong></td>
+            <td><span class="sev sev-medium">MEDIUM</span></td>
+            <td><span class="sev sev-low">LOW</span></td>
+            <td>Low priority for a credential scanner. Consider adding SPDX check to LIB Scanner output as a secondary finding type.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ PREFILTER ══════════════════ -->
+<div id="page-prefilter" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 01 · Mass Discovery Engine</div>
+    <h2>⚡ &nbsp;Prefilter Mode</h2>
+    <div class="subtitle">The fast first-pass engine. Given a list of millions of domains/URLs, the prefilter probes 5 common .env file paths at 500+ concurrent goroutines and records every HTTP 200 response. No credential extraction happens here — it purely identifies which hosts expose sensitive files, building the queue for the deep scan phase.</div>
+    <div class="header-tags">
+      <span class="tag gold">LIVE</span>
+      <span class="tag green">Mass Scale — 69M+ targets</span>
+      <span class="tag">500 goroutines concurrent</span>
+      <span class="tag">No equivalent in Niark</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Concurrency</div><div class="val gold">500 goroutines</div></div>
+      <div class="info-chip"><div class="lbl">Paths Probed</div><div class="val">5 per domain</div></div>
+      <div class="info-chip"><div class="lbl">Output</div><div class="val">prefilter_hits.txt</div></div>
+      <div class="info-chip"><div class="lbl">Scale</div><div class="val green">69M+ targets tested</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Probe Paths</div>
+      <div class="code-block">
+<span class="cm"># Standard .env paths probed per domain</span>
+<span class="str">/.env</span>
+<span class="str">/.env.local</span>
+<span class="str">/.env.backup</span>
+<span class="str">/api/.env</span>
+<span class="str">/config/.env</span>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Flow</div>
+      <div class="flow">
+        <div class="flow-step"><div class="step-num">1</div><div class="step-body"><h4>Read URL list</h4><p>Ingests the input .txt file line by line. Supports checkpointing — resumes from last processed line on restart. Distributes across worker fleet via --offset / --limit flags.</p></div></div>
+        <div class="flow-step"><div class="step-num">2</div><div class="step-body"><h4>Concurrent HTTP probes</h4><p>500 goroutines each grab a domain, construct the 5 .env URLs, fire HEAD/GET requests with 20s timeout. Respects per-domain rate limiting to avoid triggering WAFs.</p></div></div>
+        <div class="flow-step"><div class="step-num">3</div><div class="step-body"><h4>Record 200 hits</h4><p>Any HTTP 200 response is written to prefilter_hits.txt with the full URL and response size. Non-200 responses are discarded without logging.</p></div></div>
+        <div class="flow-step"><div class="step-num">4</div><div class="step-body"><h4>Queue for deep scan</h4><p>The hits file becomes the input for the next scan session where full credential extraction runs. This two-phase approach means the expensive extraction only runs on confirmed live .env files.</p></div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Niark Gap</div>
+      <div class="callout callout-good">
+        <div class="callout-icon">🟢</div>
+        <div class="callout-body"><strong>No equivalent in Niark.</strong> Niark operates on git repositories you explicitly provide. RavenX operates on arbitrary internet-facing hosts at mass scale. This is our core architectural differentiator.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ GIT CONFIG ══════════════════ -->
+<div id="page-gitconfig" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 02 · Exposed Version Control</div>
+    <h2>🔷 &nbsp;Git Config Scan</h2>
+    <div class="subtitle">Fetches exposed .git/config files left accessible on web servers. These files contain remote repository URLs — often with embedded credentials in the format https://user:token@github.com/org/repo — plus CI service tokens, branch configurations, and hook scripts that developers accidentally push with their repositories.</div>
+    <div class="header-tags">
+      <span class="tag gold">LIVE</span>
+      <span class="tag">CWE-312 · CWE-798</span>
+      <span class="tag">Remote URL credential extraction</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Paths</div><div class="val gold">/.git/config + HEAD</div></div>
+      <div class="info-chip"><div class="lbl">Also Finds</div><div class="val">Embedded auth tokens in remote URLs</div></div>
+      <div class="info-chip"><div class="lbl">Output</div><div class="val">gitconfig_found.txt</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">What Gets Extracted</div>
+      <div class="code-block">
+<span class="cm"># Exposed .git/config — real finding example</span>
+[core]
+  repositoryformatversion = <span class="num">0</span>
+[remote <span class="str">"origin"</span>]
+  url = https://<span class="fn">aidanbaker</span>:<span class="kw">ghp_Abc123DefGHI456JKL789MNO</span>@github.com/company/private-repo
+  fetch = +refs/heads/*:refs/remotes/origin/*
+[branch <span class="str">"main"</span>]
+  remote = origin
+  merge = refs/heads/main
+      </div>
+      <p class="text">The embedded GitHub PAT in the remote URL gives the scanner a valid token to validate against GitHub API — and feeds directly into the ORG Scanner to enumerate all repos that token can access.</p>
+    </div>
+    <div class="section">
+      <div class="section-title">Comparison to Niark Git Scanner</div>
+      <div class="callout callout-warn">
+        <div class="callout-icon">⚠️</div>
+        <div class="callout-body"><strong>Key difference:</strong> Niark's Git Scanner forensically walks the entire commit history of a repository for secrets. RavenX's Git Config Scan finds credentials in web-exposed .git/config files — a different attack surface. We also do shallow repo cloning via ScanRepo() but do NOT walk git history depth &gt; 1. Adding full git history trawl to ScanRepo() is identified as the highest-impact, lowest-effort gap to close.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ PHP INFO ══════════════════ -->
+<div id="page-phpinfo" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 03 · PHP Environment Exposure</div>
+    <h2>🐘 &nbsp;PHP Info Scan</h2>
+    <div class="subtitle">Detects publicly accessible phpinfo() pages — PHP's built-in diagnostic function that dumps the complete server environment. A single phpinfo() page exposes every $_ENV and $_SERVER variable, loaded PHP extensions, configuration directives, and server filesystem paths. API keys set as server environment variables are fully visible.</div>
+    <div class="header-tags">
+      <span class="tag gold">LIVE</span>
+      <span class="tag">$_ENV dump — all server env vars</span>
+      <span class="tag">CWE-200 Information Exposure</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Paths Probed</div><div class="val gold">6 common phpinfo paths</div></div>
+      <div class="info-chip"><div class="lbl">Signal</div><div class="val">PHP Version string in response</div></div>
+      <div class="info-chip"><div class="lbl">Extracts</div><div class="val red">All ENV variables</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Paths Probed</div>
+      <div class="code-block">
+/phpinfo.php  /info.php  /php_info.php
+/test.php     /phptest.php  /?=PHPB8B5F2A0-3C92-11d3-A3A9-4C7B08C10000
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Why This Is High Value</div>
+      <p class="text">Developers frequently set API keys as server-level environment variables — injected by the hosting panel (cPanel, Plesk), Docker, or the web server config. These never appear in the codebase or .env files, but they appear in phpinfo(). AWS credentials, OpenAI keys, Stripe keys, and database passwords set this way are completely invisible to code-scanning tools like Niark — but RavenX's phpinfo scanner catches all of them.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ JS SCANNER ══════════════════ -->
+<div id="page-js" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 08 · Bundled JavaScript Credential Extraction</div>
+    <h2>🟨 &nbsp;JS Scanner</h2>
+    <div class="subtitle">Fetches every JavaScript file linked from a target page and runs the full credential regex battery against the bundle. Modern web apps ship API keys, tokens, and config data baked into their JS bundles at build time — this scanner catches them. Note: unlike Niark's JS Scanner, RavenX does NOT do AST analysis or code-flow tracing — it operates on raw text with regex.</div>
+    <div class="header-tags">
+      <span class="tag gold">LIVE</span>
+      <span class="tag red">No AST — regex only</span>
+      <span class="tag">All &lt;script src&gt; links followed</span>
+      <span class="tag">Build-time embedded credentials</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Method</div><div class="val gold">Regex on raw JS text</div></div>
+      <div class="info-chip"><div class="lbl">Coverage</div><div class="val">All linked .js files</div></div>
+      <div class="info-chip"><div class="lbl">What Niark Does Instead</div><div class="val red">AST + taint analysis</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">What We Find</div>
+      <div class="code-block">
+<span class="cm">// Real example: Stripe publishable + secret key embedded in React bundle</span>
+<span class="kw">const</span> stripe=<span class="fn">Stripe</span>(<span class="str">"pk_live_51AbcXYZ..."</span>);
+<span class="kw">const</span> API_KEY=<span class="str">"sk_live_51AbcXYZqwerty1234..."</span>; <span class="cm">// ← Caught by regex</span>
+
+<span class="cm">// Next.js NEXT_PUBLIC_ env vars compiled into bundle</span>
+<span class="kw">process</span>.env.NEXT_PUBLIC_OPENAI_KEY=<span class="str">"sk-proj-..."</span>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Gap vs Niark JS Scanner</div>
+      <div class="gap-box">
+        <h4>✗ NO AST / TAINT ANALYSIS</h4>
+        <p>Niark's JS Scanner builds an Abstract Syntax Tree and traces user-controlled data from sources (req.query, req.body) to sinks (innerHTML, eval, exec). This finds XSS, prototype pollution, injection vulnerabilities, and insecure coding patterns. RavenX has zero code-flow analysis. We only find credentials baked into text — we cannot find vulnerabilities in the code logic itself.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ NVCA ══════════════════ -->
+<div id="page-nvca" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 10 · Framework Config Credential Extraction</div>
+    <h2>🖥 &nbsp;NVCA Scanner</h2>
+    <div class="subtitle">Probes paths specific to Node.js, Vue, Next.js, and Nuxt framework configurations. These frameworks have unique config file locations and naming conventions where developers commonly store API credentials, database URLs, and service tokens. This scanner catches framework-specific credential storage patterns that generic config scanners miss.</div>
+    <div class="header-tags">
+      <span class="tag gold">LIVE</span>
+      <span class="tag red">NOT a CVE Engine — different from Niark</span>
+      <span class="tag">Node · Vue · Next.js · Nuxt</span>
+      <span class="tag">Framework-specific paths</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="callout callout-diff">
+      <div class="callout-icon">⚠️</div>
+      <div class="callout-body"><strong>Naming conflict with Niark:</strong> Niark's "NVCA Scanner" stands for NVD CVE Analysis — a full CVSS-scored CVE intelligence engine with SBOM generation. RavenX's "NVCA" stands for Node/Vue/Next/Nuxt Config Analyzer. Completely different tools sharing an acronym.</div>
+    </div>
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Frameworks</div><div class="val gold">Node · Vue · Next · Nuxt</div></div>
+      <div class="info-chip"><div class="lbl">Niark NVCA</div><div class="val red">NVD CVE engine — different</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Paths Probed</div>
+      <div class="code-block">
+<span class="cm"># Next.js</span>
+/next.config.js    /.env.local    /.env.production
+<span class="cm"># Nuxt</span>
+/nuxt.config.js    /nuxt.config.ts   /.env
+<span class="cm"># Vue CLI</span>
+/vue.config.js     /.env.development  /.env.local
+<span class="cm"># Node / Express</span>
+/app.js            /server.js        /config/database.js
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Gap: CVE Intelligence</div>
+      <div class="gap-box">
+        <h4>✗ NO CVE / NVD MATCHING</h4>
+        <p>The most impactful gap versus Niark's NVCA Scanner. We have no SBOM generation, no NIST NVD integration, and no CVSS scoring. When we find a package.json via the LIB Scanner, we extract hardcoded credentials from it — but we don't check whether the listed package versions have known CVEs. Adding OSV API integration to LIB Scanner would partially close this gap with relatively low effort.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ GPL / GRAPHQL ══════════════════ -->
+<div id="page-gpl" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 11 · GraphQL Endpoint Analysis</div>
+    <h2>🔗 &nbsp;GPL Scanner (GraphQL)</h2>
+    <div class="subtitle">Probes common GraphQL endpoint paths, sends an introspection query to enumerate the full API schema, and scans resolver responses and error messages for inadvertently exposed credentials, internal hostnames, and sensitive field names. Also catches misconfigured GraphQL APIs that expose PII or admin mutations to unauthenticated requests.</div>
+    <div class="header-tags">
+      <span class="tag gold">LIVE</span>
+      <span class="tag red">GPL = GraphQL here, NOT license compliance</span>
+      <span class="tag">Introspection · Schema leak · Error creds</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="callout callout-diff">
+      <div class="callout-icon">⚠️</div>
+      <div class="callout-body"><strong>Naming conflict with Niark:</strong> Niark's "GPL Scanner" does software license compliance — detecting GNU General Public License dependencies that could make proprietary code open-source. RavenX's GPL Scanner probes GraphQL endpoints for credential leaks. Completely different.</div>
+    </div>
+    <div class="section">
+      <div class="section-title">Paths Probed</div>
+      <div class="code-block">
+/graphql  /api/graphql  /v1/graphql  /__graphql
+/graphiql /playground   /api/v1/graphql
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">What We Extract</div>
+      <ul style="list-style:none;padding:0">
+        <li style="padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text-dim)">→ Full schema via introspection — reveals internal API structure, field names, mutation inputs</li>
+        <li style="padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text-dim)">→ Stack traces in error responses containing file paths, internal hostnames, DB connection strings</li>
+        <li style="padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text-dim)">→ Authorization tokens returned in unauthenticated query responses</li>
+        <li style="padding:8px 0;font-size:13px;color:var(--text-dim)">→ Admin mutation endpoints accessible without authentication</li>
+      </ul>
+    </div>
+    <div class="section">
+      <div class="section-title">Gap: License Compliance</div>
+      <div class="gap-box">
+        <h4>✗ NO LICENSE COMPLIANCE SCANNING</h4>
+        <p>Niark's GPL Scanner audits all dependency licenses against SPDX identifiers, detecting copyleft components (GPL v2/v3, AGPL, LGPL) that could legally require open-sourcing a proprietary product. This is a legal risk category RavenX has no coverage for. Low priority for a credential scanner, but worth adding as a secondary finding type in LIB Scanner when manifest files are found.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ LIB SCANNER ══════════════════ -->
+<div id="page-lib" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 12 · Package Manifest Credential Extraction</div>
+    <h2>📋 &nbsp;LIB Scanner</h2>
+    <div class="subtitle">Fetches web-accessible package manifests and lock files across all major ecosystems. Extracts hardcoded credentials, private registry auth tokens, internal package source URLs containing tokens, and developer API keys baked into build configuration. Unlike Niark's LIB Scanner, we do not perform CVE matching — we extract credentials only.</div>
+    <div class="header-tags">
+      <span class="tag gold">LIVE</span>
+      <span class="tag red">Credential extraction only — no CVE matching</span>
+      <span class="tag">npm · PyPI · Composer · Gemfile</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Manifests</div><div class="val gold">8 file types</div></div>
+      <div class="info-chip"><div class="lbl">Niark LIB</div><div class="val red">Full SCA + CVE matching</div></div>
+      <div class="info-chip"><div class="lbl">Our LIB</div><div class="val">Credential extraction only</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Files Fetched</div>
+      <div class="code-block">
+package.json      package-lock.json    yarn.lock
+requirements.txt  Pipfile.lock         pyproject.toml
+composer.json     composer.lock        Gemfile.lock
+go.mod            go.sum               Cargo.lock
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Gap vs Niark LIB Scanner</div>
+      <div class="gap-box">
+        <h4>✗ NO CVE / OSV MATCHING AGAINST DEPENDENCY VERSIONS</h4>
+        <p>Niark's LIB Scanner parses the full transitive dependency tree and queries OSV and GitHub Advisory database to find known CVEs in every package version. RavenX reads these same files but only looks for hardcoded credentials — we ignore the version numbers entirely. Adding an OSV API call when we parse package.json/requirements.txt is the second-highest-impact gap to close after full git history trawl.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ CREDENTIAL VALIDATORS ══════════════════ -->
+<div id="page-creds" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Unique Capability · Live API Validation Engine</div>
+    <h2>🔐 &nbsp;Credential Validators</h2>
+    <div class="subtitle">RavenX's primary differentiator. Every extracted credential is immediately tested live against its provider's API. Not just "found a key" — but "this key is active, belongs to account X, has these permissions, and here's what it can do." 40+ providers covered. Telegram notification on every confirmed live hit. No equivalent exists in Niark or any comparable open-source tool.</div>
+    <div class="header-tags">
+      <span class="tag purple">Unique to RavenX</span>
+      <span class="tag gold">40+ providers</span>
+      <span class="tag green">Live API confirmation</span>
+      <span class="tag">Telegram alerts on live hits</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="section">
+      <div class="section-title">All Active Validators</div>
+      <div class="provider-grid">
+        <div class="provider-chip"><div class="pname">AWS</div><div class="pcat">STS / S3 / IAM / SES</div></div>
+        <div class="provider-chip"><div class="pname">OpenAI</div><div class="pcat">sk-proj- / sk-svcacct-</div></div>
+        <div class="provider-chip"><div class="pname">Anthropic</div><div class="pcat">sk-ant-api / sk-ant-admin</div></div>
+        <div class="provider-chip"><div class="pname">Stripe</div><div class="pcat">sk_live_ / rk_live_</div></div>
+        <div class="provider-chip"><div class="pname">GitHub</div><div class="pcat">ghp_ gho_ ghu_ ghs_</div></div>
+        <div class="provider-chip"><div class="pname">GitLab</div><div class="pcat">glpat- v2/v3 tokens</div></div>
+        <div class="provider-chip"><div class="pname">Bitbucket</div><div class="pcat">ATAT tokens</div></div>
+        <div class="provider-chip"><div class="pname">GCP</div><div class="pcat">AIzaSy- / service account</div></div>
+        <div class="provider-chip"><div class="pname">Twilio</div><div class="pcat">AC SID + Auth Token pair</div></div>
+        <div class="provider-chip"><div class="pname">SendGrid</div><div class="pcat">SG.* keys</div></div>
+        <div class="provider-chip"><div class="pname">Mailgun</div><div class="pcat">key-[a-z0-9]{32}</div></div>
+        <div class="provider-chip"><div class="pname">MessageBird</div><div class="pcat">live_/test_ prefix</div></div>
+        <div class="provider-chip"><div class="pname">Brevo</div><div class="pcat">xkeysib-[hex64]</div></div>
+        <div class="provider-chip"><div class="pname">XSMTP</div><div class="pcat">xsmtpsib-[hex64]</div></div>
+        <div class="provider-chip"><div class="pname">Tencent</div><div class="pcat">SecretId / SecretKey</div></div>
+        <div class="provider-chip"><div class="pname">Mandrill</div><div class="pcat">22-char context-keyed</div></div>
+        <div class="provider-chip"><div class="pname">MailerSend</div><div class="pcat">eyJ bearer token</div></div>
+        <div class="provider-chip"><div class="pname">Vonage / Nexmo</div><div class="pcat">api_key + secret pair</div></div>
+        <div class="provider-chip"><div class="pname">Telnyx</div><div class="pcat">KEY[A-Za-z0-9_-]{55}</div></div>
+        <div class="provider-chip"><div class="pname">Slack</div><div class="pcat">xoxb- xoxp- tokens</div></div>
+        <div class="provider-chip"><div class="pname">Mailjet</div><div class="pcat">32-char alphanum pairs</div></div>
+        <div class="provider-chip"><div class="pname">Postmark</div><div class="pcat">UUID API tokens</div></div>
+        <div class="provider-chip"><div class="pname">SparkPost</div><div class="pcat">40-char alphanum</div></div>
+        <div class="provider-chip"><div class="pname">Mailtrap</div><div class="pcat">32-char lowercase</div></div>
+        <div class="provider-chip"><div class="pname">Plivo</div><div class="pcat">MA/SA Auth ID</div></div>
+        <div class="provider-chip"><div class="pname">Mailchimp</div><div class="pcat">hex32-usN / euN</div></div>
+        <div class="provider-chip"><div class="pname">Resend</div><div class="pcat">re_[A-Za-z0-9_]+</div></div>
+        <div class="provider-chip"><div class="pname">Gemini</div><div class="pcat">AIzaSy- / AQ. format</div></div>
+        <div class="provider-chip"><div class="pname">xAI</div><div class="pcat">xai-[80 chars]</div></div>
+        <div class="provider-chip"><div class="pname">Groq</div><div class="pcat">gsk_[52 chars]</div></div>
+        <div class="provider-chip"><div class="pname">Perplexity</div><div class="pcat">pplx-[48 chars]</div></div>
+        <div class="provider-chip"><div class="pname">OpenRouter</div><div class="pcat">sk-or-v1-[hex64]</div></div>
+        <div class="provider-chip"><div class="pname">HuggingFace</div><div class="pcat">hf_[34 chars]</div></div>
+        <div class="provider-chip"><div class="pname">Replicate</div><div class="pcat">r8_[37 chars]</div></div>
+        <div class="provider-chip"><div class="pname">Mistral</div><div class="pcat">context-keyed 32-100</div></div>
+        <div class="provider-chip"><div class="pname">ElevenLabs</div><div class="pcat">hex32 / sk_ prefix</div></div>
+        <div class="provider-chip"><div class="pname">Cohere</div><div class="pcat">co_ prefix / 40-52 char</div></div>
+        <div class="provider-chip"><div class="pname">TogetherAI</div><div class="pcat">64-char alphanum</div></div>
+        <div class="provider-chip"><div class="pname">Fireworks</div><div class="pcat">fw_ prefix / 40-56 char</div></div>
+        <div class="provider-chip"><div class="pname">Crypto Wallets</div><div class="pcat">BTC / ETH + balance</div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">What a Live Hit Looks Like</div>
+      <div class="hit-box">
+        <h4>✓ EXAMPLE: AWS LIVE HIT</h4>
+        <p>Source: https://target.com/.env<br>Key: AKIAIOSFODNN7EXAMPLE (not this — a real key)<br>STS Identity: arn:aws:iam::123456789012:user/deploy-user<br>S3 Access: 14 buckets readable including production-backups-2024<br>SES Quota: 50,000 emails/day remaining<br>Federation URL: https://signin.aws.amazon.com/federation?Action=login&amp;...</p>
+        <div class="chain">Key found → STS GetCallerIdentity → S3 ListBuckets → IAM GetUser → SES GetSendQuota → Federation console URL generated → Telegram alert sent</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ SMTP ══════════════════ -->
+<div id="page-smtp" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Unique Capability · Email Infrastructure Access</div>
+    <h2>📨 &nbsp;SMTP Credential Validator</h2>
+    <div class="subtitle">Extracts SMTP host/port/username/password tuples from discovered config files and validates them by making a real TCP connection to the SMTP server and attempting AUTH LOGIN. Confirms live email infrastructure access — the ability to send email as the target domain. Covers Django, Rails, Laravel, Node Mailer, and Docker Compose naming conventions.</div>
+    <div class="header-tags">
+      <span class="tag purple">Unique to RavenX</span>
+      <span class="tag gold">LIVE</span>
+      <span class="tag">Real SMTP AUTH handshake</span>
+      <span class="tag">Django · Rails · Laravel · Node</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Method</div><div class="val gold">Real TCP + AUTH LOGIN</div></div>
+      <div class="info-chip"><div class="lbl">Naming Patterns</div><div class="val">12 env var patterns</div></div>
+      <div class="info-chip"><div class="lbl">Output</div><div class="val green">valid_smtp.txt</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Env Var Patterns Extracted</div>
+      <div class="code-block">
+<span class="cm"># Host patterns</span>
+MAIL_HOST / SMTP_HOST / EMAIL_HOST / SMTP_ADDRESS / EMAIL_SERVER
+
+<span class="cm"># Port patterns</span>
+MAIL_PORT / SMTP_PORT / EMAIL_PORT / MAILER_PORT
+
+<span class="cm"># User patterns</span>
+MAIL_USERNAME / SMTP_USERNAME / EMAIL_HOST_USER / SMTP_USER_NAME
+
+<span class="cm"># Password patterns</span>
+MAIL_PASSWORD / SMTP_PASSWORD / EMAIL_HOST_PASSWORD / EMAIL_PASS
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Niark Gap</div>
+      <div class="callout callout-good">
+        <div class="callout-icon">🟢</div>
+        <div class="callout-body"><strong>No equivalent in Niark.</strong> Code-repository scanners can find SMTP credentials stored in config files, but they cannot test whether those credentials actually work. RavenX's SMTP validator closes that loop — every extracted credential is authenticated live before reporting.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ WEB PANELS ══════════════════ -->
+<div id="page-webpanel" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 13 · Hosting Control Panel Detection</div>
+    <h2>🖥 &nbsp;Web Panel Detection</h2>
+    <div class="subtitle">Probes standard ports for exposed hosting control panels — cPanel, Plesk, WHM, DirectAdmin, Webmin. Detecting these panels means the target's hosting infrastructure management interface is exposed to the internet. Combined with default credentials, brute-force, or credential stuffing from our other scanners, panel access can mean full server compromise.</div>
+    <div class="header-tags">
+      <span class="tag gold">LIVE</span>
+      <span class="tag purple">No equivalent in Niark</span>
+      <span class="tag">cPanel · Plesk · WHM · Webmin</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Panels</div><div class="val gold">5 panel types</div></div>
+      <div class="info-chip"><div class="lbl">Ports</div><div class="val">2082 2083 2086 2087 8880 8443 10000 2222</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Panel Port Map</div>
+      <table class="t">
+        <thead><tr><th>Panel</th><th>HTTP Port</th><th>HTTPS Port</th><th>Access Level</th></tr></thead>
+        <tbody>
+          <tr><td>cPanel</td><td>:2082</td><td>:2083</td><td>Single hosting account management</td></tr>
+          <tr><td>WHM (WebHost Manager)</td><td>:2086</td><td>:2087</td><td>Root-level server + all accounts</td></tr>
+          <tr><td>Plesk</td><td>:8880</td><td>:8443</td><td>Full server + all hosting accounts</td></tr>
+          <tr><td>Webmin</td><td>:10000</td><td>:10000</td><td>Root server administration</td></tr>
+          <tr><td>DirectAdmin</td><td>:2222</td><td>:2222</td><td>Server or account management</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ PATH SCANNER ══════════════════ -->
+<div id="page-path" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 14 · Building Now</div>
+    <h2>🗂 &nbsp;Path Scanner</h2>
+    <div class="subtitle">Calls the GitHub/GitLab/Bitbucket tree API to enumerate every file path in a repository without cloning. Matches paths against a sensitive filename pattern list. On match, fetches the file content via the blob API and pipes it through checkAndSaveKeys() for credential extraction. No disk I/O — pure API-based enumeration.</div>
+    <div class="header-tags">
+      <span class="tag gold">BUILDING</span>
+      <span class="tag">Git API — no clone required</span>
+      <span class="tag">Similar to Niark Path Scanner</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Status</div><div class="val gold">Building</div></div>
+      <div class="info-chip"><div class="lbl">GitHub API</div><div class="val">GET /repos/{owner}/{repo}/git/trees/HEAD?recursive=1</div></div>
+      <div class="info-chip"><div class="lbl">Rate Limit</div><div class="val">5 concurrent per platform</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Sensitive Path Pattern List</div>
+      <div class="code-block">
+.env  .env.*  *.pem  *.key  *.p12  *.pfx  id_rsa  id_ed25519
+credentials.json  credentials.yml  secrets.json  secrets.yml
+wp-config.php  settings.py  database.yml  *.tfstate  *.tfvars
+kubeconfig  .netrc  .pgpass  docker-compose.yml  *.keystore
+service-account*.json  .htpasswd  shadow  passwd
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">vs Niark Path Scanner</div>
+      <div class="callout callout-info">
+        <div class="callout-icon">ℹ️</div>
+        <div class="callout-body"><strong>Similar concept, different context:</strong> Niark's Path Scanner operates on already-cloned repositories and classifies findings by CWE. Ours operates via the git platform API without cloning, and when a matching file is found we extract and validate live credentials from it. The integration with credential validation is our differentiator.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ FPP ══════════════════ -->
+<div id="page-fpp" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 15 · Building Now</div>
+    <h2>🎯 &nbsp;FPP Scanner — File Path Pattern</h2>
+    <div class="subtitle">User-defined custom regex/glob patterns applied to git repository file trees. Same enumeration engine as the Path Scanner but pattern-driven by config rather than a hardcoded list. Allows targeting specific naming conventions unique to your stack — internal config naming patterns, proprietary file extensions, or organization-specific secret storage conventions.</div>
+    <div class="header-tags">
+      <span class="tag gold">BUILDING</span>
+      <span class="tag red">Different from Niark FPP (they do noise reduction, we do file discovery)</span>
+      <span class="tag">User-defined patterns in config JSON</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="callout callout-diff">
+      <div class="callout-icon">⚠️</div>
+      <div class="callout-body"><strong>Major naming difference:</strong> Niark's FPP = False Positive Prevention — an ML-based noise reduction engine that eliminates 70-80% of spurious vulnerability alerts using reachability analysis and VEX data. RavenX's FPP = File Path Pattern — a user-driven file discovery tool. Different purpose, same badge.</div>
+    </div>
+    <div class="section">
+      <div class="section-title">Config JSON Integration</div>
+      <div class="code-block">
+<span class="cm">// scanner_config.json — user-defined FPP patterns</span>
+{
+  <span class="str">"fpp_scan"</span>: <span class="kw">true</span>,
+  <span class="str">"fpp_patterns"</span>: [
+    <span class="str">"**/prod-secrets/**"</span>,
+    <span class="str">"**/infra/terraform/**/*.tfvars"</span>,
+    <span class="str">"**/.vault-token"</span>,
+    <span class="str">"**/k8s/secrets/**"</span>
+  ]
+}
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Gap: False Positive Prevention</div>
+      <div class="gap-box">
+        <h4>✗ NO ML-BASED NOISE REDUCTION</h4>
+        <p>Niark's FPP uses reachability analysis and ML confidence scoring to eliminate ~70-80% of scanner noise. RavenX has no equivalent — every regex hit is reported equally regardless of whether the credential pattern is in dead code, a test file, or an example. Adding even basic confidence scoring (known-bad patterns like EXAMPLE in key names, test_ prefix in keys) would meaningfully reduce noise without requiring ML infrastructure.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ R2S ══════════════════ -->
+<div id="page-r2s" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 16 · Building Now — Active CVE Exploit Chain</div>
+    <h2>⚛ &nbsp;R2S Scanner — CVE-2025-55182</h2>
+    <div class="subtitle">Active Next.js vulnerability scanner targeting CVE-2025-55182 — a middleware bypass vulnerability that allows unauthenticated access to protected routes. Full chain: detect Next.js → probe middleware bypass → enumerate protected routes → identify RCE vectors in server actions → execute payload → establish reverse shell callback to controller listener. Self-owned infrastructure only.</div>
+    <div class="header-tags">
+      <span class="tag gold">BUILDING</span>
+      <span class="tag red">NOT repo-to-source integrity (that's Niark R2S)</span>
+      <span class="tag">CVE-2025-55182 · Next.js RCE</span>
+      <span class="tag">Active exploit — self-owned infra only</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="callout callout-diff">
+      <div class="callout-icon">⚠️</div>
+      <div class="callout-body"><strong>Critical naming difference:</strong> Niark's R2S = Repository-to-Source integrity verification (comparing package tarballs to source code, passive analysis). RavenX's R2S = React-to-Shell, an active Next.js exploit chain targeting CVE-2025-55182. Same acronym, opposite approaches.</div>
+    </div>
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">CVE</div><div class="val red">CVE-2025-55182</div></div>
+      <div class="info-chip"><div class="lbl">Target</div><div class="val">Next.js applications</div></div>
+      <div class="info-chip"><div class="lbl">Technique</div><div class="val">Middleware bypass header</div></div>
+      <div class="info-chip"><div class="lbl">End Goal</div><div class="val red">Reverse shell callback</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Full Exploit Chain</div>
+      <div class="flow">
+        <div class="flow-step"><div class="step-num">1</div><div class="step-body"><h4>Next.js Detection</h4><p>Check response headers for <code>x-powered-by: Next.js</code>, <code>next-server</code>, presence of <code>/_next/static/</code> paths in HTML. Confirm Next.js version if possible via <code>/_next/static/chunks/main-*.js</code>.</p></div></div>
+        <div class="flow-step"><div class="step-num">2</div><div class="step-body"><h4>Middleware Bypass Probe</h4><p>Send request to a protected route (e.g. <code>/admin</code>, <code>/dashboard</code>, <code>/api/admin</code>) with the bypass header. A 200 response instead of 302/401 confirms the bypass.</p>
+          <div class="code-block" style="margin-top:8px;font-size:10.5px;">GET /admin HTTP/1.1
+Host: target.com
+x-middleware-subrequest: middleware:middleware:middleware</div>
+        </div></div>
+        <div class="flow-step"><div class="step-num">3</div><div class="step-body"><h4>Protected Route Enumeration</h4><p>With bypass confirmed, probe common protected paths: <code>/api/admin/*</code>, <code>/api/users</code>, <code>/api/internal/*</code>, <code>/_next/server/app/admin</code>. Map available endpoints and their accepted methods.</p></div></div>
+        <div class="flow-step"><div class="step-num">4</div><div class="step-body"><h4>RCE Vector Identification</h4><p>Test server actions and API routes for unsafe input handling: file upload endpoints, command execution patterns, template injection points, SSRF via URL parameters in API routes.</p></div></div>
+        <div class="flow-step"><div class="step-num">5</div><div class="step-body"><h4>Reverse Shell Callback</h4><p>On confirmed RCE, send payload connecting back to controller listener goroutine. Log shell session, capture <code>whoami</code>, <code>id</code>, <code>env</code>, <code>ls /</code>. Store full output in <code>valid_r2s.txt</code> and send Telegram alert.</p></div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">What Niark R2S Does Instead</div>
+      <div class="callout callout-info">
+        <div class="callout-icon">ℹ️</div>
+        <div class="callout-body"><strong>Niark R2S is passive:</strong> it downloads package tarballs, rebuilds them from source, and compares cryptographic hashes to detect tampering — the attack class that enabled the XZ Utils backdoor (CVE-2024-3094). Zero active exploitation. We could add this as a separate scanner (scanner_integrity.go) alongside our active CVE chain, but the concepts are unrelated.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ ORG SCANNER ══════════════════ -->
+<div id="page-org" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Scanner 17 · Building Now</div>
+    <h2>🏢 &nbsp;ORG Scanner</h2>
+    <div class="subtitle">Enumerates all repositories under a GitHub, GitLab, or Bitbucket organization and feeds every discovered repo into the full credential scan pipeline. Two modes: Auto (a validated git token triggers automatic org-wide repo enumeration) and Manual (operator provides org name + platform + token via dashboard). All repos discovered flow into ScanRepo() + Path Scanner + FPP Scanner.</div>
+    <div class="header-tags">
+      <span class="tag gold">BUILDING</span>
+      <span class="tag">Auto + Manual modes</span>
+      <span class="tag">GitHub · GitLab · Bitbucket</span>
+      <span class="tag">Feeds into full credential pipeline</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="info-row">
+      <div class="info-chip"><div class="lbl">Auto Mode</div><div class="val gold">Token validated → enumerate all repos</div></div>
+      <div class="info-chip"><div class="lbl">Manual Mode</div><div class="val">POST /api/org-scan {platform, org, token}</div></div>
+      <div class="info-chip"><div class="lbl">Output</div><div class="val">Feeds ScanRepo() pipeline</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">API Endpoints Used</div>
+      <div class="code-block">
+<span class="cm"># GitHub — all repos accessible by token</span>
+GET /user/repos?per_page=100&type=all
+GET /orgs/{org}/repos?per_page=100
+
+<span class="cm"># GitLab — all projects user is member of</span>
+GET /api/v4/projects?membership=true&per_page=100
+
+<span class="cm"># Bitbucket — all repos in workspace</span>
+GET /2.0/repositories/{workspace}?pagelen=100
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">vs Niark ORG Scanner</div>
+      <div class="callout callout-info">
+        <div class="callout-icon">ℹ️</div>
+        <div class="callout-body"><strong>Shared concept, different goals:</strong> Niark's ORG Scanner aggregates vulnerability risk posture across an organization — compliance mapping, team metrics, CVSS score trends, SBOM inventory. RavenX's ORG Scanner uses org-level access to harvest credentials from every repo the token can reach. Same breadth of coverage, completely different output.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ PLANNED ══════════════════ -->
+<div id="page-planned" class="page">
+  <div class="page-header">
+    <div class="header-eyebrow">Roadmap · Next Scanner Phases</div>
+    <h2>📐 &nbsp;Planned Scanners</h2>
+    <div class="subtitle">Eight active vulnerability scanner modes planned after the current four building scanners ship. These move RavenX from credential harvesting into active vulnerability exploitation — SSRF, LFI, JWT forging, CORS bypass, subdomain takeover, exposed database APIs, and unauthenticated container orchestration APIs.</div>
+    <div class="header-tags">
+      <span class="tag blue">8+ Planned</span>
+      <span class="tag">Active exploit chains</span>
+      <span class="tag">Self-owned infra testing</span>
+    </div>
+  </div>
+  <div class="content">
+    <div class="section">
+      <div class="section-title">Planned Scanner Details</div>
+      <table class="t">
+        <thead><tr><th>Scanner</th><th>What It Tests</th><th>Technique</th><th>Priority</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>SSRF Scanner</strong></td>
+            <td>Server-Side Request Forgery — does the server make outbound requests to attacker-controlled URLs?</td>
+            <td>Inject <code>?url=</code>, <code>?redirect=</code>, <code>?src=</code> with 169.254.169.254 (AWS metadata) and OOB callback. Blind SSRF via DNS lookup.</td>
+            <td><span class="sev sev-critical">HIGH</span></td>
+          </tr>
+          <tr>
+            <td><strong>S3 / Cloud Storage Misconfig</strong></td>
+            <td>Publicly readable S3 buckets, GCS buckets, Azure Blob containers, Firebase open rules</td>
+            <td>Extract bucket names from HTML/JS/headers. Probe LIST/GET without auth. Firebase /.json endpoint.</td>
+            <td><span class="sev sev-critical">HIGH</span></td>
+          </tr>
+          <tr>
+            <td><strong>Exposed DB Ports</strong></td>
+            <td>Unauthenticated MongoDB, Redis, Elasticsearch, Memcached, CouchDB accessible from internet</td>
+            <td>TCP connect to :27017, :6379, :9200, :11211, :5984. Attempt unauthenticated read/ping.</td>
+            <td><span class="sev sev-critical">HIGH</span></td>
+          </tr>
+          <tr>
+            <td><strong>LFI / Path Traversal</strong></td>
+            <td>Local file inclusion via URL parameters — read /etc/passwd, app configs, private keys</td>
+            <td>Test <code>?file=</code>, <code>?page=</code>, <code>?include=</code> with <code>../../etc/passwd</code> variants including URL encoding and null byte bypasses.</td>
+            <td><span class="sev sev-high">HIGH</span></td>
+          </tr>
+          <tr>
+            <td><strong>JWT Weakness Scanner</strong></td>
+            <td>alg:none bypass, weak HMAC secrets, RS256→HS256 algorithm confusion, expired token acceptance</td>
+            <td>Extract JWT from auth headers/cookies. Test alg:none. Brute common secrets. Test algorithm confusion attack.</td>
+            <td><span class="sev sev-high">HIGH</span></td>
+          </tr>
+          <tr>
+            <td><strong>CORS Misconfiguration</strong></td>
+            <td>APIs that reflect arbitrary Origin headers or accept null origin with credentials enabled</td>
+            <td>Send <code>Origin: https://evil.com</code>, check ACAO reflection. Test null origin. Check ACAC: true.</td>
+            <td><span class="sev sev-medium">MED</span></td>
+          </tr>
+          <tr>
+            <td><strong>Subdomain Takeover</strong></td>
+            <td>CNAME records pointing to unclaimed third-party services (GitHub Pages, Heroku, Netlify, Fastly)</td>
+            <td>Resolve CNAME target. Probe for vendor-specific "unclaimed" fingerprint strings in response.</td>
+            <td><span class="sev sev-medium">MED</span></td>
+          </tr>
+          <tr>
+            <td><strong>K8s / Docker API</strong></td>
+            <td>Unauthenticated Kubernetes API server (:6443/:8080) and Docker daemon (:2375/:2376)</td>
+            <td>Probe /api/v1/namespaces, /api/v1/secrets on K8s. GET /version on Docker API. List pods and secrets if accessible.</td>
+            <td><span class="sev sev-critical">HIGH</span></td>
+          </tr>
+          <tr>
+            <td><strong>Jenkins / CI Exposure</strong></td>
+            <td>Unauthenticated Groovy script console (full RCE), exposed credentials store, CI artifact leaks</td>
+            <td>Probe /script endpoint. Check /credentials/store. Test /job/*/api/json for build secrets in env vars.</td>
+            <td><span class="sev sev-critical">HIGH</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="section">
+      <div class="section-title">Also Needed from Niark Gap Analysis</div>
+      <div class="card-grid">
+        <div class="card">
+          <h4>📊 OSV CVE Integration</h4>
+          <p>When LIB Scanner finds package.json or requirements.txt, query osv.dev/query API for each package version. Report vulnerable dependencies alongside extracted credentials. Low effort, high impact.</p>
+        </div>
+        <div class="card">
+          <h4>🔍 Full Git History Trawl</h4>
+          <p>Change ScanRepo() from <code>--depth 1</code> to full clone. Walk all commits via <code>git log --all -p</code>. Secrets deleted in commit N are still in N-1 and are a critical finding class we currently miss entirely.</p>
+        </div>
+        <div class="card">
+          <h4>📡 Shannon Entropy Detection</h4>
+          <p>Add entropy-based scanning as a parallel pass in checkAndSaveKeys(). High-entropy strings (>4.5 bits/char) in assignment contexts get flagged even without matching any specific regex pattern.</p>
+        </div>
+        <div class="card">
+          <h4>🏷 Confidence Scoring</h4>
+          <p>Basic false positive suppression: filter known-bad patterns (EXAMPLE, FAKE, TEST in key values), downweight devDependency-sourced findings, deduplicate same key from multiple sources before alerting.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  const pg = document.getElementById('page-' + id);
+  if (pg) pg.classList.add('active');
+  if (event && event.currentTarget) event.currentTarget.classList.add('active');
+  document.querySelector('.main').scrollTop = 0;
+}
+</script>
+</body>
+</html>

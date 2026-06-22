@@ -89,6 +89,8 @@ export type SmtpInfo = {
   host?: string
   port?: number
   user?: string
+  pass?: string
+  from?: string
   authMethod?: string
 }
 
@@ -134,6 +136,10 @@ export type FindingDetails = {
   ghLogin?: string
   replicateUser?: string
   geminiModels?: ReadonlyArray<string>
+
+  // verify_meta derived fields
+  _hasSub?: boolean
+  _verifySnippet?: string | null
 }
 
 export type Finding = {

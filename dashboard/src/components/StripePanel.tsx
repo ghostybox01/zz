@@ -145,17 +145,35 @@ export function StripePanel({ onToast }: Props) {
               {items.map((item) => {
                 const { mode, keyType } = detectMode(item.metadata, item.key_value)
                 const state = refreshState[item.id]
-                let storedMeta: { livemode?: boolean; available?: Array<{ amount: number; currency: string }> } = {}
+                let storedMeta: {
+                  livemode?: boolean
+                  available?: Array<{ amount: number; currency: string }>
+                  stripeAccountId?: string
+                  stripeChargesEnabled?: boolean
+                  stripePayoutsEnabled?: boolean
+                  stripeCanCustom?: boolean
+                  stripeConnected?: boolean
+                } = {}
                 try { storedMeta = item.verify_meta ? JSON.parse(item.verify_meta) : {} } catch { /* ignore */ }
                 const liveBalance = state?.result?.available ?? storedMeta.available
+                const accountId = storedMeta.stripeAccountId
+                const canCustom = storedMeta.stripeCanCustom
+                const chargesOk = storedMeta.stripeChargesEnabled
+                const payoutsOk = storedMeta.stripePayoutsEnabled
                 return (
                   <tr key={item.id} className={item.reported ? 'findings-row--reported' : ''}>
                     <td>
                       <code className="findings-key">{item.key_value}</code>
-                      <div className="muted" style={{ fontSize: '.7rem' }}>{keyType} key</div>
+                      <div className="muted" style={{ fontSize: '.7rem' }}>{keyType} key{accountId ? ` · ${accountId}` : ''}</div>
                     </td>
                     <td>
                       <span className={`findings-mode findings-mode--${mode.toLowerCase()}`}>{mode}</span>
+                      {chargesOk != null && (
+                        <div className="muted" style={{ fontSize: '.7rem' }}>
+                          {chargesOk ? '✓ charges' : '✗ charges'}{payoutsOk != null ? (payoutsOk ? ' · ✓ payouts' : ' · ✗ payouts') : ''}
+                          {canCustom != null ? (canCustom ? ' · custom✓' : ' · custom✗') : ''}
+                        </div>
+                      )}
                     </td>
                     <td>
                       <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="findings-source" title={item.source_url}>

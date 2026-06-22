@@ -5,10 +5,17 @@ type Props = {
   onToast: (title: string, message?: string, kind?: 'error' | 'info') => void
 }
 
-function parseHost(keyValue: string): string {
+type SmtpCred = { host: string; port: string; user: string; pass: string; from: string }
+
+function parseSmtpCred(keyValue: string): SmtpCred | null {
   const parts = keyValue.split(':')
-  if (parts.length >= 4) return `${parts[0]}:${parts[1]}`
-  return parts[0] ?? keyValue
+  if (parts.length < 3) return null
+  const [host, port, user, ...rest] = parts
+  const lastPart = rest[rest.length - 1] ?? ''
+  const hasFrom = lastPart.includes('@')
+  const from = hasFrom ? lastPart : ''
+  const pass = hasFrom ? rest.slice(0, -1).join(':') : rest.join(':')
+  return { host: host ?? '', port: port ?? '', user: user ?? '', pass, from }
 }
 
 function parseRecheckMeta(raw: string | null): Record<string, string> {
@@ -136,11 +143,12 @@ export function SmtpPanel({ onToast }: Props) {
             <thead>
               <tr>
                 <th>Type</th>
-                <th>Credential</th>
                 <th>Host</th>
+                <th>User / Pass</th>
+                <th>From</th>
                 <th>Source</th>
                 <th>Status</th>
-                <th style={{ width: '7rem' }}>Actions</th>
+                <th style={{ width: '5rem' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -149,7 +157,8 @@ export function SmtpPanel({ onToast }: Props) {
                 const verifyRaw = st?.meta ?? item.verify_meta
                 const isValid = item.status === 'valid' || item.status === 'validated'
                 const color = item.type === 'XSMTP' ? '#f97316' : '#fbbf24'
-                const host = parseHost(item.key_value)
+                const cred = item.type === 'SMTP' ? parseSmtpCred(item.key_value) : null
+                const displayKey = cred ? null : item.key_value
                 return (
                   <tr key={item.id} style={isValid ? { background: 'rgba(0,255,100,0.04)' } : undefined}>
                     <td>
@@ -159,19 +168,31 @@ export function SmtpPanel({ onToast }: Props) {
                       </span>
                     </td>
                     <td>
-                      <code className="findings-key" style={{ fontSize: '.72rem' }}>
-                        {item.key_value.length > 60 ? `${item.key_value.slice(0, 60)}…` : item.key_value}
-                      </code>
-                      {item.metadata && <div className="muted" style={{ fontSize: '.68rem' }}>{item.metadata.slice(0, 50)}</div>}
-                      <RecheckBadges raw={verifyRaw} />
+                      {cred
+                        ? <><code style={{ fontSize: '.72rem', color: '#aaa' }}>{cred.host}</code>
+                            {cred.port && <span className="muted" style={{ fontSize: '.68rem' }}>:{cred.port}</span>}</>
+                        : displayKey && <code className="findings-key" style={{ fontSize: '.72rem' }}>
+                            {displayKey.length > 40 ? `${displayKey.slice(0, 40)}…` : displayKey}
+                          </code>
+                      }
                     </td>
                     <td>
-                      <code style={{ fontSize: '.72rem', color: '#aaa' }}>{host}</code>
+                      {cred
+                        ? <><code style={{ fontSize: '.72rem', display: 'block' }}>{cred.user}</code>
+                            {cred.pass && <code style={{ fontSize: '.68rem', color: '#888', display: 'block' }}>{cred.pass.slice(0, 30)}{cred.pass.length > 30 ? '…' : ''}</code>}</>
+                        : <RecheckBadges raw={verifyRaw} />
+                      }
+                    </td>
+                    <td>
+                      {cred
+                        ? <span style={{ fontSize: '.7rem', color: '#888' }}>{cred.from || '—'}</span>
+                        : item.metadata && <span className="muted" style={{ fontSize: '.68rem' }}>{item.metadata.slice(0, 30)}</span>
+                      }
                     </td>
                     <td>
                       <a href={item.source_url} target="_blank" rel="noopener noreferrer"
                         className="findings-source" title={item.source_url} style={{ fontSize: '.72rem' }}>
-                        {item.source_url?.slice(0, 40)}
+                        {item.source_url?.slice(0, 35)}
                       </a>
                     </td>
                     <td>

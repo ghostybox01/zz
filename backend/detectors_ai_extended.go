@@ -16,22 +16,31 @@ import (
 
 // Prefix-based patterns (full match is the key).
 var (
-	geminiAPIKeyPattern     = regexp.MustCompile(`AIzaSy[A-Za-z0-9_-]{33}`)
-	xaiAPIKeyPattern        = regexp.MustCompile(`xai-[A-Za-z0-9]{52,60}`)
+	// AIzaSy prefix = legacy Google AI Studio keys; AQ. prefix = new format (Google migrating AI Studio accounts)
+	geminiAPIKeyPattern     = regexp.MustCompile(`(?:AIzaSy[A-Za-z0-9_-]{33}|AQ\.[A-Za-z0-9_\-]{30,60})`)
+	// TruffleHog confirms xai- + exactly 80 chars [A-Za-z0-9_]; current {52,60} misses all real keys
+	xaiAPIKeyPattern        = regexp.MustCompile(`xai-[A-Za-z0-9_]{80}`)
 	groqAPIKeyPattern       = regexp.MustCompile(`gsk_[A-Za-z0-9]{52}`)
-	perplexityAPIKeyPattern = regexp.MustCompile(`pplx-[a-f0-9]{48}`)
+	// Gitleaks confirms pplx- + 48 chars; charset is alphanum not hex
+	perplexityAPIKeyPattern = regexp.MustCompile(`pplx-[a-zA-Z0-9]{48}`)
 	openrouterAPIKeyPattern = regexp.MustCompile(`sk-or-v1-[a-f0-9]{64}`)
 	huggingfaceAPIKeyPattern = regexp.MustCompile(`hf_[A-Za-z0-9]{34}`)
-	replicateAPIKeyPattern  = regexp.MustCompile(`r8_[A-Za-z0-9]{38}`)
+	// Official Replicate docs: 40 chars total = r8_ (3) + 37 body; body is [A-Za-z0-9_-] per TruffleHog
+	replicateAPIKeyPattern  = regexp.MustCompile(`r8_[A-Za-z0-9_-]{37}`)
 )
 
 // Context-based patterns (capture group 1 is the key).
 var (
-	mistralAPIKeyPattern    = regexp.MustCompile(`(?i)(?:mistral[_-]?(?:api[_-]?)?key|MISTRAL_API_KEY)\s*[:=]\s*["']?([A-Za-z0-9]{32})["']?`)
-	elevenlabsAPIKeyPattern = regexp.MustCompile(`(?i)(?:elevenlabs[_-]?(?:api[_-]?)?key|ELEVEN_API_KEY|XI_API_KEY)\s*[:=]\s*["']?([a-f0-9]{32})["']?`)
-	cohereAPIKeyPattern     = regexp.MustCompile(`(?i)(?:cohere[_-]?(?:api[_-]?)?key|CO_API_KEY|COHERE_API_KEY)\s*[:=]\s*["']?([A-Za-z0-9]{40})["']?`)
-	togetherAIAPIKeyPattern = regexp.MustCompile(`(?i)(?:together(?:ai)?[_-]?(?:api[_-]?)?key|TOGETHER_API_KEY)\s*[:=]\s*["']?([a-f0-9]{64})["']?`)
-	fireworksAPIKeyPattern  = regexp.MustCompile(`(?i)(?:fireworks[_-]?(?:api[_-]?)?key|FIREWORKS_API_KEY)\s*[:=]\s*["']?([A-Za-z0-9_-]{40,60})["']?`)
+	// Mistral has no documented bare prefix; {32} fixed length unverified — using {32,100} range
+	mistralAPIKeyPattern    = regexp.MustCompile(`(?i)(?:mistral[_-]?(?:api[_-]?)?key|MISTRAL_API_KEY)\s*[:=]\s*["']?([A-Za-z0-9_-]{32,100})["']?`)
+	// Legacy personal keys: 32-char hex (context-keyed). New service-account keys: sk_ prefix (bare).
+	elevenlabsAPIKeyPattern = regexp.MustCompile(`(?i)(?:elevenlabs[_-]?(?:api[_-]?)?key|ELEVENLABS_API_KEY|ELEVEN_API_KEY|XI_API_KEY)\s*[:=]\s*["']?([a-f0-9]{32})["']?|(?-i)\bsk_[a-zA-Z0-9]{32,64}\b`)
+	// Gitleaks confirms [a-zA-Z0-9]{40}; add co_ bare prefix branch + wider length range {40,52}
+	cohereAPIKeyPattern     = regexp.MustCompile(`(?i)(?:cohere[_-]?(?:api[_-]?)?key|CO_API_KEY|COHERE_API_KEY)\s*[:=]\s*["']?([A-Za-z0-9]{40,52})["']?|\bco_([A-Za-z0-9]{40,52})\b`)
+	// TogetherAI: [a-f0-9] was too narrow; real keys are full alphanum
+	togetherAIAPIKeyPattern = regexp.MustCompile(`(?i)(?:together(?:ai)?[_-]?(?:api[_-]?)?key|TOGETHER_API_KEY)\s*[:=]\s*["']?([A-Za-z0-9]{64})["']?`)
+	// Fireworks: added FW_API_KEY alias; fw_ is optional prefix in the key value
+	fireworksAPIKeyPattern  = regexp.MustCompile(`(?i)(?:fireworks[_-]?(?:api[_-]?)?key|FIREWORKS_API_KEY|FW_API_KEY)\s*[:=]\s*["']?(?:fw_)?([A-Za-z0-9]{40,56})["']?`)
 )
 
 // ── CheckGemini ──────────────────────────────────────────────────────────────

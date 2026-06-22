@@ -173,7 +173,7 @@ function StatusPill({
 
 /* ─── Stripe Account panel ──────────────────────────────────── */
 
-function StripePanel({ stripe, accountId }: { stripe: NonNullable<Finding['details']>['stripe']; accountId?: string }) {
+function StripePanel({ stripe, accountId, canCustom }: { stripe: NonNullable<Finding['details']>['stripe']; accountId?: string; canCustom?: string }) {
   if (!stripe) return null
   return (
     <div className="fdv-section">
@@ -220,7 +220,7 @@ function StripePanel({ stripe, accountId }: { stripe: NonNullable<Finding['detai
 
       <div className="fdv-card__grid fdv-card__grid--solo">
         <CopyCell label="ACCOUNT ID" value={accountId ?? '—'} mono />
-        <CopyCell label="CUSTOM ACCOUNTS" value="Cannot Create" />
+        <CopyCell label="CUSTOM ACCOUNTS" value={canCustom ?? '—'} />
       </div>
     </div>
   )
@@ -278,6 +278,8 @@ function MetadataPanel({ finding }: { finding: Finding }) {
   // SMTP
   if (d?.smtp?.host) rows.push({ icon: <IcoInfo />, label: 'HOST', value: `${d.smtp.host}${d.smtp.port ? `:${d.smtp.port}` : ''}`, mono: true, tone: 'blue' })
   if (d?.smtp?.user) rows.push({ icon: <IcoInfo />, label: 'USER', value: d.smtp.user, mono: true, tone: 'blue' })
+  if (d?.smtp?.pass) rows.push({ icon: <IcoInfo />, label: 'PASS', value: d.smtp.pass, mono: true, tone: 'blue' })
+  if (d?.smtp?.from) rows.push({ icon: <IcoInfo />, label: 'FROM', value: d.smtp.from, mono: true, tone: 'blue' })
 
   // Models
   if (d?.modelsAvailable !== undefined) rows.push({ icon: <IcoInfo />, label: 'MODELS', value: `${d.modelsAvailable} available`, tone: 'blue' })
@@ -431,7 +433,8 @@ export function FindingDetail({ finding, onBack, onRecheck, onResend }: Props) {
         {d?.stripe ? (
           <StripePanel
             stripe={d.stripe}
-            accountId={d.extra?.find((e) => e.key.toLowerCase().includes('account'))?.value}
+            accountId={d.extra?.find((e) => e.key === 'ACCOUNT ID')?.value}
+            canCustom={d.extra?.find((e) => e.key === 'CUSTOM ACCOUNTS')?.value}
           />
         ) : (
           <MetadataPanel finding={finding} />

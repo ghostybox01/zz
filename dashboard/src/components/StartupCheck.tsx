@@ -118,6 +118,17 @@ export function StartupCheck({ onDone }: Props) {
     return () => { cancelled = true }
   }, [])
 
+  // Auto-advance when every check passes — no click required
+  useEffect(() => {
+    if (!done) return
+    const failCount = Object.values(states).filter((s) => s === 'fail').length
+    if (failCount === 0) {
+      window.localStorage.setItem(SKIP_KEY, '1')
+      const t = setTimeout(onDone, 600)
+      return () => clearTimeout(t)
+    }
+  }, [done, states, onDone])
+
   const okCount = Object.values(states).filter((s) => s === 'ok').length
   const failCount = Object.values(states).filter((s) => s === 'fail').length
 

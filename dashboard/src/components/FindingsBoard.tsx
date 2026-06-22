@@ -10,7 +10,7 @@ type SortKey = 'provider' | 'at' | 'severity'
 
 type Props = {
   findings: readonly Finding[]
-  onClearAll?: () => void | Promise<void>
+  onClearAll?: () => void | Promise<void>  // kept in props for backward compat but no longer rendered
   /**
    * Optional bulk-remove callback. When omitted, the panel only renders
    * filtered rows but cannot mutate parent state — trash + bulk delete
@@ -57,7 +57,7 @@ function vulnTag(rule: string, method?: string): string {
   return 'page'
 }
 
-export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast }: Props) {
+export function FindingsBoard({ findings, onClearAll: _onClearAll, onRemoveFindings, onToast }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('provider')
   const [dir, setDir] = useState<'asc' | 'desc'>('asc')
   const [addon, setAddon] = useState<string>('all')
@@ -437,21 +437,6 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
             title="Download all hits from DB (no row cap)">
             All CSV
           </a>
-          <button
-            type="button"
-            className="btn-danger-outline btn-hit-tool"
-            disabled={!onClearAll || allFindings.length === 0}
-            onClick={() => {
-              if (!onClearAll) return
-              setConfirmDialog({
-                message: `Clear all ${allFindings.length} findings? This calls /api/clear on the backend.`,
-                onConfirm: () => void onClearAll(),
-              })
-            }}
-            title={onClearAll ? 'POST /api/clear — clears credentials + result files' : 'Needs live backend'}
-          >
-            Delete all
-          </button>
         </div>
       </div>
 
@@ -572,6 +557,9 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
                       </td>
                       <td className="mono-cell cred-cell" title={findingCredentialText(f)}>
                         <code className="cred-cell__code">{findingCredentialText(f)}</code>
+                        {f.details?._verifySnippet && (
+                          <span className="cred-meta-pill">{f.details._verifySnippet}</span>
+                        )}
                       </td>
                       <td>
                         <span className="vuln-pill">{vulnTag(f.ruleLabel, f.discoveryMethod)}</span>
@@ -592,6 +580,9 @@ export function FindingsBoard({ findings, onClearAll, onRemoveFindings, onToast 
                             <span className="status-pill-valid__dot" aria-hidden />
                             VALID
                           </span>
+                        )}
+                        {f.details?._hasSub && (
+                          <span className="sub-bell" title="Active subscription / balance">🔔</span>
                         )}
                       </td>
                       <td>

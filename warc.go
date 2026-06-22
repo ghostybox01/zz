@@ -48,8 +48,14 @@ var (
 	totalLiveDomains atomic.Int64
 	uniqueDomains    = sync.Map{}
 
-	// File writing mutex
+	// File writing mutex (shared for all output files)
 	fileMutex sync.Mutex
+
+	// Side-channel output files — opened in main, written under fileMutex.
+	// envURLFile  receives full URLs whose path matches the env filter regex.
+	// crtshFile   receives domains surfaced via crt.sh (pre-liveness-test).
+	envURLFile *os.File
+	crtshFile  *os.File
 
 	// Global max domains check
 	globalMaxDomains atomic.Int64
@@ -67,33 +73,9 @@ var (
 	urlRegex       = regexp.MustCompile(`WARC-Target-URI:\s+(https?://[^\s]+)`)
 	envFilterRegex = regexp.MustCompile(`(?i)(\.env|/env|env\.|config\.env|env\.php|env\.json|environment)`)
 
-	// HTTP client for connection testing with custom transport to suppress errors
-	httpClient = &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: false,
-			},
-			DialContext: (&net.Dialer{
-				Timeout:   5 * time.Second,
-				KeepAlive: 0,
-			}).DialContext,
-			DisableKeepAlives:     true,
-			MaxIdleConns:          0,
-			MaxIdleConnsPerHost:   0,
-			IdleConnTimeout:       0,
-			TLSHandshakeTimeout:   5 * time.Second,
-			ExpectContinueTimeout: 0,
-			ResponseHeaderTimeout: 5 * time.Second,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Follow redirects but limit to 5
-			if len(via) >= 5 {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
-	}
+	// HTTP client — initialised in main() so the -insecure flag can be
+	// applied before any connection is attempted.
+	httpClient *http.Client
 )
 
 // Live status codes (2xx and 3xx are considered live)
@@ -153,9 +135,9 @@ func getAvailableSnapshots() ([]string, error) {
 			}
 			continue
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close() // explicit close — defer inside a loop leaks connections
 			if attempt == maxRetries {
 				return nil, fmt.Errorf("HTTP %d: Failed to fetch collection info", resp.StatusCode)
 			}
@@ -164,6 +146,7 @@ func getAvailableSnapshots() ([]string, error) {
 
 		var readErr error
 		body, readErr = io.ReadAll(resp.Body)
+		resp.Body.Close() // explicit close after read — same reason
 		if readErr != nil {
 			if attempt == maxRetries {
 				return nil, fmt.Errorf("failed to read response: %w", readErr)
@@ -551,6 +534,21 @@ func extractWarcFile(warcURL string, domainChan chan<- string, wg *sync.WaitGrou
 			urlStr := string(match[1])
 			domain := extractDomain(urlStr)
 
+			// Wire the env-filter regex: write the full URL to env_urls.txt
+			// when the path looks like an exposed env/config file. This lets
+			// the scanner probe these URLs directly rather than just the root
+			// domain. Previously the regex was declared but never called.
+			if envFilterRegex.MatchString(urlStr) {
+				fileMutex.Lock()
+				if envURLFile != nil {
+					_, _ = envURLFile.WriteString(urlStr + "\n")
+				}
+				fileMutex.Unlock()
+				if globalVerbose.Load() {
+					fmt.Printf("%s[ENV-HIT]%s %s\n", YELLOW, RESET, urlStr)
+				}
+			}
+
 			// sendDomain handles dedup, subdomain-only filter, verbose
 			// logging, and the max-domains ceiling for every producer.
 			if !sendDomain(domain, domainChan) {
@@ -700,6 +698,14 @@ func fetchCrtShPivot(pivot string, domainChan chan<- string) {
 			if !sendDomain(name, domainChan) {
 				return
 			}
+			// Write every crt.sh-sourced domain to a dedicated side file so
+			// it can be scanned first — cert-transparency hits are more
+			// targeted than random CC domains.
+			fileMutex.Lock()
+			if crtshFile != nil {
+				_, _ = crtshFile.WriteString(name + "\n")
+			}
+			fileMutex.Unlock()
 			emitted++
 		}
 	}
@@ -792,6 +798,15 @@ func main() {
 		crtTLDFlag     = flag.String("crt-tld", "", "Comma-separated TLDs for crt.sh TLD pivot (e.g. 'com,net,io'); required when crtsh is in -source unless -crt-domain is set")
 		crtDomainFlag  = flag.String("crt-domain", "", "Comma-separated registered domains for crt.sh domain pivot (e.g. 'example.com,foo.io'); alternative to -crt-tld")
 		subdomainOnly  = flag.Bool("subdomain-only", false, "Drop any FQDN whose eTLD+1 equals itself (apex/registered domain), applies to every producer")
+		insecure       = flag.Bool("insecure", false, "Skip TLS certificate verification — catches live hosts with self-signed or expired certs that would otherwise be missed")
+
+		// New producer flags — each implies its source without needing -source=…
+		waybackPatternFlag = flag.String("wayback-pattern", "", "Comma-separated Wayback CDX URL patterns (e.g. '*/.env,*/.git/config'); empty = 20 default patterns. Implies -source=wayback")
+		asnFlag            = flag.String("asn", "", "Comma-separated ASN numbers (e.g. 'AS47583,14061'). BGPView → CIDR → IPs. Implies -source=asn")
+		asnNameFlag        = flag.String("asn-name", "", "Comma-separated org keywords for BGPView name search (e.g. 'hostinger,sendgrid'). Resolves to ASNs then IPs. Implies -source=asn-name")
+		cidrFlag           = flag.String("cidr", "", "Comma-separated CIDR ranges to expand (e.g. '192.168.1.0/24'); max /16 per range. Implies -source=cidr")
+		ipFileFlag         = flag.String("ip-file", "", "Path to a file with IPs/FQDNs (one per line; '#' comments; CIDR notation accepted). Implies -source=ipfile")
+		crtOrgFlag         = flag.String("crt-org", "", "Comma-separated org keywords for crt.sh O= search (e.g. 'stripe,sendgrid'). Finds all certs issued to matching orgs. Implies -source=crt-org")
 	)
 	flag.Parse()
 
@@ -800,6 +815,39 @@ func main() {
 		fmt.Println("Usage: ./warc_live_checker -max-domains 10000 [options]")
 		flag.PrintDefaults()
 		os.Exit(1)
+	}
+
+	// Initialise the HTTP client here so the -insecure flag is applied before
+	// any connection is attempted. Previously httpClient was a package-level
+	// literal with InsecureSkipVerify hard-coded to false, which caused
+	// self-signed / expired-cert hosts to silently fail the liveness check.
+	httpClient = &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: *insecure, //nolint:gosec // intentional, user-opted-in
+			},
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 0,
+			}).DialContext,
+			DisableKeepAlives:     true,
+			MaxIdleConns:          0,
+			MaxIdleConnsPerHost:   0,
+			IdleConnTimeout:       0,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ExpectContinueTimeout: 0,
+			ResponseHeaderTimeout: 5 * time.Second,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	if *insecure {
+		fmt.Printf("%s[WARN]%s TLS verification disabled (-insecure) — self-signed certs accepted\n", YELLOW, RESET)
 	}
 
 	// Set global verbose + subdomain-only flags
@@ -815,16 +863,55 @@ func main() {
 	}
 	ccEnabled := false
 	crtshEnabled := false
+	waybackEnabled := false
+	asnEnabled := false
+	asnNameEnabled := false
+	cidrEnabled := false
+	ipFileEnabled := false
+	crtOrgEnabled := false
 	for _, s := range sources {
 		switch s {
 		case "cc":
 			ccEnabled = true
 		case "crtsh", "crt.sh":
 			crtshEnabled = true
+		case "wayback":
+			waybackEnabled = true
+		case "asn":
+			asnEnabled = true
+		case "asn-name", "asnname":
+			asnNameEnabled = true
+		case "cidr":
+			cidrEnabled = true
+		case "ipfile", "ip-file":
+			ipFileEnabled = true
+		case "crt-org", "crtorg":
+			crtOrgEnabled = true
 		default:
-			fmt.Printf("%s[ERROR]%s unknown source %q (valid: cc, crtsh)\n", RED, RESET, s)
+			fmt.Printf("%s[ERROR]%s unknown source %q (valid: cc, crtsh, wayback, asn, asn-name, cidr, ipfile, crt-org)\n", RED, RESET, s)
 			os.Exit(2)
 		}
+	}
+
+	// Convenience: passing a shortcut flag enables its producer even when the
+	// source isn't listed in -source, so callers don't have to manage both.
+	if *asnFlag != "" {
+		asnEnabled = true
+	}
+	if *asnNameFlag != "" {
+		asnNameEnabled = true
+	}
+	if *cidrFlag != "" {
+		cidrEnabled = true
+	}
+	if *ipFileFlag != "" {
+		ipFileEnabled = true
+	}
+	if *waybackPatternFlag != "" {
+		waybackEnabled = true
+	}
+	if *crtOrgFlag != "" {
+		crtOrgEnabled = true
 	}
 
 	crtTLDs := parseCSVFlag(*crtTLDFlag)
@@ -833,7 +920,27 @@ func main() {
 		fmt.Printf("%s[ERROR]%s -source includes crtsh but neither -crt-tld nor -crt-domain was set\n", RED, RESET)
 		os.Exit(2)
 	}
-	if !ccEnabled && !crtshEnabled {
+	if asnEnabled && *asnFlag == "" {
+		fmt.Printf("%s[ERROR]%s -source includes asn but -asn flag is not set\n", RED, RESET)
+		os.Exit(2)
+	}
+	if asnNameEnabled && *asnNameFlag == "" {
+		fmt.Printf("%s[ERROR]%s -source includes asn-name but -asn-name flag is not set\n", RED, RESET)
+		os.Exit(2)
+	}
+	if cidrEnabled && *cidrFlag == "" {
+		fmt.Printf("%s[ERROR]%s -source includes cidr but -cidr flag is not set\n", RED, RESET)
+		os.Exit(2)
+	}
+	if ipFileEnabled && *ipFileFlag == "" {
+		fmt.Printf("%s[ERROR]%s -source includes ipfile but -ip-file flag is not set\n", RED, RESET)
+		os.Exit(2)
+	}
+	if crtOrgEnabled && *crtOrgFlag == "" {
+		fmt.Printf("%s[ERROR]%s -source includes crt-org but -crt-org flag is not set\n", RED, RESET)
+		os.Exit(2)
+	}
+	if !ccEnabled && !crtshEnabled && !waybackEnabled && !asnEnabled && !asnNameEnabled && !cidrEnabled && !ipFileEnabled && !crtOrgEnabled {
 		fmt.Printf("%s[ERROR]%s no producers enabled (resolved sources=%v)\n", RED, RESET, sources)
 		os.Exit(2)
 	}
@@ -850,6 +957,24 @@ func main() {
 		if crtshEnabled {
 			enabled = append(enabled, "crtsh")
 		}
+		if waybackEnabled {
+			enabled = append(enabled, "wayback")
+		}
+		if asnEnabled {
+			enabled = append(enabled, "asn")
+		}
+		if asnNameEnabled {
+			enabled = append(enabled, "asn-name")
+		}
+		if cidrEnabled {
+			enabled = append(enabled, "cidr")
+		}
+		if ipFileEnabled {
+			enabled = append(enabled, "ipfile")
+		}
+		if crtOrgEnabled {
+			enabled = append(enabled, "crt-org")
+		}
 		fmt.Printf("%s[*]%s Producers enabled: %s\n", CYAN, RESET, strings.Join(enabled, ", "))
 		if *subdomainOnly {
 			fmt.Printf("%s[*]%s Subdomain-only filter active (apex/eTLD+1 entries dropped)\n", CYAN, RESET)
@@ -861,6 +986,29 @@ func main() {
 			if len(crtDomains) > 0 {
 				fmt.Printf("%s[*]%s crt.sh domain pivots: %s\n", CYAN, RESET, strings.Join(crtDomains, ", "))
 			}
+		}
+		if waybackEnabled {
+			patterns := parseCSVFlag(*waybackPatternFlag)
+			if len(patterns) == 0 {
+				fmt.Printf("%s[*]%s Wayback patterns: %d default patterns\n", CYAN, RESET, len(defaultWaybackPatterns))
+			} else {
+				fmt.Printf("%s[*]%s Wayback patterns: %s\n", CYAN, RESET, strings.Join(patterns, ", "))
+			}
+		}
+		if asnEnabled {
+			fmt.Printf("%s[*]%s ASN targets: %s\n", CYAN, RESET, *asnFlag)
+		}
+		if asnNameEnabled {
+			fmt.Printf("%s[*]%s ASN name keywords: %s\n", CYAN, RESET, *asnNameFlag)
+		}
+		if crtOrgEnabled {
+			fmt.Printf("%s[*]%s crt.sh org keywords: %s\n", CYAN, RESET, *crtOrgFlag)
+		}
+		if cidrEnabled {
+			fmt.Printf("%s[*]%s CIDR ranges: %s\n", CYAN, RESET, *cidrFlag)
+		}
+		if ipFileEnabled {
+			fmt.Printf("%s[*]%s IP/domain file: %s\n", CYAN, RESET, *ipFileFlag)
 		}
 	}
 	fmt.Println()
@@ -904,19 +1052,36 @@ func main() {
 			filesToProcess = *limit
 			fmt.Printf("%s[INFO]%s Limiting to %d files (out of %d)\n", YELLOW, RESET, filesToProcess, totalFiles)
 		} else {
-			// Auto-limit based on max-domains
-			// Estimate: each file might yield 10-100 live domains
-			estimatedFilesNeeded := int(*maxDomains / 50) // Conservative estimate
+			// Adaptive auto-limit: tiered estimate of live domains per WARC
+			// file. The old fixed /50 overestimated yield, causing too few
+			// files to be queued for small targets and the ceiling never
+			// being hit. New tiers use a more conservative yield floor:
+			//   ≤1k targets  → assume 10 live/file, min 50 files
+			//   ≤10k targets → assume 20 live/file, min 100 files
+			//   >10k targets → assume 30 live/file, min 200 files
+			// The ceiling check inside sendDomain stops producers early when
+			// the target is reached, so over-queuing is safe and cheap.
+			var yieldPerFile, minFiles int
+			switch {
+			case *maxDomains <= 1000:
+				yieldPerFile, minFiles = 10, 50
+			case *maxDomains <= 10000:
+				yieldPerFile, minFiles = 20, 100
+			default:
+				yieldPerFile, minFiles = 30, 200
+			}
+			estimatedFilesNeeded := int(*maxDomains/int64(yieldPerFile)) + 1
+			if estimatedFilesNeeded < minFiles {
+				estimatedFilesNeeded = minFiles
+			}
 			if estimatedFilesNeeded < filesToProcess {
 				filesToProcess = estimatedFilesNeeded
-				if filesToProcess < 100 {
-					filesToProcess = 100 // Minimum 100 files
-				}
 			}
 			if filesToProcess > 10000 {
-				filesToProcess = 10000 // Maximum 10k files
+				filesToProcess = 10000
 			}
-			fmt.Printf("%s[INFO]%s Auto-limiting to %d files to reach ~%d live domains\n", YELLOW, RESET, filesToProcess, *maxDomains)
+			fmt.Printf("%s[INFO]%s Auto-limiting to %d files (yield est. %d/file) to reach ~%d live domains\n",
+				YELLOW, RESET, filesToProcess, yieldPerFile, *maxDomains)
 		}
 
 		fmt.Printf("%s[+]%s Found %d WARC files total\n", GREEN, RESET, totalFiles)
@@ -934,7 +1099,17 @@ func main() {
 	}
 	defer outFile.Close()
 
-	// No header - clean output with only domains
+	// Side-channel outputs — non-fatal if they can't be created.
+	if f, err := os.Create("env_urls.txt"); err == nil {
+		envURLFile = f
+		defer f.Close()
+		fmt.Printf("%s[*]%s env URL hits → env_urls.txt\n", CYAN, RESET)
+	}
+	if f, err := os.Create("crtsh_domains.txt"); err == nil {
+		crtshFile = f
+		defer f.Close()
+		fmt.Printf("%s[*]%s crt.sh domain hits → crtsh_domains.txt\n", CYAN, RESET)
+	}
 
 	// Progress bar — sized for whichever producers are active. A nil bar
 	// would crash extractWarcFile's bar.Add(1); when CC is disabled we
@@ -1005,6 +1180,47 @@ func main() {
 	if crtshEnabled {
 		producerWg.Add(1)
 		go runCrtShProducer(crtTLDs, crtDomains, domainChan, &producerWg)
+	}
+
+	// Wayback CDX producer — queries archived crawls for env/config URL patterns
+	// and emits the live domains. Full matching URLs also land in env_urls.txt.
+	if waybackEnabled {
+		producerWg.Add(1)
+		go runWaybackProducer(parseCSVFlag(*waybackPatternFlag), domainChan, &producerWg)
+	}
+
+	// ASN producer — resolves each ASN to its IPv4 prefixes via BGPView, then
+	// expands each prefix into individual IPs (capped at /16 per prefix).
+	if asnEnabled {
+		producerWg.Add(1)
+		go runASNProducer(parseCSVFlag(*asnFlag), domainChan, &producerWg)
+	}
+
+	// ASN-name producer — keyword search: "hostinger" → matching ASNs → IPs.
+	// Results are merged and deduplicated before expansion so overlapping
+	// keywords (e.g. "amazon"+"aws") never expand the same prefix twice.
+	if asnNameEnabled {
+		producerWg.Add(1)
+		go runASNNameProducer(parseCSVFlag(*asnNameFlag), domainChan, &producerWg)
+	}
+
+	// crt.sh org producer — keyword search on the certificate O= field.
+	// "stripe" → all certs ever issued to Stripe, Inc., across all their domains.
+	if crtOrgEnabled {
+		producerWg.Add(1)
+		go runCrtShOrgProducer(parseCSVFlag(*crtOrgFlag), domainChan, &producerWg)
+	}
+
+	// CIDR producer — expands comma-separated CIDR ranges directly into IPs.
+	if cidrEnabled {
+		producerWg.Add(1)
+		go runCIDRProducer(parseCSVFlag(*cidrFlag), domainChan, &producerWg)
+	}
+
+	// IP-file producer — reads a plain-text file of IPs, FQDNs, or CIDRs.
+	if ipFileEnabled {
+		producerWg.Add(1)
+		go runIPFileProducer(*ipFileFlag, domainChan, &producerWg)
 	}
 
 	// Start CC extractor workers (grabber) - they extract domains and send to channel

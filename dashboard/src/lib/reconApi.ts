@@ -25,6 +25,7 @@ export type ReconRecentFinding = readonly [
   metadata: string | null,
   status: string,
   dbId?: number,
+  verifyMeta?: string | null,
 ]
 
 export type ReconStats = {
@@ -796,6 +797,7 @@ export const crack = {
     }
     return (await res.json()) as { ok: boolean }
   },
+  wipeAll: () => postJson<{ ok: boolean; sessions_cleared: number; rows_deleted: number }>('/crack/wipe-all'),
 }
 
 /* ── Prefilter (target-list liveness probe) ──────────────────────── */

@@ -620,6 +620,28 @@ export function CrackerWorkspace({
               <div className="muted-callout" style={{ marginTop: '0.75rem' }}>
                 <strong>Active crack sessions</strong>
                 <ul style={{ marginTop: '0.5rem', paddingLeft: '1.2rem' }}>
+                  <li style={{ listStyle: 'none', marginBottom: '0.5rem' }}>
+                    <button
+                      type="button"
+                      className="btn-glass btn-glass--xs"
+                      style={{ color: 'var(--color-red, #f87171)', borderColor: 'var(--color-red, #f87171)' }}
+                      onClick={() => {
+                        if (!window.confirm('Wipe ALL sessions and credentials from the database? This cannot be undone.')) return
+                        crack.wipeAll()
+                          .then((r) => {
+                            if (r.ok) {
+                              setSessions([])
+                              onToast({ kind: 'info', title: `Wiped ${r.sessions_cleared} session(s), ${r.rows_deleted} DB row(s)` })
+                            } else {
+                              onToast({ kind: 'error', title: 'Wipe failed' })
+                            }
+                          })
+                          .catch(() => onToast({ kind: 'error', title: 'Wipe request failed' }))
+                      }}
+                    >
+                      Wipe All History
+                    </button>
+                  </li>
                   {sessions.map((s) => {
                     const addonLabels = s.addon_ids.map((id) =>
                       ADDON_CATALOG.find((a) => a.id === id)?.label ?? id,

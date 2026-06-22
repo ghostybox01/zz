@@ -13,10 +13,12 @@ import (
 // Mailchimp API keys always end with -us<N> (datacenter suffix).
 // Both a standalone pattern and a context-based pattern are compiled here.
 var (
-	mailchimpAPIKeyPattern        = regexp.MustCompile(`[a-f0-9]{32}-us[0-9]{1,2}`)
-	mailchimpContextAPIKeyPattern = regexp.MustCompile(`(?i)(?:mailchimp[_-]?(?:api[_-]?)?key|MC_API_KEY)\s*[:=]\s*["']?([a-f0-9]{32}-us[0-9]+)["']?`)
+	// Mailchimp: 32-char hex + datacenter suffix. us1-us21 and eu datacenter codes both valid.
+	mailchimpAPIKeyPattern        = regexp.MustCompile(`[a-f0-9]{32}-(?:us|eu)[0-9]{1,2}`)
+	mailchimpContextAPIKeyPattern = regexp.MustCompile(`(?i)(?:mailchimp[_-]?(?:api[_-]?)?key|MC_API_KEY)\s*[:=]\s*["']?([a-f0-9]{32}-(?:us|eu)[0-9]+)["']?`)
 
-	resendAPIKeyPattern = regexp.MustCompile(`re_[A-Za-z0-9]{24,40}`)
+	// Resend: official example key re_c1tpEyD8_NKFusih9vKVQknRAQfmFcWCv contains underscore in body
+	resendAPIKeyPattern = regexp.MustCompile(`re_[A-Za-z0-9_]{24,40}`)
 )
 
 // ── CheckMailchimp ────────────────────────────────────────────────────────────

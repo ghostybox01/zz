@@ -6,10 +6,11 @@ import (
 	"regexp"
 )
 
-// Plivo uses an Auth ID (20-char alphanumeric, starts with MA or SA) and
-// an Auth Token (40-char alphanumeric). The pattern matches the Auth ID.
-// Validation uses Basic auth against the /Account/<AuthID>/ endpoint.
-var plivoPattern = regexp.MustCompile(`(?i)(?:plivo[_-]?(?:auth[_-]?)?(?:id|sid))["'\s:=]+([MS]A[A-Z0-9]{18})`)
+// Plivo Auth ID: [MS]A prefix + 18 uppercase alphanum chars (20 total).
+// Auth Token: 40-char [A-Za-z0-9_-] string — captured by plivoTokenPattern.
+// Case-insensitive flag scoped to keyword only to avoid matching lowercase Auth IDs.
+var plivoPattern = regexp.MustCompile(`(?i:plivo[_-]?(?:auth[_-]?)?(?:id|sid))["'\s:=]+([MS]A[A-Z0-9]{18})`)
+var plivoTokenPattern = regexp.MustCompile(`(?i:plivo[_-]?(?:auth[_-]?)?(?:token|secret|key))["'\s:=]+([A-Za-z0-9_-]{40})`)
 
 // CheckPlivo validates a Plivo Auth ID by hitting the account endpoint.
 // KNOWN LIMITATION: Plivo requires Basic auth as AuthID:AuthToken, but the
