@@ -137,7 +137,7 @@ if [[ ! -f go.mod ]]; then
   sudo -u "$SERVICE_USER" go mod init reconx-scanner >/dev/null 2>&1 || true
 fi
 sudo -u "$SERVICE_USER" go mod tidy >/dev/null 2>&1 || warn "go mod tidy reported issues — continuing"
-sudo -u "$SERVICE_USER" GOOS=linux GOARCH=amd64 go build -o reconx-scanner main.go
+sudo -u "$SERVICE_USER" GOOS=linux GOARCH=amd64 go build -o reconx-scanner .
 chmod +x "$INSTALL_DIR/backend/reconx-scanner"
 log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-scanner" | awk '{print $1}')"
 
@@ -150,13 +150,14 @@ log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-sc
 # binary is moved into place at $INSTALL_DIR/reconx-warc.
 log "Building the Go warc harvester binary for controller use…"
 WARC_BUILD_DIR=$(sudo -u "$SERVICE_USER" mktemp -d)
-sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/warc.go" "$WARC_BUILD_DIR/"
+sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/warc.go" "$INSTALL_DIR/warc_producers.go" "$WARC_BUILD_DIR/"
 sudo -u "$SERVICE_USER" bash -c "
   cd '$WARC_BUILD_DIR' &&
   /usr/bin/go mod init reconx-warc >/dev/null 2>&1 &&
   /usr/bin/go get github.com/schollz/progressbar/v3 >/dev/null 2>&1 &&
+  /usr/bin/go get golang.org/x/net/publicsuffix >/dev/null 2>&1 &&
   /usr/bin/go mod tidy >/dev/null 2>&1 &&
-  GOOS=linux GOARCH=amd64 /usr/bin/go build -o '$INSTALL_DIR/reconx-warc' warc.go
+  GOOS=linux GOARCH=amd64 /usr/bin/go build -o '$INSTALL_DIR/reconx-warc' .
 " || warn "warc build reported issues — check manually"
 sudo -u "$SERVICE_USER" rm -rf "$WARC_BUILD_DIR"
 chmod +x "$INSTALL_DIR/reconx-warc" 2>/dev/null || true
