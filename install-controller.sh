@@ -294,12 +294,15 @@ nginx -t
 log "Installing /usr/local/bin/reconx-update helper…"
 cat > /usr/local/bin/reconx-update <<'UPDATESCRIPT'
 #!/bin/bash
+# Self-update: clone latest code to a tempdir, then re-run the installer.
+# Works whether or not /opt/reconx is a git repo (rsync deploys are fine).
 set -euo pipefail
 INSTALL_DIR="${RECONX_INSTALL_DIR:-/opt/reconx}"
-cd "$INSTALL_DIR"
-git fetch --quiet origin main
-git reset --hard origin/main
-exec bash "$INSTALL_DIR/install-controller.sh"
+REPO=$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || echo "https://github.com/ghostybox01/zz.git")
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+git clone --quiet --depth 1 "$REPO" "$TMP/src"
+exec bash "$TMP/src/install-controller.sh"
 UPDATESCRIPT
 chmod 0755 /usr/local/bin/reconx-update
 
