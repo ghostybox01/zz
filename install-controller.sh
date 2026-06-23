@@ -141,9 +141,13 @@ if [[ ! -f go.mod ]]; then
   sudo -u "$SERVICE_USER" GOTOOLCHAIN=local go mod init reconx-scanner >/dev/null 2>&1 || true
 fi
 sudo -u "$SERVICE_USER" GOTOOLCHAIN=local go mod download >/dev/null 2>&1 || warn "go mod download reported issues — continuing"
-sudo -u "$SERVICE_USER" GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 go build -o reconx-scanner .
-chmod +x "$INSTALL_DIR/backend/reconx-scanner"
-log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-scanner" | awk '{print $1}')"
+if sudo -u "$SERVICE_USER" GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 go build -o reconx-scanner . 2>/tmp/reconx-scanner-build.log; then
+  chmod +x "$INSTALL_DIR/backend/reconx-scanner"
+  log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-scanner" | awk '{print $1}')"
+else
+  warn "Scanner build FAILED — check /tmp/reconx-scanner-build.log"
+  warn "Services will start but workers won't get a scanner binary until this is fixed"
+fi
 
 # ── 7b. Build the Go warc harvester binary (controller-local) ─────────────
 # Built at install time so the gunicorn service (which has no $PATH to
