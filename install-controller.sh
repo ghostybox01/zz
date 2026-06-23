@@ -103,6 +103,7 @@ rsync -a --delete \
   --exclude='backend/*.db-shm' \
   --exclude='backend/targets.txt' \
   --exclude='backend/uploads/' \
+  --exclude='go/' \
   "$SRC/" "$INSTALL_DIR/"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
