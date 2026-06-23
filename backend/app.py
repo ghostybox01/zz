@@ -9951,6 +9951,148 @@ def api_prefilter_results():
         return jsonify({'error': str(e)}), 500
 
 
+# ── ASN Recon ─────────────────────────────────────────────────────────────
+
+import glob as _glob
+
+_asn_recon_jobs: dict = {}
+
+
+@app.route('/api/asn-recon/start', methods=['POST'])
+def api_asn_recon_start():
+    data = request.get_json(silent=True) or {}
+    asns = data.get('asns')
+    if not isinstance(asns, list) or not asns:
+        return jsonify({'error': 'asns must be a non-empty list'}), 400
+    asn_re = re.compile(r'^AS?\d+$', re.IGNORECASE)
+    for a in asns:
+        if not isinstance(a, str) or not asn_re.match(a):
+            return jsonify({'error': f'invalid ASN: {a}'}), 400
+
+    workers   = int(data.get('workers', 100))
+    max_ips   = int(data.get('max_ips', 100000))
+    skip_rdns = bool(data.get('skip_rdns', False))
+    crtsh     = bool(data.get('crtsh', False))
+    shodan_key = str(data.get('shodan_key', '') or '')
+
+    job_id  = uuid.uuid4().hex[:12]
+    out_dir = f'/tmp/asn_recon_{job_id}'
+
+    cmd = ['python3', '../asn_recon.py'] + asns + [
+        '--out-dir', out_dir,
+        '--workers', str(workers),
+        '--max-ips', str(max_ips),
+    ]
+    if skip_rdns:
+        cmd.append('--skip-rdns')
+    if crtsh:
+        cmd.append('--crtsh')
+    if shodan_key:
+        cmd += ['--shodan-key', shodan_key]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+
+    job = {
+        'proc':       proc,
+        'out_dir':    out_dir,
+        'asns':       asns,
+        'log_lines':  [],
+        'status':     'running',
+        'started_at': time.time(),
+    }
+    _asn_recon_jobs[job_id] = job
+
+    def _reader(j, p):
+        for line in p.stdout:
+            j['log_lines'].append(line.rstrip('\n'))
+            if len(j['log_lines']) > 500:
+                j['log_lines'] = j['log_lines'][-500:]
+        p.wait()
+        j['status'] = 'done' if p.returncode == 0 else 'error'
+
+    threading.Thread(target=_reader, args=(job, proc), daemon=True,
+                     name=f'asn-recon-{job_id}').start()
+
+    return jsonify({'ok': True, 'job_id': job_id})
+
+
+@app.route('/api/asn-recon/status/<job_id>', methods=['GET'])
+def api_asn_recon_status(job_id):
+    job = _asn_recon_jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'job not found'}), 404
+
+    out_dir = job['out_dir']
+    summary_text = None
+    summary_path = os.path.join(out_dir, 'recon_merged', 'summary.txt')
+    if os.path.isfile(summary_path):
+        try:
+            with open(summary_path) as fh:
+                summary_text = fh.read()
+        except OSError:
+            pass
+    if summary_text is None:
+        matches = _glob.glob(os.path.join(out_dir, 'AS*', 'summary.txt'))
+        if matches:
+            try:
+                with open(matches[0]) as fh:
+                    summary_text = fh.read()
+            except OSError:
+                pass
+
+    combined_lines = 0
+    combined_path = os.path.join(out_dir, 'recon_merged', 'combined.txt')
+    if not os.path.isfile(combined_path):
+        matches = _glob.glob(os.path.join(out_dir, 'AS*', 'combined.txt'))
+        combined_path = matches[0] if matches else None
+    if combined_path and os.path.isfile(combined_path):
+        try:
+            with open(combined_path) as fh:
+                combined_lines = sum(1 for _ in fh)
+        except OSError:
+            pass
+
+    return jsonify({
+        'ok':             True,
+        'status':         job['status'],
+        'log':            job['log_lines'][-100:],
+        'summary':        summary_text,
+        'combined_lines': combined_lines,
+        'asns':           job['asns'],
+    })
+
+
+@app.route('/api/asn-recon/download/<job_id>', methods=['GET'])
+def api_asn_recon_download(job_id):
+    from flask import send_file as _send_file
+    job = _asn_recon_jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'job not found'}), 404
+
+    out_dir      = job['out_dir']
+    combined_path = os.path.join(out_dir, 'recon_merged', 'combined.txt')
+    if not os.path.isfile(combined_path):
+        matches = _glob.glob(os.path.join(out_dir, 'AS*', 'combined.txt'))
+        combined_path = matches[0] if matches else None
+
+    if not combined_path or not os.path.isfile(combined_path):
+        return jsonify({'error': 'combined.txt not found'}), 404
+
+    return _send_file(
+        combined_path,
+        mimetype='text/plain',
+        as_attachment=True,
+        download_name='asn_recon_combined.txt',
+    )
+
+
 # ── Global error handlers ─────────────────────────────────────────────────
 
 @app.errorhandler(400)

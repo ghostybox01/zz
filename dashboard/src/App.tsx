@@ -36,6 +36,7 @@ import { SmtpPanel } from './components/SmtpPanel'
 import { DatabasePanel } from './components/DatabasePanel'
 import { WebPanelsPanel } from './components/WebPanelsPanel'
 import { PrefilterPanel } from './components/PrefilterPanel'
+import { AsnReconPanel } from './components/AsnReconPanel'
 import { LogsPanel } from './components/LogsPanel'
 import { HelpPanel } from './components/HelpPanel'
 import { readTargetTxtFile } from './lib/targetList'
@@ -433,6 +434,7 @@ export default function App() {
   const webpanelsHidden = tab !== 'webpanels'
   const prefilterHidden = tab !== 'prefilter'
   const dorksHidden = tab !== 'dorks'
+  const asnreconHidden = tab !== 'asnrecon'
   const logsHidden = tab !== 'logs'
   const settingsHidden = tab !== 'settings'
   const helpHidden = tab !== 'help'
@@ -922,6 +924,16 @@ export default function App() {
                 }}
                 onToast={pushAlertToast}
               />
+            </section>
+
+            <section
+              id="panel-asnrecon"
+              role="tabpanel"
+              aria-labelledby="tab-asnrecon"
+              hidden={asnreconHidden}
+              className="tab-panel"
+            >
+              <AsnReconPanel />
             </section>
 
             <section

@@ -825,6 +825,33 @@ export const prefilter = {
 
 export { ReconApiError }
 
+/* ── ASN Recon ───────────────────────────────────────────────────── */
+
+export type AsnReconJob = {
+  ok: boolean
+  status: 'running' | 'done' | 'error'
+  log: string[]
+  summary: string | null
+  combined_lines: number
+  asns: string[]
+  error?: string
+}
+
+export const asnRecon = {
+  start: (params: {
+    asns: string[]
+    workers?: number
+    max_ips?: number
+    skip_rdns?: boolean
+    crtsh?: boolean
+    shodan_key?: string
+  }) => postJson<{ ok: boolean; job_id: string; error?: string }>('/asn-recon/start', params),
+
+  status: (jobId: string) => getJson<AsnReconJob>(`/asn-recon/status/${jobId}`),
+
+  downloadUrl: (jobId: string) => `${BASE}/asn-recon/download/${jobId}`,
+}
+
 /* ── Dorks — AI generator + Shodan/FOFA search ───────────────────── */
 
 export type DorkResult = {

@@ -206,7 +206,7 @@ function IcoSmtp(props: SVGProps<SVGSVGElement>) {
   )
 }
 
-export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'aikeys' | 'emailapi' | 'smtp' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'logs' | 'settings' | 'help'
+export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'aikeys' | 'emailapi' | 'smtp' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'asnrecon' | 'logs' | 'settings' | 'help'
 
 type Item = { id: DashboardTab; label: string; Ico: typeof IcoDash; goldWhenActive?: boolean }
 
@@ -226,6 +226,7 @@ const ITEMS: Item[] = [
   { id: 'webpanels', label: 'Web Panels', Ico: IcoPanel },
   { id: 'prefilter', label: 'Pre-filter', Ico: IcoFilter },
   { id: 'dorks', label: 'Dorks', Ico: IcoSearch },
+  { id: 'asnrecon', label: 'ASN Recon', Ico: IcoSearch },
   { id: 'logs', label: 'Logs', Ico: IcoTerminal },
   { id: 'settings', label: 'Settings', Ico: IcoGear },
   { id: 'help', label: 'Help', Ico: IcoHelp },
@@ -252,6 +253,7 @@ const TAB_TITLE: Record<DashboardTab, string> = {
   webpanels: 'Web panel credentials',
   prefilter: 'Target pre-filter',
   dorks: 'Dork hunter',
+  asnrecon: 'ASN Recon',
   logs: 'Logs',
   settings: 'Integrations',
   help: 'Help & docs',
