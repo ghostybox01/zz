@@ -285,7 +285,31 @@ ln -sf /etc/nginx/sites-available/reconx /etc/nginx/sites-enabled/reconx
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 
-# ── 11. Start everything ──────────────────────────────────────────────────
+# ── 11. Update helper + sudoers rule ─────────────────────────────────────
+# Writes /usr/local/bin/reconx-update so the dashboard Settings → Updates
+# panel can trigger a self-update (git pull + re-run installer) without
+# needing the operator to SSH in. The sudoers entry lets the service user
+# run it as root without a password (required because the installer writes
+# system files and restarts systemd units).
+log "Installing /usr/local/bin/reconx-update helper…"
+cat > /usr/local/bin/reconx-update <<'UPDATESCRIPT'
+#!/bin/bash
+set -euo pipefail
+INSTALL_DIR="${RECONX_INSTALL_DIR:-/opt/reconx}"
+cd "$INSTALL_DIR"
+git fetch --quiet origin main
+git reset --hard origin/main
+exec bash "$INSTALL_DIR/install-controller.sh"
+UPDATESCRIPT
+chmod 0755 /usr/local/bin/reconx-update
+
+SUDOERS_FILE="/etc/sudoers.d/reconx-update"
+SUDOERS_LINE="${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/reconx-update"
+echo "$SUDOERS_LINE" > "$SUDOERS_FILE"
+chmod 0440 "$SUDOERS_FILE"
+log "  ✓ /usr/local/bin/reconx-update installed (sudoers rule written)"
+
+# ── 12. Start everything ──────────────────────────────────────────────────
 log "Starting services…"
 systemctl daemon-reload
 systemctl enable --now redis-server
