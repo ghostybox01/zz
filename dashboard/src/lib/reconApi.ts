@@ -863,14 +863,24 @@ export type DorkResult = {
   hostname: string
   title: string
   data: string
-  platform: 'shodan' | 'fofa'
+  platform: 'shodan' | 'fofa' | 'leakix' | 'urlscan'
+  /** LeakIX: plugin/scanner that detected the exposure */
+  plugin?: string
+  /** LeakIX: short summary of what was found */
+  summary?: string
+  /** urlscan.io: HTTP status of the scanned page */
+  status?: string
+  /** urlscan.io: permalink to the full scan report */
+  scan_url?: string
+  /** urlscan.io / LeakIX: full URL of the resource */
+  url?: string
 }
 
 export type SavedDork = {
   id: string
   query: string
   category: string
-  platform: 'shodan' | 'fofa' | 'both' | 'google'
+  platform: 'shodan' | 'fofa' | 'both' | 'google' | 'leakix' | 'urlscan'
   notes: string
   createdAt: string
   runs?: number
@@ -884,9 +894,19 @@ export type GeneratedDork = {
   notes: string
 }
 
+export type DorkKeys = {
+  shodan_key: string
+  fofa_email: string
+  fofa_key: string
+  leakix_key: string
+  urlscan_key: string
+  anthropic_key: string
+  openai_key: string
+}
+
 export const dorks = {
-  getKeys: () => getJson<{ shodan_key: string; fofa_email: string; fofa_key: string; anthropic_key: string; openai_key: string }>('/dorks/keys'),
-  saveKeys: (body: { shodan_key?: string; fofa_email?: string; fofa_key?: string; anthropic_key?: string; openai_key?: string }) =>
+  getKeys: () => getJson<DorkKeys>('/dorks/keys'),
+  saveKeys: (body: { shodan_key?: string; fofa_email?: string; fofa_key?: string; leakix_key?: string; urlscan_key?: string; anthropic_key?: string; openai_key?: string }) =>
     postJson<{ ok: boolean }>('/dorks/keys', body),
   generate: (body: { objective: string; platform: string; count: number; category: string }) =>
     postJson<{ ok: boolean; dorks: GeneratedDork[]; source: 'ai' | 'template' }>('/dorks/generate', body),
@@ -909,6 +929,12 @@ export const dorks = {
     postJson<{ ok: boolean; updated: boolean }>(`/dorks/saved/${encodeURIComponent(id)}/score`, { result_count: resultCount }),
   evolve: (body: { query: string; category: string; platform: string; count?: number }) =>
     postJson<{ ok: boolean; dorks: GeneratedDork[]; source: 'ai' | 'none' }>('/dorks/evolve', body),
+
+  leakix: (params: { query: string; api_key?: string; limit?: number }) =>
+    postJson<{ ok: boolean; results: DorkResult[]; total: number }>('/dorks/leakix', params),
+
+  urlscan: (params: { query: string; api_key?: string; limit?: number }) =>
+    postJson<{ ok: boolean; results: DorkResult[]; total: number }>('/dorks/urlscan', params),
 }
 
 export type CryptoBalanceResult = {

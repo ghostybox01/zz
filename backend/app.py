@@ -8010,11 +8010,13 @@ def api_dorks_keys_get():
     try:
         keys = _load_dork_keys()
         return jsonify({
-            'shodan_key': keys.get('shodan_key', ''),
-            'fofa_email': keys.get('fofa_email', ''),
-            'fofa_key': keys.get('fofa_key', ''),
+            'shodan_key':  keys.get('shodan_key', ''),
+            'fofa_email':  keys.get('fofa_email', ''),
+            'fofa_key':    keys.get('fofa_key', ''),
+            'leakix_key':  keys.get('leakix_key', ''),
+            'urlscan_key': keys.get('urlscan_key', ''),
             'anthropic_key': '***' if keys.get('anthropic_key') else '',
-            'openai_key': '***' if keys.get('openai_key') else '',
+            'openai_key':    '***' if keys.get('openai_key') else '',
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -8025,7 +8027,7 @@ def api_dorks_keys_save():
     try:
         data = request.json or {}
         keys = _load_dork_keys()
-        for field in ('shodan_key', 'fofa_email', 'fofa_key'):
+        for field in ('shodan_key', 'fofa_email', 'fofa_key', 'leakix_key', 'urlscan_key'):
             if field in data:
                 keys[field] = str(data[field])
         for secret_field in ('anthropic_key', 'openai_key'):
@@ -8153,6 +8155,148 @@ def api_dorks_run():
         return jsonify({'error': f'{platform.upper()} API returned too many redirects'}), 502
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dorks/leakix', methods=['POST'])
+def api_dorks_leakix():
+    """Search LeakIX for confirmed exposed files/credentials.
+    Body: {"query": "...", "api_key": "...", "limit": 50}
+    LeakIX free tier: no key needed for basic searches, 10req/min.
+    Paid key unlocks more results and higher rate limit.
+    """
+    data = request.get_json(silent=True) or {}
+    query = str(data.get('query') or '').strip()
+    api_key = str(data.get('api_key') or '').strip()
+    try:
+        limit = max(1, min(500, int(data.get('limit') or 50)))
+    except (TypeError, ValueError):
+        limit = 50
+
+    if not query:
+        return jsonify({'error': 'query is required'}), 400
+
+    # Fall back to stored key if none supplied in body
+    if not api_key:
+        api_key = _load_dork_keys().get('leakix_key', '')
+
+    headers = {'accept': 'application/json'}
+    if api_key:
+        headers['api-key'] = api_key
+
+    import urllib.parse
+    params = urllib.parse.urlencode({'q': query, 'page': 0})
+    url = f'https://leakix.net/api/search?{params}'
+
+    try:
+        resp = http_requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 429:
+            return jsonify({'error': 'LeakIX rate limit hit — wait 60s or add an API key'}), 429
+        if resp.status_code == 401:
+            return jsonify({'error': 'Invalid LeakIX API key'}), 401
+        resp.raise_for_status()
+        raw = resp.json()
+    except http_requests.RequestException as e:
+        return jsonify({'error': f'LeakIX request failed: {e}'}), 502
+
+    # LeakIX returns a list of event objects
+    results = []
+    events = raw if isinstance(raw, list) else raw.get('data', []) or []
+    for ev in events[:limit]:
+        host = ev.get('host') or ev.get('ip') or ''
+        port = ev.get('port') or 80
+        transport = ev.get('transport') or []
+        scheme = 'https' if (443 == port or 'tls' in (transport or [])) else 'http'
+        port_str = f':{port}' if port not in (80, 443) else ''
+        url_out = f'{scheme}://{host}{port_str}' if host else ''
+        summary = ev.get('summary') or ''
+        plugin = (ev.get('event_source') or ev.get('plugin') or '')
+        ip = ev.get('ip') or ''
+        results.append({
+            'id':       str(uuid.uuid4()),
+            'url':      url_out,
+            'host':     host,
+            'ip':       ip,
+            'port':     port,
+            'protocol': 'https' if scheme == 'https' else 'http',
+            'hostname': host,
+            'title':    plugin,
+            'data':     summary[:300],
+            'summary':  summary[:200],
+            'plugin':   plugin,
+            'platform': 'leakix',
+        })
+
+    return jsonify({'ok': True, 'results': results, 'total': len(results)})
+
+
+@app.route('/api/dorks/urlscan', methods=['POST'])
+def api_dorks_urlscan():
+    """Search urlscan.io index for pages matching a content pattern.
+    Body: {"query": "...", "api_key": "...", "limit": 100}
+    urlscan.io free tier: 1000 searches/day, no key needed for search.
+    API key unlocks more results per page.
+    Example queries:
+      page.body:"AWS_SECRET_ACCESS_KEY"
+      page.body:"DB_PASSWORD" AND page.url:"/.env"
+      filename:.env AND page.body:"STRIPE_SECRET_KEY"
+    """
+    data = request.get_json(silent=True) or {}
+    query = str(data.get('query') or '').strip()
+    api_key = str(data.get('api_key') or '').strip()
+    try:
+        limit = max(1, min(1000, int(data.get('limit') or 100)))
+    except (TypeError, ValueError):
+        limit = 100
+
+    if not query:
+        return jsonify({'error': 'query is required'}), 400
+
+    # Fall back to stored key if none supplied in body
+    if not api_key:
+        api_key = _load_dork_keys().get('urlscan_key', '')
+
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['API-Key'] = api_key
+
+    import urllib.parse
+    params = urllib.parse.urlencode({'q': query, 'size': min(limit, 100)})
+    url = f'https://urlscan.io/api/v1/search/?{params}'
+
+    try:
+        resp = http_requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 429:
+            return jsonify({'error': 'urlscan.io rate limit — wait 60s or add an API key'}), 429
+        if resp.status_code == 400:
+            return jsonify({'error': f'urlscan.io query error: {resp.text[:200]}'}), 400
+        resp.raise_for_status()
+        raw = resp.json()
+    except http_requests.RequestException as e:
+        return jsonify({'error': f'urlscan.io request failed: {e}'}), 502
+
+    results = []
+    for r in (raw.get('results') or [])[:limit]:
+        page = r.get('page') or {}
+        task = r.get('task') or {}
+        scan_uuid = (r.get('task') or {}).get('uuid', '')
+        results.append({
+            'id':       str(uuid.uuid4()),
+            'url':      page.get('url') or task.get('url') or '',
+            'host':     page.get('domain') or '',
+            'ip':       page.get('ip') or '',
+            'port':     443 if (page.get('url') or '').startswith('https') else 80,
+            'protocol': 'https' if (page.get('url') or '').startswith('https') else 'http',
+            'hostname': page.get('domain') or '',
+            'title':    page.get('title') or '',
+            'data':     '',
+            'status':   page.get('status') or '',
+            'scan_url': f"https://urlscan.io/result/{scan_uuid}/" if scan_uuid else '',
+            'platform': 'urlscan',
+        })
+
+    total = raw.get('total', {})
+    total_count = total.get('value') if isinstance(total, dict) else (total or len(results))
+    return jsonify({'ok': True, 'results': results, 'total': total_count})
 
 
 @app.route('/api/dorks/saved', methods=['GET'])

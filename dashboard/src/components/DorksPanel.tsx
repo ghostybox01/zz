@@ -10,7 +10,7 @@ function detectKeyProvider(key: string): 'openai' | 'anthropic' | null {
 
 const EVOLVE_THRESHOLD = 3
 
-type Platform = 'shodan' | 'fofa' | 'google'
+type Platform = 'shodan' | 'fofa' | 'google' | 'leakix' | 'urlscan'
 
 const CATEGORIES = [
   { id: 'file_exposure', label: 'File Exposure' },
@@ -24,9 +24,11 @@ const CATEGORIES = [
 ]
 
 const PLATFORM_HINT: Record<Platform, string> = {
-  shodan: 'e.g. http.html:"aws_secret_access_key" http.status:200',
-  fofa:   'e.g. body="aws_secret_access_key" && status_code=200',
-  google: 'e.g. filetype:tfstate "AKIA" -site:stackoverflow.com -site:medium.com',
+  shodan:  'e.g. http.html:"aws_secret_access_key" http.status:200',
+  fofa:    'e.g. body="aws_secret_access_key" && status_code=200',
+  google:  'e.g. filetype:tfstate "AKIA" -site:stackoverflow.com -site:medium.com',
+  leakix:  'e.g. .env leak or "aws_secret_access_key" — searches confirmed exposures',
+  urlscan: 'e.g. page.body:"AWS_SECRET_ACCESS_KEY" or page.url:"/.env" AND page.body:"DB_PASSWORD"',
 }
 
 type BulkItem = {
@@ -81,6 +83,8 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   const [shodanKey, setShodanKey]         = useState('')
   const [fofaEmail, setFofaEmail]         = useState('')
   const [fofaKey, setFofaKey]             = useState('')
+  const [leakixKey, setLeakixKey]         = useState('')
+  const [urlscanKey, setUrlscanKey]       = useState('')
   const [anthropicKey, setAnthropicKey]   = useState('')
   const [openaiKey, setOpenaiKey]         = useState('')
   const [savingKeys, setSavingKeys]       = useState(false)
@@ -106,6 +110,8 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
       setShodanKey(k.shodan_key ?? '')
       setFofaEmail(k.fofa_email ?? '')
       setFofaKey(k.fofa_key ?? '')
+      setLeakixKey(k.leakix_key ?? '')
+      setUrlscanKey(k.urlscan_key ?? '')
       setAnthropicKey(k.anthropic_key ?? '')
       setOpenaiKey(k.openai_key ?? '')
     }).catch((e) => onToast('Could not load API keys', (e as Error).message, 'error'))
@@ -125,7 +131,14 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     setSelected(new Set())
     setSearchTotal(null)
     try {
-      const r = await dorksApi.run({ query: query.trim(), platform, limit })
+      let r: { results: DorkResult[]; total: number }
+      if (platform === 'leakix') {
+        r = await dorksApi.leakix({ query: query.trim(), limit })
+      } else if (platform === 'urlscan') {
+        r = await dorksApi.urlscan({ query: query.trim(), limit })
+      } else {
+        r = await dorksApi.run({ query: query.trim(), platform, limit })
+      }
       setResults(r.results)
       setSearchTotal(r.total)
     } catch (e) {
@@ -188,7 +201,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
   const saveKeys = useCallback(async () => {
     setSavingKeys(true)
     try {
-      await dorksApi.saveKeys({ shodan_key: shodanKey, fofa_email: fofaEmail, fofa_key: fofaKey, anthropic_key: anthropicKey, openai_key: openaiKey })
+      await dorksApi.saveKeys({ shodan_key: shodanKey, fofa_email: fofaEmail, fofa_key: fofaKey, leakix_key: leakixKey, urlscan_key: urlscanKey, anthropic_key: anthropicKey, openai_key: openaiKey })
       onToast('API keys saved')
       setKeysOpen(false)
     } catch (e) {
@@ -196,7 +209,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
     } finally {
       setSavingKeys(false)
     }
-  }, [shodanKey, fofaEmail, fofaKey, anthropicKey, openaiKey, onToast])
+  }, [shodanKey, fofaEmail, fofaKey, leakixKey, urlscanKey, anthropicKey, openaiKey, onToast])
 
   const handleKeyPaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>) => {
     const pasted = e.clipboardData.getData('text').trim()
@@ -253,7 +266,14 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
       setPlatform(dork.platform as Platform)
 
       try {
-        const r = await dorksApi.run({ query: dork.query, platform: dork.platform, limit: 100 })
+        let r: { results: DorkResult[]; total: number }
+        if (dork.platform === 'leakix') {
+          r = await dorksApi.leakix({ query: dork.query, limit: 100 })
+        } else if (dork.platform === 'urlscan') {
+          r = await dorksApi.urlscan({ query: dork.query, limit: 100 })
+        } else {
+          r = await dorksApi.run({ query: dork.query, platform: dork.platform, limit: 100 })
+        }
         setResults(r.results)
         setSearchTotal(r.total)
         await dorksApi.scoreRun(dork.id, r.results.length)
@@ -381,7 +401,14 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
 
       const plat = item.platform === 'both' ? 'shodan' : item.platform as Platform
       try {
-        const r = await dorksApi.run({ query: item.query, platform: plat, limit: 200 })
+        let r: { results: DorkResult[]; total: number }
+        if (plat === 'leakix') {
+          r = await dorksApi.leakix({ query: item.query, limit: 200 })
+        } else if (plat === 'urlscan') {
+          r = await dorksApi.urlscan({ query: item.query, limit: 200 })
+        } else {
+          r = await dorksApi.run({ query: item.query, platform: plat, limit: 200 })
+        }
         let count = 0
         for (const res of r.results) {
           const h = res.hostname || res.host || res.ip
@@ -460,7 +487,7 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
         <div>
           <h2 className="dorks-panel__title">Dork Hunter</h2>
           <p className="dorks-panel__lede muted">
-            AI-generated dorks · Shodan + FOFA search · Google file exposure · pipe results into the cracker
+            AI-generated dorks · Shodan · FOFA · LeakIX · urlscan.io · Google · pipe results into the cracker
           </p>
         </div>
         <div className="dorks-panel__actions">
@@ -602,13 +629,13 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
           <div className="dorks-search">
             <div className="dorks-search__row">
               <div className="dorks-plat-toggle">
-                {(['shodan', 'fofa', 'google'] as Platform[]).map((p) => (
+                {(['shodan', 'fofa', 'google', 'leakix', 'urlscan'] as Platform[]).map((p) => (
                   <button
                     key={p}
                     type="button"
                     className={`dorks-plat-btn${platform === p ? ' dorks-plat-btn--on' : ''}`}
                     onClick={() => { setPlatform(p); setResults([]); setSearchError(null) }}
-                  >{p.charAt(0).toUpperCase() + p.slice(1)}</button>
+                  >{p === 'urlscan' ? 'urlscan.io' : p.charAt(0).toUpperCase() + p.slice(1)}</button>
                 ))}
               </div>
               <input
@@ -695,8 +722,9 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                       <th>IP</th>
                       <th>Port</th>
                       <th>Proto</th>
-                      <th>Title</th>
-                      <th>Banner</th>
+                      <th>Title / Plugin</th>
+                      <th>Banner / Summary</th>
+                      {(platform === 'urlscan') && <th>Report</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -710,17 +738,26 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
                           <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggleResult(r.id)} />
                         </td>
                         <td className="mono" style={{ maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {r.hostname || r.host}
+                          {r.url
+                            ? <a href={r.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: 'var(--accent)' }}>{r.hostname || r.host || r.url}</a>
+                            : (r.hostname || r.host)}
                         </td>
                         <td className="mono" style={{ whiteSpace: 'nowrap' }}>{r.ip}</td>
                         <td className="mono">{r.port}</td>
                         <td className="muted" style={{ fontSize: '.75rem' }}>{r.protocol}</td>
                         <td style={{ maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '.78rem' }}>
-                          {r.title || <span className="muted">—</span>}
+                          {r.title || r.plugin || <span className="muted">—</span>}
                         </td>
                         <td style={{ maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '.72rem' }} className="muted">
-                          {r.data || '—'}
+                          {r.summary || r.data || '—'}
                         </td>
+                        {(platform === 'urlscan') && (
+                          <td style={{ fontSize: '.72rem' }}>
+                            {r.scan_url
+                              ? <a href={r.scan_url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: 'var(--accent)' }}>view</a>
+                              : <span className="muted">—</span>}
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -877,11 +914,11 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
               <label className="cw-composer__field">
                 <span className="cw-composer__label">Platform</span>
                 <div className="dorks-plat-toggle">
-                  {(['shodan', 'fofa', 'google'] as Platform[]).map((p) => (
+                  {(['shodan', 'fofa', 'google', 'leakix', 'urlscan'] as Platform[]).map((p) => (
                     <button key={p} type="button"
                       className={`dorks-plat-btn${genPlatform === p ? ' dorks-plat-btn--on' : ''}`}
                       onClick={() => setGenPlatform(p)}
-                    >{p.charAt(0).toUpperCase() + p.slice(1)}</button>
+                    >{p === 'urlscan' ? 'urlscan.io' : p.charAt(0).toUpperCase() + p.slice(1)}</button>
                   ))}
                 </div>
               </label>
@@ -954,6 +991,14 @@ export function DorksPanel({ onImportTargets, onToast }: Props) {
               <label className="cw-composer__field">
                 <span className="cw-composer__label">FOFA API key</span>
                 <input className="tg-input" type="password" value={fofaKey} onChange={(e) => setFofaKey(e.target.value)} onPaste={handleKeyPaste} placeholder="your-fofa-api-key" spellCheck={false} autoComplete="off" />
+              </label>
+              <label className="cw-composer__field">
+                <span className="cw-composer__label">LeakIX API key (optional — free tier works without, key unlocks more results)</span>
+                <input className="tg-input" type="password" value={leakixKey} onChange={(e) => setLeakixKey(e.target.value)} placeholder="your-leakix-api-key" spellCheck={false} autoComplete="off" />
+              </label>
+              <label className="cw-composer__field">
+                <span className="cw-composer__label">urlscan.io API key (optional — free tier: 1000 searches/day)</span>
+                <input className="tg-input" type="password" value={urlscanKey} onChange={(e) => setUrlscanKey(e.target.value)} placeholder="your-urlscan-api-key" spellCheck={false} autoComplete="off" />
               </label>
               <label className="cw-composer__field">
                 <span className="cw-composer__label">OpenAI API key (ChatGPT — tried first)</span>
