@@ -1,6 +1,6 @@
 module reconx-scanner
 
-go 1.22
+go 1.25.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.9
@@ -15,6 +15,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.17
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.68.8
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/lib/pq v1.12.3
 	github.com/pterm/pterm v0.12.83
@@ -41,7 +42,6 @@ require (
 	github.com/aws/smithy-go v1.26.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/containerd/console v1.0.5 // indirect
-	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/gookit/color v1.6.0 // indirect
 	github.com/lithammer/fuzzysearch v1.1.8 // indirect
 	github.com/mattn/go-runewidth v0.0.20 // indirect

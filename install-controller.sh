@@ -133,12 +133,15 @@ log "Dashboard built → $INSTALL_DIR/dashboard/dist"
 # ── 7. Build the Go scanner binary (for upload to workers) ───────────────
 log "Building the Go scanner binary for worker upload…"
 cd "$INSTALL_DIR/backend"
-sudo -u "$SERVICE_USER" rm -f go.sum
+# GOTOOLCHAIN=local prevents Go from trying to auto-download a newer toolchain
+# when go.mod specifies a higher Go version than the system has installed.
+# go.sum is preserved from the repo — deleting it and re-running tidy can fail
+# without network access or with version mismatches; the committed sum is correct.
 if [[ ! -f go.mod ]]; then
-  sudo -u "$SERVICE_USER" go mod init reconx-scanner >/dev/null 2>&1 || true
+  sudo -u "$SERVICE_USER" GOTOOLCHAIN=local go mod init reconx-scanner >/dev/null 2>&1 || true
 fi
-sudo -u "$SERVICE_USER" go mod tidy >/dev/null 2>&1 || warn "go mod tidy reported issues — continuing"
-sudo -u "$SERVICE_USER" GOOS=linux GOARCH=amd64 go build -o reconx-scanner .
+sudo -u "$SERVICE_USER" GOTOOLCHAIN=local go mod download >/dev/null 2>&1 || warn "go mod download reported issues — continuing"
+sudo -u "$SERVICE_USER" GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 go build -o reconx-scanner .
 chmod +x "$INSTALL_DIR/backend/reconx-scanner"
 log "Scanner binary built (Linux/amd64): $(du -h "$INSTALL_DIR/backend/reconx-scanner" | awk '{print $1}')"
 
@@ -153,6 +156,7 @@ log "Building the Go warc harvester binary for controller use…"
 WARC_BUILD_DIR=$(sudo -u "$SERVICE_USER" mktemp -d)
 sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/warc.go" "$INSTALL_DIR/warc_producers.go" "$WARC_BUILD_DIR/"
 sudo -u "$SERVICE_USER" bash -c "
+  export GOTOOLCHAIN=local
   cd '$WARC_BUILD_DIR' &&
   /usr/bin/go mod init reconx-warc >/dev/null 2>&1 &&
   /usr/bin/go get github.com/schollz/progressbar/v3 >/dev/null 2>&1 &&
