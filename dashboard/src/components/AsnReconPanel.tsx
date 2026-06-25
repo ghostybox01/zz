@@ -55,7 +55,7 @@ export function AsnReconPanel() {
     return raw
       .split(/[\n,\s]+/)
       .map(s => s.trim().toUpperCase())
-      .filter(s => /^AS?\d+$/i.test(s))
+      .filter(s => /^(AS)?\d+$/i.test(s))
       .map(s => s.startsWith('AS') ? s : `AS${s}`)
   }
 

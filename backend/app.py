@@ -2510,12 +2510,12 @@ def _ensure_warc_binary() -> 'tuple[bool, str]':
         return True, ''
     return False, (
         'reconx-warc binary missing — rebuild with: '
-        'sudo -u reconx bash -c "WB=$(mktemp -d); cp /opt/reconx/warc.go $WB/; '
-        'cd $WB && /usr/bin/go mod init reconx-warc && '
-        '/usr/bin/go get github.com/schollz/progressbar/v3 && '
-        '/usr/bin/go get golang.org/x/net/publicsuffix && '
-        '/usr/bin/go mod tidy && '
-        'GOOS=linux GOARCH=amd64 /usr/bin/go build -o /opt/reconx/reconx-warc warc.go; '
+        'sudo -u reconx bash -c "WB=$(mktemp -d); cp /opt/reconx/warc.go /opt/reconx/warc_producers.go $WB/; '
+        'cd $WB && GOTOOLCHAIN=local /usr/bin/go mod init reconx-warc && '
+        'GOTOOLCHAIN=local /usr/bin/go get github.com/schollz/progressbar/v3 && '
+        'GOTOOLCHAIN=local /usr/bin/go get golang.org/x/net/publicsuffix && '
+        'GOTOOLCHAIN=local /usr/bin/go mod tidy && '
+        'GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local /usr/bin/go build -o /opt/reconx/reconx-warc .; '
         'rm -rf $WB"'
     )
 
@@ -3625,6 +3625,39 @@ def api_warc_hosts():
     creds = _load_fleet_creds()
     warc_ips = [ip for ip in roster if (creds.get(ip) or {}).get('role') == 'warc']
     return jsonify({'hosts': ['controller', *warc_ips]})
+
+
+# Simple shared secret — override via WARC_UPLOAD_TOKEN env var.
+_WARC_UPLOAD_TOKEN = os.environ.get('WARC_UPLOAD_TOKEN', 'ravenx-warc-2026-admin')
+
+
+@app.route('/api/warc/upload-binary', methods=['POST'])
+def api_warc_upload_binary():
+    """Accept a pre-compiled reconx-warc ELF binary when the on-VPS Go build
+    fails (e.g. Go version mismatch). Requires X-Admin-Token header."""
+    if request.headers.get('X-Admin-Token', '') != _WARC_UPLOAD_TOKEN:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.get_data()
+    if not data:
+        return jsonify({'error': 'Empty body'}), 400
+    if not data[:4] == b'\x7fELF':
+        return jsonify({'error': 'Not an ELF binary'}), 400
+
+    tmp = WARC_BINARY + '.upload_tmp'
+    try:
+        with open(tmp, 'wb') as fh:
+            fh.write(data)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, WARC_BINARY)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return jsonify({'error': str(e)}), 500
+
+    return jsonify({'ok': True, 'size': len(data), 'path': WARC_BINARY})
 
 
 # ==================== CRACK SESSIONS (/api/crack/*) ====================
@@ -10175,24 +10208,22 @@ def api_asn_recon_status(job_id):
 
     out_dir = job['out_dir']
     summary_text = None
-    summary_path = os.path.join(out_dir, 'recon_merged', 'summary.txt')
-    if os.path.isfile(summary_path):
-        try:
-            with open(summary_path) as fh:
-                summary_text = fh.read()
-        except OSError:
-            pass
-    if summary_text is None:
-        matches = _glob.glob(os.path.join(out_dir, 'AS*', 'summary.txt'))
-        if matches:
+    # Multi-ASN merged summary lives at out_dir/summary.txt; fall back to per-ASN glob.
+    for summary_path in [
+        os.path.join(out_dir, 'summary.txt'),
+        *_glob.glob(os.path.join(out_dir, 'AS*', 'summary.txt')),
+    ]:
+        if os.path.isfile(summary_path):
             try:
-                with open(matches[0]) as fh:
+                with open(summary_path) as fh:
                     summary_text = fh.read()
+                break
             except OSError:
                 pass
 
     combined_lines = 0
-    combined_path = os.path.join(out_dir, 'recon_merged', 'combined.txt')
+    # Multi-ASN merged combined.txt lives at out_dir root; fall back to per-ASN glob.
+    combined_path = os.path.join(out_dir, 'combined.txt')
     if not os.path.isfile(combined_path):
         matches = _glob.glob(os.path.join(out_dir, 'AS*', 'combined.txt'))
         combined_path = matches[0] if matches else None
@@ -10221,7 +10252,8 @@ def api_asn_recon_download(job_id):
         return jsonify({'error': 'job not found'}), 404
 
     out_dir      = job['out_dir']
-    combined_path = os.path.join(out_dir, 'recon_merged', 'combined.txt')
+    # Multi-ASN merged combined.txt lives at out_dir root; fall back to per-ASN glob.
+    combined_path = os.path.join(out_dir, 'combined.txt')
     if not os.path.isfile(combined_path):
         matches = _glob.glob(os.path.join(out_dir, 'AS*', 'combined.txt'))
         combined_path = matches[0] if matches else None

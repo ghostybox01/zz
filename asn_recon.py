@@ -3,7 +3,7 @@
 asn_recon.py — ASN → Domains + IPs recon tool
 
 Given one or more ASNs, produces a scan-ready target list by:
-  1. Fetching all IP prefixes (CIDR ranges) via BGPView
+  1. Fetching all IP prefixes (CIDR ranges) via RIPE Stat (fallback: HackerTarget)
   2. Running concurrent reverse DNS on every IP in range
   3. Pulling certificate transparency domains from crt.sh
   4. Optional Shodan search (set SHODAN_API_KEY env var)
@@ -309,7 +309,7 @@ def process_asn(asn: str, args: argparse.Namespace, out_dir: Path) -> dict:
     }
 
     # ── Step 1: IP prefixes ───────────────────────────────────────────────────
-    info("Fetching IP prefixes from BGPView…")
+    info("Fetching IP prefixes (RIPE Stat / HackerTarget)…")
     cidrs = get_prefixes(asn)
     if not cidrs:
         err(f"No prefixes found for {asn}")
@@ -469,6 +469,15 @@ def main():
         write_list(merged_dir / "domains.txt",  merged_domains)
         write_list(merged_dir / "ips.txt",      merged_ips)
         (merged_dir / "combined.txt").write_text("\n".join(merged_combined) + "\n")
+
+        merged_summary_lines = [
+            f"ASNs merged:     {len(args.asns)} ({', '.join('AS' + a.upper().lstrip('ASas') for a in args.asns)})",
+            f"─────────────────────────────",
+            f"Unique IPs out:  {len(merged_ips):,}",
+            f"Unique domains:  {len(merged_domains):,}",
+            f"Combined total:  {len(merged_combined):,}",
+        ]
+        (merged_dir / "summary.txt").write_text("\n".join(merged_summary_lines) + "\n")
 
         hdr("Merged output")
         ok(f"{len(merged_domains):,} unique domains → {merged_dir}/domains.txt")
