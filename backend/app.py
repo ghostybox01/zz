@@ -2610,8 +2610,8 @@ def api_warc_start():
     data = request.get_json(force=True, silent=True) or {}
     try:
         max_domains = max(1, int(data.get('max_domains') or 10000))
-        extract_workers = max(1, int(data.get('extract_workers') or 200))
-        test_workers = max(1, int(data.get('test_workers') or 100))
+        extract_workers = max(1, int(data.get('extract_workers') or 50))
+        test_workers = max(1, int(data.get('test_workers') or 25))
         # 0 = let warc.go auto-pick by max-domains; clamp to 1..20 to avoid
         # accidentally fanning out across the whole CC archive at once.
         snapshots = max(0, min(20, int(data.get('snapshots') or 0)))

@@ -1075,8 +1075,8 @@ func main() {
 			if estimatedFilesNeeded < filesToProcess {
 				filesToProcess = estimatedFilesNeeded
 			}
-			if filesToProcess > 10000 {
-				filesToProcess = 10000
+			if filesToProcess > 500000 {
+				filesToProcess = 500000
 			}
 			fmt.Printf("%s[INFO]%s Auto-limiting to %d files (yield est. %d/file) to reach ~%d live domains\n",
 				YELLOW, RESET, filesToProcess, yieldPerFile, *maxDomains)
