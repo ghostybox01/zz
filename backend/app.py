@@ -3660,6 +3660,25 @@ def api_warc_upload_binary():
     return jsonify({'ok': True, 'size': len(data), 'path': WARC_BINARY})
 
 
+@app.route('/api/system/info', methods=['GET'])
+def api_system_info():
+    """Return VPS memory stats read from /proc/meminfo (Linux only)."""
+    info = {}
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                parts = line.split()
+                if parts[0] == 'MemTotal:':
+                    info['total_mb'] = int(parts[1]) // 1024
+                elif parts[0] == 'MemAvailable:':
+                    info['available_mb'] = int(parts[1]) // 1024
+                elif parts[0] == 'MemFree:':
+                    info['free_mb'] = int(parts[1]) // 1024
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    return jsonify(info)
+
+
 # ==================== CRACK SESSIONS (/api/crack/*) ====================
 #
 # Multi-session dispatch console. Operator picks a target list, a set of

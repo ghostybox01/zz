@@ -274,7 +274,18 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
   // duplicates without leaving the cockpit.
   const [r2Objects, setR2Objects] = useState<R2Object[]>([])
   const [r2Listing, setR2Listing] = useState(false)
+  const [sysMem, setSysMem] = useState<{ total_mb: number; available_mb: number } | null>(null)
   const pollTimer = useRef<number | null>(null)
+
+  function suggestWorkers(totalMb: number): { extract: number; test: number } {
+    // Reserve 400 MB for OS + gunicorn + nginx, use 80% of the rest.
+    // Each active extract worker needs ~8 MB (1 MB scanner buffer + HTTP/gzip overhead);
+    // each test worker ~2 MB. Ratio kept at 2:1 (extract:test).
+    const usable = (totalMb - 400) * 0.8
+    const extract = Math.max(20, Math.min(300, Math.floor(usable / 9)))
+    const test = Math.max(10, Math.floor(extract / 2))
+    return { extract, test }
+  }
 
   async function refresh() {
     try {
@@ -348,6 +359,9 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
     void refreshHosts()
     void refreshR2Health()
     void refreshR2Objects()
+    void fetch('/api/system/info').then(r => r.ok ? r.json() : null).then(d => {
+      if (d?.total_mb) setSysMem({ total_mb: d.total_mb, available_mb: d.available_mb ?? 0 })
+    }).catch(() => {})
     pollTimer.current = window.setInterval(() => {
       void refresh()
       void refreshHosts()
@@ -594,6 +608,41 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
               onChange={(e) => setTestWorkers(Math.max(1, Number(e.target.value) || 25))}
             />
           </div>
+          {sysMem && (() => {
+            const gb = (sysMem.total_mb / 1024).toFixed(1)
+            const s = suggestWorkers(sysMem.total_mb)
+            const alreadyTuned = extractWorkers === s.extract && testWorkers === s.test
+            return (
+              <div className="kv__row">
+                <span className="kv__label" style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                  VPS: {gb} GB RAM
+                </span>
+                {alreadyTuned ? (
+                  <span style={{ fontSize: '0.78rem', color: 'var(--accent)', opacity: 0.85 }}>
+                    ✓ tuned for {gb} GB
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { setExtractWorkers(s.extract); setTestWorkers(s.test) }}
+                    style={{
+                      fontSize: '0.78rem',
+                      padding: '2px 10px',
+                      borderRadius: '999px',
+                      border: '1px solid var(--accent)',
+                      background: 'transparent',
+                      color: 'var(--accent)',
+                      cursor: 'pointer',
+                      lineHeight: 1.6,
+                    }}
+                    title={`Set extract=${s.extract}, test=${s.test} — safe for ${gb} GB`}
+                  >
+                    Tune for {gb} GB → {s.extract}/{s.test}
+                  </button>
+                )}
+              </div>
+            )
+          })()}
           <div className="kv__row">
             <label className="kv__label" htmlFor="warc-snapshots">CC-MAIN snapshots</label>
             <input
