@@ -3685,18 +3685,23 @@ def api_warc_upload_binary():
     if not data[:4] == b'\x7fELF':
         return jsonify({'error': 'Not an ELF binary'}), 400
 
-    tmp = WARC_BINARY + '.upload_tmp'
+    # Write to /tmp first (always writable) then copy into place so a
+    # root-owned stale .upload_tmp in /opt/reconx can't block the upload.
+    import tempfile, shutil
     try:
-        with open(tmp, 'wb') as fh:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.reconx-warc-tmp') as fh:
             fh.write(data)
+            tmp = fh.name
         os.chmod(tmp, 0o755)
-        os.replace(tmp, WARC_BINARY)
+        shutil.copy2(tmp, WARC_BINARY)
+        os.chmod(WARC_BINARY, 0o755)
     except OSError as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-        return jsonify({'error': str(e)}), 500
 
     return jsonify({'ok': True, 'size': len(data), 'path': WARC_BINARY})
 
