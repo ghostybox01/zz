@@ -1082,6 +1082,19 @@ func main() {
 				YELLOW, RESET, filesToProcess, yieldPerFile, *maxDomains)
 		}
 
+		// Shuffle then copy-trim to a new slice so the GC can reclaim the
+		// backing array for the unused entries. Without this, 20 snapshots
+		// × 64K files = 1.28M URL strings stay live even though we only
+		// process filesToProcess of them, spiking RAM at startup.
+		rand.Shuffle(len(allWarcURLs), func(i, j int) {
+			allWarcURLs[i], allWarcURLs[j] = allWarcURLs[j], allWarcURLs[i]
+		})
+		if filesToProcess < len(allWarcURLs) {
+			trimmed := make([]string, filesToProcess)
+			copy(trimmed, allWarcURLs[:filesToProcess])
+			allWarcURLs = trimmed
+		}
+
 		fmt.Printf("%s[+]%s Found %d WARC files total\n", GREEN, RESET, totalFiles)
 		fmt.Printf("%s[*]%s Extraction workers (grabber): %d\n", CYAN, RESET, *extractWorkers)
 		fmt.Printf("%s[*]%s Processing %d files (%d extract workers)\n", CYAN, RESET, filesToProcess, *extractWorkers)
