@@ -5,6 +5,228 @@ import type { VpsNode } from '../types'
 
 const POLL_MS = 3000
 
+// ── Domain category presets ──────────────────────────────────────────────────
+// Each entry expands to a comma-separated domain list that gets merged into the
+// crt.sh domains field. Toggling a preset off removes exactly those domains.
+const DOMAIN_PRESETS: { id: string; label: string; domains: readonly string[] }[] = [
+  {
+    id: 'payments',
+    label: 'Payments',
+    domains: [
+      'stripe.com', 'square.com', 'bill.com', 'braintreepayments.com', 'adyen.com',
+      'klarna.com', 'checkout.com', 'recurly.com', 'chargebee.com', 'paddle.com',
+      'mollie.com', 'razorpay.com', 'payoneer.com', 'sumup.com', 'zettle.com',
+      'gocardless.com', 'spreedly.com', 'mangopay.com', 'zuora.com', 'chargify.com',
+      'affirm.com', 'afterpay.com', 'sezzle.com', 'zip.co', 'paypal.com',
+      'braintree.com', '2checkout.com', 'worldpay.com', 'payu.com',
+      'cybersource.com', 'authorize.net', 'nuvei.com', 'payfirma.com',
+    ],
+  },
+  {
+    id: 'ecommerce',
+    label: 'Ecommerce',
+    domains: [
+      'shopify.com', 'bigcommerce.com', 'woocommerce.com', 'magento.com',
+      'prestashop.com', 'opencart.com', 'squarespace.com', 'wix.com',
+      'ecwid.com', 'sellfy.com', 'gumroad.com', 'samcart.com', 'thrivecart.com',
+      'payhip.com', 'lemonsqueezy.com', 'recharge.com', 'bold.com',
+      'snipcart.com', 'salesforce.com', 'commercetools.com', 'crystallize.com',
+      'medusajs.com', 'fabric.inc', 'centra.com', 'spryker.com',
+    ],
+  },
+  {
+    id: 'email-api',
+    label: 'Email APIs',
+    domains: [
+      'sendgrid.com', 'brevo.com', 'mailgun.com', 'sparkpost.com', 'postmarkapp.com',
+      'elasticemail.com', 'smtp2go.com', 'mailjet.com', 'mandrill.com',
+      'campaignmonitor.com', 'constantcontact.com', 'klaviyo.com', 'drip.com',
+      'activecampaign.com', 'mailchimp.com', 'aweber.com', 'getresponse.com',
+      'convertkit.com', 'mailerlite.com', 'moosend.com', 'omnisend.com',
+      'sendpulse.com', 'mailtrap.io', 'emarsys.com', 'dotdigital.com',
+      'sailthru.com', 'maropost.com', 'iterable.com', 'blastable.com',
+      'mailersend.com', 'socketlabs.com', 'pepipost.com', 'dyn.com',
+    ],
+  },
+  {
+    id: 'cloud',
+    label: 'Cloud / Hosting',
+    domains: [
+      'amazonaws.com', 'googlecloud.com', 'azure.com', 'digitalocean.com',
+      'linode.com', 'vultr.com', 'hetzner.com', 'ovh.com', 'rackspace.com',
+      'heroku.com', 'render.com', 'fly.io', 'netlify.com', 'vercel.com',
+      'railway.app', 'upcloud.com', 'contabo.com', 'ionos.com', 'scaleway.com',
+      'exoscale.com', 'civo.com', 'cloudways.com', 'kinsta.com', 'wpengine.com',
+      'siteground.com', 'dreamhost.com', 'bluehost.com', 'godaddy.com',
+    ],
+  },
+  {
+    id: 'auth',
+    label: 'Auth / SSO',
+    domains: [
+      'auth0.com', 'okta.com', 'onelogin.com', 'ping.com', 'jumpcloud.com',
+      'fusionauth.io', 'stytch.com', 'clerk.com', 'duosecurity.com',
+      'cyberark.com', 'sailpoint.com', 'saviynt.com', 'beyondtrust.com',
+      'lastpass.com', '1password.com', 'bitwarden.com', 'dashlane.com',
+      'hashicorp.com', 'workos.com', 'logto.io', 'ory.sh', 'supertokens.com',
+    ],
+  },
+  {
+    id: 'sms',
+    label: 'SMS / Voice',
+    domains: [
+      'twilio.com', 'vonage.com', 'nexmo.com', 'messagebird.com', 'plivo.com',
+      'sinch.com', 'bandwidth.com', 'telnyx.com', 'ringcentral.com', 'infobip.com',
+      'clickatell.com', 'textmagic.com', 'bulksms.com', 'smsapi.com',
+      'msg91.com', 'kaleyra.com', 'routemobile.com', 'unifonic.com',
+      'telesign.com', 'mgage.com', 'zip.sms.com', 'textbelt.com',
+      'sms77.io', 'seven.io', 'heymarket.com', 'podium.com',
+    ],
+  },
+  {
+    id: 'crm',
+    label: 'CRM / Sales',
+    domains: [
+      'salesforce.com', 'hubspot.com', 'marketo.com', 'pardot.com', 'eloqua.com',
+      'zendesk.com', 'intercom.com', 'freshdesk.com', 'drift.com', 'zoho.com',
+      'pipedrive.com', 'freshworks.com', 'insightly.com', 'copper.com',
+      'salesloft.com', 'outreach.io', 'apollo.io', 'lemlist.com', 'lusha.com',
+      'zoominfo.com', 'gong.io', 'chorus.ai', 'close.com', 'monday.com',
+      'notion.so', 'attio.com', 'affinity.co', 'highlevel.com',
+    ],
+  },
+  {
+    id: 'analytics',
+    label: 'Analytics',
+    domains: [
+      'mixpanel.com', 'segment.com', 'amplitude.com', 'heap.io', 'hotjar.com',
+      'fullstory.com', 'logrocket.com', 'datadog.com', 'newrelic.com',
+      'splunk.com', 'elastic.co', 'sumologic.com', 'dynatrace.com',
+      'appdynamics.com', 'rollbar.com', 'sentry.io', 'bugsnag.com',
+      'airbrake.io', 'raygun.com', 'logz.io', 'papertrail.com', 'posthog.com',
+      'statsig.com', 'launchdarkly.com', 'growthbook.io', 'flagsmith.com',
+      'pendo.io', 'appcues.com', 'userpilot.com', 'customerio.com',
+    ],
+  },
+  {
+    id: 'devops',
+    label: 'DevOps / CI-CD',
+    domains: [
+      'github.com', 'gitlab.com', 'bitbucket.com', 'circleci.com',
+      'travisci.com', 'semaphoreapp.com', 'buildkite.com', 'drone.io',
+      'sonarcloud.io', 'snyk.io', 'codeclimate.com', 'codecov.io',
+      'jfrog.com', 'sonatype.com', 'docker.com', 'hashicorp.com',
+      'terraform.io', 'ansible.com', 'puppet.com', 'chef.io',
+      'pagerduty.com', 'opsgenie.com', 'victorops.com', 'statuspage.io',
+      'atlassian.com', 'linear.app', 'shortcut.com',
+    ],
+  },
+  {
+    id: 'storage',
+    label: 'DB / Storage',
+    domains: [
+      'mongodb.com', 'supabase.com', 'planetscale.com', 'cockroachlabs.com',
+      'fauna.com', 'redis.com', 'neon.tech', 'xata.io', 'turso.tech',
+      'convex.dev', 'appwrite.io', 'arangodb.com', 'couchbase.com',
+      'snowflake.com', 'databricks.com', 'firebolt.io', 'singlestore.com',
+      'tidbcloud.com', 'yugabyte.com', 'influxdata.com', 'timescale.com',
+      'hasura.io', 'prisma.io', 'edgedb.com', 'deno.com',
+      'upstash.com', 'momento.io', 'fly.io',
+    ],
+  },
+  {
+    id: 'crypto',
+    label: 'Crypto / Fintech',
+    domains: [
+      'coinbase.com', 'binance.com', 'kraken.com', 'blockchain.com', 'bitpay.com',
+      'coinpayments.net', 'circle.com', 'paxos.com', 'fireblocks.com',
+      'chainalysis.com', 'elliptic.co', 'anchorage.com', 'gemini.com',
+      'bitfinex.com', 'bitstamp.com', 'crypto.com', 'nexo.com',
+      'alchemy.com', 'infura.io', 'moralis.io', 'quicknode.com',
+      'thegraph.com', 'blockdaemon.com', 'copper.co', 'bitgo.com',
+      'taxbit.com', 'koinly.com', 'cryptotaxcalculator.io',
+    ],
+  },
+  {
+    id: 'esign',
+    label: 'e-Sign / Forms',
+    domains: [
+      'docusign.com', 'hellosign.com', 'pandadoc.com', 'signnow.com',
+      'adobe.com', 'signaturit.com', 'signeasy.com', 'eversign.com',
+      'contractsafe.com', 'formstack.com', 'jotform.com', 'typeform.com',
+      'docsketch.com', 'signwell.com', 'zoho.com', 'clio.com',
+      'ironclad.com', 'docupace.com', 'legalesign.com',
+    ],
+  },
+  {
+    id: 'cdn',
+    label: 'CDN / Media',
+    domains: [
+      'cloudflare.com', 'fastly.com', 'bunny.net', 'cdn77.com', 'keycdn.com',
+      'stackpath.com', 'imgix.com', 'cloudinary.com', 'imagekit.io',
+      'filestack.com', 'uploadcare.com', 'transloadit.com', 'bytescale.com',
+      'mux.com', 'jwplayer.com', 'kaltura.com', 'vimeo.com', 'wistia.com',
+      'brightcove.com', 'bitmovin.com', 'apivideo.com', 'encoding.com',
+      'api.video', 'loom.com', 'bynder.com', 'canto.com',
+    ],
+  },
+  {
+    id: 'social',
+    label: 'Social / OAuth',
+    domains: [
+      'facebook.com', 'twitter.com', 'x.com', 'google.com', 'linkedin.com',
+      'github.com', 'instagram.com', 'discord.com', 'slack.com',
+      'microsoft.com', 'apple.com', 'tiktok.com', 'pinterest.com',
+      'reddit.com', 'spotify.com', 'amazon.com', 'paypal.com',
+      'twitch.tv', 'snapchat.com', 'telegram.org',
+    ],
+  },
+  {
+    id: 'shipping',
+    label: 'Shipping / Logistics',
+    domains: [
+      'shippo.com', 'shipbob.com', 'easypost.com', 'fedex.com', 'ups.com',
+      'dhl.com', 'shipwire.com', 'whiplash.com', 'shipmonk.com',
+      'stamps.com', 'pirateship.com', 'shipstation.com', 'shiphero.com',
+      'ware2go.com', 'flexport.com', 'freightos.com', 'project44.com',
+      'narvar.com', 'aftership.com', 'parcelhub.co.uk',
+    ],
+  },
+  {
+    id: 'accounting',
+    label: 'Accounting / Tax',
+    domains: [
+      'quickbooks.com', 'intuit.com', 'xero.com', 'freshbooks.com', 'wave.com',
+      'netsuite.com', 'sage.com', 'zoho.com', 'freeagent.com', 'clearbooks.co.uk',
+      'taxjar.com', 'avalara.com', 'taxify.eu', 'sovos.com', 'vertex.com',
+      'bill.com', 'divvy.co', 'ramp.com', 'brex.com', 'expensify.com',
+      'concur.com', 'sap.com', 'oracle.com',
+    ],
+  },
+  {
+    id: 'maps',
+    label: 'Maps / Geo',
+    domains: [
+      'google.com', 'mapbox.com', 'here.com', 'tomtom.com',
+      'geocodio.com', 'opencagedata.com', 'ipstack.com', 'positionstack.com',
+      'locationiq.com', 'geoapify.com', 'radar.io', 'foursquare.com',
+      'smartystreets.com', 'lob.com', 'melissa.com', 'precisely.com',
+      'loqate.com', 'geolocation.io', 'ipdata.co', 'ipgeolocation.io',
+    ],
+  },
+  {
+    id: 'support',
+    label: 'Support / Chat',
+    domains: [
+      'zendesk.com', 'freshdesk.com', 'intercom.com', 'helpscout.com',
+      'livechat.com', 'drift.com', 'crisp.chat', 'tawk.to', 'tidio.com',
+      'olark.com', 'gorgias.com', 'kustomer.com', 'reamaze.com',
+      'groovehq.com', 'kayako.com', 'happyfox.com', 'dixa.com',
+      'gladly.com', 'sprinklr.com', 'freshchat.com', 'supportbee.com',
+    ],
+  },
+]
+
 /** Optional toast plumbing. WarcPanel renders standalone in any context, but
  * when the host page passes a notifier we surface Stop/Export progress and
  * completion through it instead of repurposing the inline `error` slot. */
@@ -40,6 +262,8 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
   const [crtDomain, setCrtDomain] = useState('')
   // Opt-in apex filter (drops FQDNs equal to their own eTLD+1).
   const [subdomainOnly, setSubdomainOnly] = useState(false)
+  // Active preset IDs — drives the chip highlight state and toggle logic.
+  const [activePresets, setActivePresets] = useState<ReadonlySet<string>>(new Set())
   // R2 health, refreshed alongside warc/status. Surfaces the same pill
   // R2Settings shows so the operator can see at the export site whether
   // a click on "Export to R2" will actually land.
@@ -135,6 +359,25 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
       if (pollTimer.current) window.clearInterval(pollTimer.current)
     }
   }, [])
+
+  function togglePreset(id: string) {
+    const preset = DOMAIN_PRESETS.find((p) => p.id === id)
+    if (!preset) return
+    const isActive = activePresets.has(id)
+    const next = new Set(activePresets)
+    if (isActive) {
+      next.delete(id)
+      const remove = new Set(preset.domains)
+      const kept = crtDomain.split(',').map((d) => d.trim()).filter((d) => d && !remove.has(d))
+      setCrtDomain(kept.join(','))
+    } else {
+      next.add(id)
+      const existing = new Set(crtDomain.split(',').map((d) => d.trim()).filter(Boolean))
+      preset.domains.forEach((d) => existing.add(d))
+      setCrtDomain([...existing].join(','))
+    }
+    setActivePresets(next)
+  }
 
   async function onStart() {
     setBusy(true); setError(null)
@@ -408,11 +651,41 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
                   id="warc-crt-domain"
                   type="text"
                   className="kv__input"
-                  placeholder="example.com,foo.io"
+                  placeholder="example.com,foo.io — or use category presets below"
                   value={crtDomain}
                   onChange={(e) => setCrtDomain(e.target.value)}
                   title="Comma-separated registered-domain list (e.g. example.com,foo.io)"
                 />
+              </div>
+              <div className="kv__row" style={{ alignItems: 'flex-start' }}>
+                <span className="kv__label" style={{ paddingTop: '.3rem', flexShrink: 0 }}>Presets</span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '.3rem' }}>
+                  {DOMAIN_PRESETS.map((p) => {
+                    const on = activePresets.has(p.id)
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => togglePreset(p.id)}
+                        title={`${p.domains.length} domains${on ? ' — click to remove' : ' — click to add'}`}
+                        style={{
+                          padding: '.18rem .52rem',
+                          fontSize: '.7rem',
+                          borderRadius: '2rem',
+                          border: `1px solid ${on ? 'var(--accent, #6cc6ff)' : 'rgba(255,255,255,.15)'}`,
+                          background: on ? 'rgba(108,198,255,.15)' : 'transparent',
+                          color: on ? 'var(--accent, #6cc6ff)' : 'rgba(255,255,255,.55)',
+                          cursor: 'pointer',
+                          transition: 'all .12s',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {on ? '✓ ' : ''}{p.label}
+                        <span style={{ opacity: .55, marginLeft: '.25rem' }}>{p.domains.length}</span>
+                      </button>
+                    )
+                  })}
+                </div>
               </div>
             </>
           )}
