@@ -103,9 +103,19 @@ rsync -a --delete \
   --exclude='backend/*.db-shm' \
   --exclude='backend/targets.txt' \
   --exclude='backend/uploads/' \
+  --exclude='backend/config.json' \
+  --exclude='reconx-warc' \
   --exclude='go/' \
   "$SRC/" "$INSTALL_DIR/"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+
+# Seed config.json from source on fresh install — never overwrite existing
+# (user-saved config: R2 creds, Telegram tokens, scanner toggles).
+if [[ ! -f "$INSTALL_DIR/backend/config.json" ]]; then
+  cp "$SRC/backend/config.json" "$INSTALL_DIR/backend/config.json"
+  chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/backend/config.json"
+  log "Seeded backend/config.json from source (fresh install)"
+fi
 
 # ── 5. Python venv ────────────────────────────────────────────────────────
 log "Creating Python venv + installing requirements…"
@@ -156,24 +166,28 @@ fi
 # otherwise descend into $INSTALL_DIR/go/pkg/mod (the SERVICE_USER's
 # module cache) and choke on the cached @version dirs. After build the
 # binary is moved into place at $INSTALL_DIR/reconx-warc.
-log "Building the Go warc harvester binary for controller use…"
-WARC_BUILD_DIR=$(sudo -u "$SERVICE_USER" mktemp -d)
-sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/warc.go" "$INSTALL_DIR/warc_producers.go" "$WARC_BUILD_DIR/"
-sudo -u "$SERVICE_USER" bash -c "
-  export GOTOOLCHAIN=local
-  cd '$WARC_BUILD_DIR' &&
-  /usr/bin/go mod init reconx-warc >/dev/null 2>&1 &&
-  /usr/bin/go get github.com/schollz/progressbar/v3 >/dev/null 2>&1 &&
-  /usr/bin/go get golang.org/x/net/publicsuffix >/dev/null 2>&1 &&
-  /usr/bin/go mod tidy >/dev/null 2>&1 &&
-  GOOS=linux GOARCH=amd64 /usr/bin/go build -o '$INSTALL_DIR/reconx-warc' .
-" || warn "warc build reported issues — check manually"
-sudo -u "$SERVICE_USER" rm -rf "$WARC_BUILD_DIR"
-chmod +x "$INSTALL_DIR/reconx-warc" 2>/dev/null || true
 if [[ -f "$INSTALL_DIR/reconx-warc" ]]; then
-  log "WARC binary built (Linux/amd64): $(du -h "$INSTALL_DIR/reconx-warc" | awk '{print $1}')"
+  log "WARC binary already present — skipping build ($(du -h "$INSTALL_DIR/reconx-warc" | awk '{print $1}'))"
 else
-  warn "reconx-warc binary not produced — WARC tab will return 503 until manually built"
+  log "Building the Go warc harvester binary for controller use…"
+  WARC_BUILD_DIR=$(sudo -u "$SERVICE_USER" mktemp -d)
+  sudo -u "$SERVICE_USER" cp "$INSTALL_DIR/warc.go" "$INSTALL_DIR/warc_producers.go" "$WARC_BUILD_DIR/"
+  sudo -u "$SERVICE_USER" bash -c "
+    export GOTOOLCHAIN=local
+    cd '$WARC_BUILD_DIR' &&
+    /usr/bin/go mod init reconx-warc >/dev/null 2>&1 &&
+    /usr/bin/go get github.com/schollz/progressbar/v3 >/dev/null 2>&1 &&
+    /usr/bin/go get golang.org/x/net/publicsuffix >/dev/null 2>&1 &&
+    /usr/bin/go mod tidy >/dev/null 2>&1 &&
+    GOOS=linux GOARCH=amd64 /usr/bin/go build -o '$INSTALL_DIR/reconx-warc' .
+  " || warn "warc build reported issues — check manually"
+  sudo -u "$SERVICE_USER" rm -rf "$WARC_BUILD_DIR"
+  chmod +x "$INSTALL_DIR/reconx-warc" 2>/dev/null || true
+  if [[ -f "$INSTALL_DIR/reconx-warc" ]]; then
+    log "WARC binary built (Linux/amd64): $(du -h "$INSTALL_DIR/reconx-warc" | awk '{print $1}')"
+  else
+    warn "reconx-warc binary not produced — upload via /api/warc/upload-binary"
+  fi
 fi
 
 # ── 8. SSH key for fleet ops ──────────────────────────────────────────────
