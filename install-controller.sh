@@ -325,8 +325,11 @@ log "  ✓ /usr/local/bin/reconx-update installed (sudoers rule written)"
 log "Starting services…"
 systemctl daemon-reload
 systemctl enable --now redis-server
-systemctl enable --now reconx-dashboard
-systemctl enable --now reconx-fleet-api
+# Use restart (not enable --now) so gunicorn picks up new Python code on re-runs.
+systemctl enable reconx-dashboard
+systemctl restart reconx-dashboard
+systemctl enable reconx-fleet-api
+systemctl restart reconx-fleet-api
 systemctl reload nginx
 
 # Brief wait + health check
