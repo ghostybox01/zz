@@ -665,20 +665,22 @@ func fetchCrtShPivot(pivot string, domainChan chan<- string) {
 		return
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Printf("%s[CRTSH]%s read failed for %s: %v\n", YELLOW, RESET, pivot, err)
-		return
-	}
-
-	var records []crtshRecord
-	if err := json.Unmarshal(body, &records); err != nil {
-		fmt.Printf("%s[CRTSH]%s JSON parse failed for %s: %v\n", YELLOW, RESET, pivot, err)
+	// Stream-decode the JSON array so we never buffer the full response body.
+	// A single crt.sh pivot for a large domain (google.com, amazon.com) can
+	// return hundreds of MB of JSON — io.ReadAll would OOM the VPS.
+	dec := json.NewDecoder(resp.Body)
+	// Consume the opening '['.
+	if tok, err := dec.Token(); err != nil || tok == nil {
+		fmt.Printf("%s[CRTSH]%s JSON open failed for %s\n", YELLOW, RESET, pivot)
 		return
 	}
 
 	emitted := 0
-	for _, rec := range records {
+	for dec.More() {
+		var rec crtshRecord
+		if err := dec.Decode(&rec); err != nil {
+			continue
+		}
 		// name_value may pack several SAN entries on separate lines.
 		for _, raw := range strings.Split(rec.NameValue, "\n") {
 			name := strings.TrimSpace(strings.ToLower(raw))
@@ -688,8 +690,7 @@ func fetchCrtShPivot(pivot string, domainChan chan<- string) {
 			// Wildcards (*.example.com) are not directly testable — strip
 			// the leading wildcard label and let dedup catch duplicates.
 			name = strings.TrimPrefix(name, "*.")
-			// Skip anything that doesn't look like a hostname (e.g.
-			// email-name SANs include '@').
+			// Skip anything that doesn't look like a hostname.
 			if strings.ContainsAny(name, " @/\\") {
 				continue
 			}
@@ -708,8 +709,8 @@ func fetchCrtShPivot(pivot string, domainChan chan<- string) {
 		}
 	}
 	if globalVerbose.Load() {
-		fmt.Printf("%s[CRTSH]%s %s yielded %d names (%d records)\n",
-			CYAN, RESET, pivot, emitted, len(records))
+		fmt.Printf("%s[CRTSH]%s %s yielded %d names\n",
+			CYAN, RESET, pivot, emitted)
 	}
 }
 
