@@ -2586,6 +2586,17 @@ def api_warc_start():
     with _warc_lock:
         if _warc_proc is not None and _warc_proc.poll() is None:
             return jsonify({'error': 'WARC already running', 'pid': _warc_proc.pid}), 409
+        # Gunicorn-restart scenario: Popen was lost but the process is still
+        # alive. Block a second start so we don't run two harvesters in parallel.
+        _orphan_pid = _warc_state.get('pid')
+        if _orphan_pid and _warc_proc is None and _warc_state.get('finished_at') is None \
+                and _warc_state.get('run_on', 'controller') == 'controller':
+            try:
+                os.kill(int(_orphan_pid), 0)
+                return jsonify({'error': 'WARC already running (orphaned from prior session)',
+                                'pid': _orphan_pid}), 409
+            except (ProcessLookupError, PermissionError, OSError):
+                pass  # process is dead — allow a fresh start
         # Also block if a remote worker run is still flagged active.
         if _warc_state.get('run_on') not in (None, 'controller') and \
                 _warc_state.get('finished_at') is None and \
@@ -2940,6 +2951,25 @@ def api_warc_stop():
 
     # ── Controller path ───────────────────────────────────────────────
     if proc is None or proc.poll() is not None:
+        # Gunicorn-restart scenario: Popen is gone but the process may
+        # still be alive. Kill directly by the PID saved in state.
+        saved_pid = _warc_state.get('pid')
+        if saved_pid:
+            try:
+                os.kill(int(saved_pid), 15)  # SIGTERM
+                time.sleep(3)
+                try:
+                    os.kill(int(saved_pid), 0)
+                    os.kill(int(saved_pid), 9)  # SIGKILL if it survived
+                except (ProcessLookupError, OSError):
+                    pass
+                with _warc_lock:
+                    _warc_state['finished_at'] = datetime.now().isoformat()
+                    _warc_state['last_exit_code'] = -15
+                _save_warc_state()
+                return jsonify({'success': True, 'message': f'SIGTERM sent to orphaned pid {saved_pid}'})
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         return jsonify({'success': True, 'message': 'no warc running'})
     try:
         proc.terminate()
@@ -3095,6 +3125,17 @@ def api_warc_status():
     else:
         # ── Controller path: original local file/Popen probes ─────────
         running = proc is not None and proc.poll() is None
+        # Gunicorn-restart recovery: _warc_proc is None after a service
+        # restart but the process may still be alive. Fall back to a
+        # kill-0 existence check on the PID stored in persistent state.
+        if not running and state.get('finished_at') is None:
+            saved_pid = state.get('pid')
+            if saved_pid:
+                try:
+                    os.kill(int(saved_pid), 0)
+                    running = True
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
         if output_path and os.path.exists(output_path):
             try:
                 with open(output_path, 'rb') as f:
