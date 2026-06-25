@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	MAX_BUFFER_SIZE = 10 * 1024 * 1024 // 10 MB buffer for large records
+	MAX_BUFFER_SIZE = 1 * 1024 * 1024 // 1 MB buffer per worker (was 10 MB — caused OOM with 500 workers)
 )
 
 var (
@@ -468,17 +468,14 @@ func splitWARCRecord(data []byte, atEOF bool) (advance int, token []byte, err er
 }
 
 // Extract domains from WARC file and send to channel (grabber)
-func extractWarcFile(warcURL string, domainChan chan<- string, wg *sync.WaitGroup, bar *progressbar.ProgressBar, extractSem chan struct{}) {
-	defer wg.Done()
+// processWarcFile fetches and parses one WARC file, sending extracted domains to domainChan.
+// It has no sync primitives of its own — callers manage concurrency via the worker pool.
+func processWarcFile(warcURL string, domainChan chan<- string, bar *progressbar.ProgressBar) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Silently handle panics
 		}
 		bar.Add(1)
-		<-extractSem
 	}()
-
-	extractSem <- struct{}{} // Acquire semaphore
 
 	req, err := http.NewRequest("GET", warcURL, nil)
 	if err != nil {
@@ -496,7 +493,6 @@ func extractWarcFile(warcURL string, domainChan chan<- string, wg *sync.WaitGrou
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// Silently skip connection errors
 		return
 	}
 	defer func() {
@@ -534,10 +530,6 @@ func extractWarcFile(warcURL string, domainChan chan<- string, wg *sync.WaitGrou
 			urlStr := string(match[1])
 			domain := extractDomain(urlStr)
 
-			// Wire the env-filter regex: write the full URL to env_urls.txt
-			// when the path looks like an exposed env/config file. This lets
-			// the scanner probe these URLs directly rather than just the root
-			// domain. Previously the regex was declared but never called.
 			if envFilterRegex.MatchString(urlStr) {
 				fileMutex.Lock()
 				if envURLFile != nil {
@@ -549,20 +541,26 @@ func extractWarcFile(warcURL string, domainChan chan<- string, wg *sync.WaitGrou
 				}
 			}
 
-			// sendDomain handles dedup, subdomain-only filter, verbose
-			// logging, and the max-domains ceiling for every producer.
 			if !sendDomain(domain, domainChan) {
 				return
 			}
 		}
 	}
 
-	// Handle scanner errors silently
 	if err := scanner.Err(); err != nil {
-		// Silently skip scanner errors
 	}
 
 	totalProcessed.Add(1)
+}
+
+// extractWarcWorker is a long-lived pool goroutine. It pulls WARC URLs from urlChan
+// and calls processWarcFile for each. Only N of these goroutines exist (N = extractWorkers),
+// replacing the old pattern of spawning one goroutine per file (up to 10,000).
+func extractWarcWorker(urlChan <-chan string, domainChan chan<- string, wg *sync.WaitGroup, bar *progressbar.ProgressBar) {
+	defer wg.Done()
+	for warcURL := range urlChan {
+		processWarcFile(warcURL, domainChan, bar)
+	}
 }
 
 // Test domain connection (tester worker)
@@ -788,8 +786,8 @@ func main() {
 	var (
 		maxDomains     = flag.Int64("max-domains", 10000, "Maximum live domains to extract (required)")
 		outputFile     = flag.String("output", "live_domains.txt", "Output file for live domains")
-		extractWorkers = flag.Int("extract-workers", 200, "Number of concurrent workers for WARC extraction (grabber)")
-		testWorkers    = flag.Int("test-workers", 100, "Number of concurrent workers for connection testing")
+		extractWorkers = flag.Int("extract-workers", 50, "Number of concurrent workers for WARC extraction (grabber)")
+		testWorkers    = flag.Int("test-workers", 25, "Number of concurrent workers for connection testing")
 		limit          = flag.Int("limit", 0, "Limit number of WARC files to process (0 = auto)")
 		channelSize    = flag.Int("channel-size", 10000, "Size of domain channel buffer")
 		verbose        = flag.Bool("verbose", false, "Enable verbose mode to see extracted, live, and dead domains")
@@ -1086,7 +1084,7 @@ func main() {
 
 		fmt.Printf("%s[+]%s Found %d WARC files total\n", GREEN, RESET, totalFiles)
 		fmt.Printf("%s[*]%s Extraction workers (grabber): %d\n", CYAN, RESET, *extractWorkers)
-		fmt.Printf("%s[*]%s Processing %d files in parallel\n", CYAN, RESET, filesToProcess)
+		fmt.Printf("%s[*]%s Processing %d files (%d extract workers)\n", CYAN, RESET, filesToProcess, *extractWorkers)
 	}
 	fmt.Printf("%s[*]%s Testing workers (live check): %d\n", CYAN, RESET, *testWorkers)
 	fmt.Printf("%s[INFO]%s Target: %d live domains\n", YELLOW, RESET, *maxDomains)
@@ -1136,8 +1134,6 @@ func main() {
 	// Create domain channel for communication between producers and testers.
 	domainChan := make(chan string, *channelSize)
 
-	// Semaphores for controlling concurrency
-	extractSem := make(chan struct{}, *extractWorkers)
 	testSem := make(chan struct{}, *testWorkers)
 
 	// One producer wait group covers CC extractors AND the crt.sh
@@ -1223,19 +1219,23 @@ func main() {
 		go runIPFileProducer(*ipFileFlag, domainChan, &producerWg)
 	}
 
-	// Start CC extractor workers (grabber) - they extract domains and send to channel
+	// Start CC extractor worker pool. A feeder goroutine sends WARC URLs into urlChan;
+	// exactly extractWorkers goroutines drain it. This replaces the old pattern of
+	// spawning up to 10,000 goroutines (one per file) and throttling with a semaphore.
 	if ccEnabled {
-		for i := 0; i < filesToProcess; i++ {
-			if *maxDomains > 0 {
-				current := totalLiveDomains.Load()
-				if current >= *maxDomains {
-					fmt.Printf("\n%s[INFO]%s Reached max live domains limit (%d), stopping new file starts\n", GREEN, RESET, *maxDomains)
+		urlChan := make(chan string, *extractWorkers*2)
+		go func() {
+			for i := 0; i < filesToProcess; i++ {
+				if *maxDomains > 0 && totalLiveDomains.Load() >= *maxDomains {
 					break
 				}
+				urlChan <- allWarcURLs[i]
 			}
-
+			close(urlChan)
+		}()
+		for i := 0; i < *extractWorkers; i++ {
 			producerWg.Add(1)
-			go extractWarcFile(allWarcURLs[i], domainChan, &producerWg, bar, extractSem)
+			go extractWarcWorker(urlChan, domainChan, &producerWg, bar)
 		}
 	}
 
