@@ -3403,6 +3403,27 @@ def api_warc_status():
             except Exception:
                 pass
 
+    # Inline periodic R2 live snapshot — fires from the status poll so it
+    # works even when the monitor daemon thread is dead (e.g. after a
+    # gunicorn restart that reconnected to an orphan WARC process).
+    if running and output_path:
+        last_live = state.get('r2_live_uploaded_at')
+        now_ts = time.time()
+        if last_live:
+            try:
+                import calendar
+                last_ts = calendar.timegm(datetime.fromisoformat(last_live).timetuple())
+            except Exception:
+                last_ts = 0.0
+        else:
+            last_ts = 0.0
+        if now_ts - last_ts >= 300:  # 5 minutes
+            threading.Thread(
+                target=_upload_warc_live_snapshot,
+                args=(output_path, state.get('run_id', 'unknown')),
+                daemon=True,
+            ).start()
+
     # For distributed runs: aggregate domain counts from remote nodes
     dist_nodes = state.get('dist_nodes', [])
     if state.get('run_on') == 'distributed' and dist_nodes:
