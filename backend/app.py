@@ -3706,6 +3706,321 @@ def api_warc_upload_binary():
     return jsonify({'ok': True, 'size': len(data), 'path': WARC_BINARY})
 
 
+# ─── Perseus credential scanner ───────────────────────────────────────────────
+PERSEUS_BINARY = os.path.join(WARC_REPO_ROOT, 'perseusdemo')
+PERSEUS_RESULTS_DIR = os.path.join(WARC_REPO_ROOT, 'perseus', 'Results_Live')
+_PERSEUS_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+PERSEUS_STATE_FILE = os.path.join(_PERSEUS_BACKEND_DIR, 'perseus_state.json')
+_PERSEUS_UPLOAD_TOKEN = os.environ.get('PERSEUS_UPLOAD_TOKEN', 'ravenx-perseus-2026-admin')
+
+_perseus_lock = threading.Lock()
+_perseus_proc: 'subprocess.Popen | None' = None
+_perseus_state: dict = {
+    'started_at': None, 'finished_at': None,
+    'pid': None, 'run_id': None,
+    'last_exit_code': None,
+    'source': None,
+    'log_path': None,
+    'run_dir': None,
+}
+_perseus_state_mtime: float = 0.0
+
+
+def _save_perseus_state() -> None:
+    tmp = PERSEUS_STATE_FILE + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(_perseus_state, f)
+    os.replace(tmp, PERSEUS_STATE_FILE)
+
+
+def _reload_perseus_state_if_changed() -> None:
+    global _perseus_state, _perseus_state_mtime
+    if not os.path.exists(PERSEUS_STATE_FILE):
+        return
+    mtime = os.path.getmtime(PERSEUS_STATE_FILE)
+    if mtime <= _perseus_state_mtime:
+        return
+    try:
+        with open(PERSEUS_STATE_FILE) as f:
+            _perseus_state = json.load(f)
+        _perseus_state_mtime = mtime
+    except Exception:
+        pass
+
+
+def _count_perseus_results(run_dir: str | None = None) -> dict:
+    """Count live hits per provider from Results_Live/ directory."""
+    results_dir = os.path.join(run_dir, 'Results_Live') if run_dir else PERSEUS_RESULTS_DIR
+    stats: dict = {}
+    if not os.path.isdir(results_dir):
+        return stats
+    providers = [
+        'AWS', 'Stripe', 'Twilio', 'SendGrid', 'Mailgun', 'Brevo', 'Telnyx',
+        'GitHub', 'GitLab', 'Bitbucket', 'Slack', 'Discord', 'OpenAI',
+        'Anthropic', 'Resend', 'Mailjet', 'SparkPost', 'Sinch', 'Nexmo',
+        'Plivo', 'MessageBird', 'Mandrill', 'Mailchimp', 'Postmark',
+        'ElasticEmail', 'PayPal',
+    ]
+    total = 0
+    for p in providers:
+        fpath = os.path.join(results_dir, f'{p}_Live.txt')
+        if os.path.exists(fpath):
+            try:
+                with open(fpath) as f:
+                    count = sum(1 for line in f if line.strip())
+                if count > 0:
+                    stats[p.lower()] = count
+                    total += count
+            except Exception:
+                pass
+    stats['_total'] = total
+    return stats
+
+
+def _perseus_watch(proc: 'subprocess.Popen', run_id: str) -> None:
+    global _perseus_proc, _perseus_state
+    exit_code = proc.wait()
+    with _perseus_lock:
+        _perseus_state['finished_at'] = datetime.now().isoformat()
+        _perseus_state['last_exit_code'] = exit_code
+        _save_perseus_state()
+        if _perseus_proc is proc:
+            _perseus_proc = None
+
+
+@app.route('/api/perseus/upload-binary', methods=['POST'])
+def api_perseus_upload_binary():
+    if request.headers.get('X-Admin-Token', '') != _PERSEUS_UPLOAD_TOKEN:
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.get_data()
+    if not data:
+        return jsonify({'error': 'no data'}), 400
+    if data[:4] != b'\x7fELF':
+        return jsonify({'error': 'not an ELF binary'}), 400
+    tmp = None
+    try:
+        import tempfile as _tempfile
+        with _tempfile.NamedTemporaryFile(delete=False, suffix='.perseusdemo-tmp') as fh:
+            fh.write(data)
+            tmp = fh.name
+        os.chmod(tmp, 0o755)
+        shutil.copy2(tmp, PERSEUS_BINARY)
+        os.chmod(PERSEUS_BINARY, 0o755)
+    except OSError as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return jsonify({'ok': True, 'path': PERSEUS_BINARY, 'size': len(data)})
+
+
+@app.route('/api/perseus/start', methods=['POST'])
+def api_perseus_start():
+    global _perseus_proc, _perseus_state
+    _reload_perseus_state_if_changed()
+
+    if not os.path.exists(PERSEUS_BINARY) or not os.access(PERSEUS_BINARY, os.X_OK):
+        return jsonify({'error': 'perseusdemo binary missing — upload via /api/perseus/upload-binary'}), 409
+
+    _orphan_pid = _perseus_state.get('pid')
+    if _orphan_pid and _perseus_proc is None and _perseus_state.get('finished_at') is None:
+        try:
+            os.kill(int(_orphan_pid), 0)
+            return jsonify({'error': 'Perseus already running (orphaned)', 'pid': _orphan_pid}), 409
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    with _perseus_lock:
+        if _perseus_proc is not None and _perseus_proc.poll() is None:
+            return jsonify({'error': 'Perseus already running', 'pid': _perseus_proc.pid}), 409
+
+    body = request.get_json(silent=True) or {}
+    source = body.get('source', 'warc')
+    raw_flags = body.get('flags', [])
+    safe_flags = [f for f in raw_flags if isinstance(f, str) and f in ('--crt', '--js', '--deep', '--jsu')]
+
+    if source == 'warc':
+        warc_output = os.path.join(WARC_REPO_ROOT, 'env_urls.txt')
+        if not os.path.exists(warc_output):
+            return jsonify({'error': 'WARC output env_urls.txt not found — run a WARC scan first'}), 409
+        url_list_path = warc_output
+    else:
+        urls_text = body.get('urls', '').strip()
+        if not urls_text:
+            return jsonify({'error': 'No URLs provided'}), 400
+        tmp_id = uuid.uuid4().hex[:8]
+        url_list_path = f'/tmp/perseus_list_{tmp_id}.txt'
+        with open(url_list_path, 'w') as f:
+            f.write(urls_text)
+
+    run_id = uuid.uuid4().hex[:8]
+    run_dir = os.path.join(WARC_REPO_ROOT, 'perseus')
+    os.makedirs(run_dir, exist_ok=True)
+    log_path = os.path.join(run_dir, f'perseus_{run_id}.log')
+
+    scanner_cfg = _load_scanner_config()
+    perseus_cfg = scanner_cfg.get('perseus', {})
+    path_txt_src = os.path.join(_PERSEUS_BACKEND_DIR, 'path.txt')
+    path_txt_dst = os.path.join(run_dir, 'path.txt')
+    if os.path.exists(path_txt_src) and not os.path.exists(path_txt_dst):
+        shutil.copy2(path_txt_src, path_txt_dst)
+
+    run_cfg = {
+        'telegram_bot_token': scanner_cfg.get('bot_token', ''),
+        'telegram_chat_id': scanner_cfg.get('chat_id', ''),
+        'smtp_target_email': perseus_cfg.get('smtp_target_email', ''),
+        'timeout_sec': int(perseus_cfg.get('timeout_sec', 15)),
+        'max_body_bytes': 2097152,
+        'max_js_urls_per_domain': 25,
+        'max_js_body_bytes': 1048576,
+        'use_redis': bool(perseus_cfg.get('use_redis', False)),
+        'redis_url': perseus_cfg.get('redis_url', 'redis://127.0.0.1/'),
+        'fpp_path': path_txt_dst,
+        'validation_slots': int(perseus_cfg.get('validation_slots', 64)),
+        'methods': {
+            'path_traversal': True,
+            'nvca': True,
+            'js_scan': True,
+            'ssrf': bool(perseus_cfg.get('ssrf', False)),
+            'rce_probe': bool(perseus_cfg.get('rce_probe', False)),
+            'fpp': True,
+        },
+        'validators': perseus_cfg.get('validators', {
+            'aws': True, 'stripe': True, 'twilio': True, 'sendgrid': True,
+            'mailgun': True, 'smtp': True, 'github': True, 'gitlab': True,
+            'bitbucket': True, 'slack': True, 'discord': True, 'openai': True,
+            'anthropic': True, 'resend': True, 'mailjet': True, 'sparkpost': True,
+            'sinch': True, 'elastic_email': True, 'brevo': True, 'telnyx': True,
+            'postmark': False, 'mailchimp': True, 'mandrill': True,
+            'messagebird': True, 'plivo': True, 'nexmo': True, 'paypal': True,
+        }),
+    }
+    with open(os.path.join(run_dir, 'config.json'), 'w') as f:
+        json.dump(run_cfg, f, indent=2)
+
+    cmd = [PERSEUS_BINARY, url_list_path] + safe_flags
+
+    log_handle = open(log_path, 'w')
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        cwd=run_dir,
+        start_new_session=True,
+    )
+    log_handle.close()
+
+    with _perseus_lock:
+        _perseus_proc = proc
+        _perseus_state.update({
+            'started_at': datetime.now().isoformat(),
+            'finished_at': None,
+            'pid': proc.pid,
+            'run_id': run_id,
+            'last_exit_code': None,
+            'source': source,
+            'log_path': log_path,
+            'run_dir': run_dir,
+        })
+        _save_perseus_state()
+
+    t = threading.Thread(target=_perseus_watch, args=(proc, run_id), daemon=True)
+    t.start()
+
+    return jsonify({'success': True, 'pid': proc.pid, 'run_id': run_id})
+
+
+@app.route('/api/perseus/stop', methods=['POST'])
+def api_perseus_stop():
+    global _perseus_proc, _perseus_state
+    _reload_perseus_state_if_changed()
+
+    proc = _perseus_proc
+    if proc is None or proc.poll() is not None:
+        saved_pid = _perseus_state.get('pid')
+        if saved_pid:
+            try:
+                os.kill(int(saved_pid), 15)
+                time.sleep(2)
+                try:
+                    os.kill(int(saved_pid), 0)
+                    os.kill(int(saved_pid), 9)
+                except (ProcessLookupError, OSError):
+                    pass
+                with _perseus_lock:
+                    _perseus_state['finished_at'] = datetime.now().isoformat()
+                    _perseus_state['last_exit_code'] = -15
+                    _save_perseus_state()
+                return jsonify({'success': True, 'message': f'Stopped orphaned pid {saved_pid}'})
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        return jsonify({'success': True, 'message': 'no perseus running'})
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+    with _perseus_lock:
+        _perseus_state['finished_at'] = datetime.now().isoformat()
+        _perseus_state['last_exit_code'] = -15
+        _save_perseus_state()
+        _perseus_proc = None
+
+    return jsonify({'success': True, 'message': 'Perseus stopped'})
+
+
+@app.route('/api/perseus/status', methods=['GET'])
+def api_perseus_status():
+    global _perseus_state
+    _reload_perseus_state_if_changed()
+
+    proc = _perseus_proc
+    running = proc is not None and proc.poll() is None
+    if not running and _perseus_state.get('finished_at') is None:
+        saved_pid = _perseus_state.get('pid')
+        if saved_pid:
+            try:
+                os.kill(int(saved_pid), 0)
+                running = True
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+    log_tail: list = []
+    log_path = _perseus_state.get('log_path')
+    if log_path and os.path.exists(log_path):
+        try:
+            with open(log_path, 'rb') as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 4096))
+                raw = f.read().decode('utf-8', errors='replace')
+            log_tail = _truncate_log_tail(raw.splitlines()[-20:])
+        except Exception:
+            pass
+
+    run_dir = _perseus_state.get('run_dir')
+    validator_stats = _count_perseus_results(run_dir)
+    total_hits = validator_stats.pop('_total', 0)
+
+    return jsonify({
+        'running': running,
+        'pid': _perseus_state.get('pid'),
+        'run_id': _perseus_state.get('run_id'),
+        'started_at': _perseus_state.get('started_at'),
+        'finished_at': _perseus_state.get('finished_at'),
+        'last_exit_code': _perseus_state.get('last_exit_code'),
+        'source': _perseus_state.get('source'),
+        'total_hits': total_hits,
+        'validator_stats': validator_stats,
+        'log_tail': log_tail,
+    })
+
+
 @app.route('/api/system/info', methods=['GET'])
 def api_system_info():
     """Return VPS memory stats read from /proc/meminfo (Linux only)."""

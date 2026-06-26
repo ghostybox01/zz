@@ -27,6 +27,7 @@ import { ScheduleSettings } from './components/ScheduleSettings'
 import { ToastStack, type ToastItem } from './components/ToastStack'
 import { categoryForFinding } from './lib/toastCategory'
 import { WarcPanel } from './components/WarcPanel'
+import { PerseusPanel } from './components/PerseusPanel'
 import { DorksPanel } from './components/DorksPanel'
 import { StripePanel } from './components/StripePanel'
 import { CryptoPanel } from './components/CryptoPanel'
@@ -422,6 +423,7 @@ export default function App() {
   const overviewHidden = tab !== 'overview'
   const ravenxHidden = tab !== 'ravenx'
   const warcHidden = tab !== 'warc'
+  const perseusHidden = tab !== 'perseus'
   const listsHidden = tab !== 'lists'
   const fleetHidden = tab !== 'fleet'
   const findingsHidden = tab !== 'findings'
@@ -716,6 +718,16 @@ export default function App() {
               className="tab-panel"
             >
               <WarcPanel notify={pushAlertToast} fleet={fleet} />
+            </section>
+
+            <section
+              id="panel-perseus"
+              role="tabpanel"
+              aria-labelledby="tab-perseus"
+              hidden={perseusHidden}
+              className="tab-panel"
+            >
+              <PerseusPanel notify={pushAlertToast} />
             </section>
 
             <section

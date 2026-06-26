@@ -206,7 +206,7 @@ function IcoSmtp(props: SVGProps<SVGSVGElement>) {
   )
 }
 
-export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'aikeys' | 'emailapi' | 'smtp' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'asnrecon' | 'logs' | 'settings' | 'help'
+export type DashboardTab = 'overview' | 'ravenx' | 'warc' | 'perseus' | 'lists' | 'fleet' | 'findings' | 'stripe' | 'crypto' | 'aikeys' | 'emailapi' | 'smtp' | 'database' | 'webpanels' | 'prefilter' | 'dorks' | 'asnrecon' | 'logs' | 'settings' | 'help'
 
 type Item = { id: DashboardTab; label: string; Ico: typeof IcoDash; goldWhenActive?: boolean }
 
@@ -214,6 +214,7 @@ const ITEMS: Item[] = [
   { id: 'overview', label: 'Dashboard', Ico: IcoDash },
   { id: 'ravenx', label: 'Cracker', Ico: IcoRadar, goldWhenActive: true },
   { id: 'warc', label: 'WARC', Ico: IcoArchive },
+  { id: 'perseus', label: 'Perseus', Ico: IcoSearch },
   { id: 'lists', label: 'Lists', Ico: IcoList },
   { id: 'fleet', label: 'Fleet', Ico: IcoServers },
   { id: 'findings', label: 'Hits', Ico: IcoTrophy },
@@ -241,6 +242,7 @@ const TAB_TITLE: Record<DashboardTab, string> = {
   overview: 'Command overview',
   ravenx: 'Cracker workspace',
   warc: 'WARC harvest',
+  perseus: 'Perseus — credential scanner',
   lists: 'Target lists',
   fleet: 'Fleet & shards',
   findings: 'Hits ledger',

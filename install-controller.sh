@@ -105,9 +105,15 @@ rsync -a --delete \
   --exclude='backend/uploads/' \
   --exclude='backend/config.json' \
   --exclude='reconx-warc' \
+  --exclude='perseusdemo' \
+  --exclude='perseus/' \
   --exclude='go/' \
   "$SRC/" "$INSTALL_DIR/"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+
+# Create perseus working directory (Results_Live written here)
+mkdir -p "$INSTALL_DIR/perseus"
+chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/perseus"
 
 # Seed config.json from source on fresh install — never overwrite existing
 # (user-saved config: R2 creds, Telegram tokens, scanner toggles).

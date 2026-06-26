@@ -1036,3 +1036,35 @@ export const findings = {
     return (await res.json()) as { ok: boolean; deleted: number }
   },
 }
+
+export type PerseusStatus = {
+  running: boolean
+  pid: number | null
+  run_id: string | null
+  started_at: string | null
+  finished_at: string | null
+  last_exit_code: number | null
+  source: 'warc' | 'paste' | null
+  total_hits: number
+  validator_stats: Record<string, number>
+  log_tail: string[]
+}
+
+export const perseus = {
+  status: () => getJson<PerseusStatus>('/perseus/status'),
+  start: (opts: { source: 'warc' | 'paste'; urls?: string; flags?: string[] }) =>
+    postJson<{ success: boolean; pid: number; run_id: string }>('/perseus/start', opts),
+  stop: () => postJson<{ success: boolean; message: string }>('/perseus/stop', {}),
+  async uploadBinary(file: File): Promise<{ ok: boolean; path: string; size: number }> {
+    const res = await fetch(`${BASE}/perseus/upload-binary`, {
+      method: 'POST',
+      headers: { 'X-Admin-Token': 'ravenx-perseus-2026-admin', 'Content-Type': 'application/octet-stream' },
+      body: file,
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new ReconApiError(res.status, '/perseus/upload-binary', text)
+    }
+    return (await res.json()) as { ok: boolean; path: string; size: number }
+  },
+}
