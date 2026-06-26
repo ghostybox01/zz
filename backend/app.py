@@ -3748,7 +3748,7 @@ def _reload_perseus_state_if_changed() -> None:
         pass
 
 
-def _count_perseus_results(run_dir: str | None = None) -> dict:
+def _count_perseus_results(run_dir: 'str | None' = None) -> dict:
     """Count live hits per provider from Results_Live/ directory."""
     results_dir = os.path.join(run_dir, 'Results_Live') if run_dir else PERSEUS_RESULTS_DIR
     stats: dict = {}
