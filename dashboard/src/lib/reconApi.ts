@@ -672,6 +672,18 @@ export type WarcStatus = {
    *  bucket. */
   r2_account_id?: string | null
   r2_account_label?: string | null
+  /** Live snapshot uploaded to R2 every ~5 min while running */
+  r2_live_key?: string | null
+  r2_live_uploaded_at?: string | null
+  /** Per-node status in distributed runs */
+  dist_nodes?: Array<{
+    id: string
+    pid?: number | null
+    remote_pid?: number | null
+    max_domains?: number
+    status?: string
+    error?: string
+  }>
   log_tail: string[]
   run_on: string | null
   remote_pid: number | null
@@ -693,6 +705,9 @@ export type WarcStartOptions = {
   crt_domain?: string
   /** Drop FQDNs whose eTLD+1 equals themselves (apex/registered domains). */
   subdomain_only?: boolean
+  /** List of node IDs to run WARC on simultaneously (['controller', '10.0.0.x', ...]).
+   *  When set with 2+ nodes, backend distributes CC snapshots between them. */
+  nodes?: string[]
 }
 
 export const warc = {

@@ -250,6 +250,7 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
   const [testWorkers, setTestWorkers] = useState(25)
   const [snapshots, setSnapshots] = useState(0)
   const [runOn, setRunOn] = useState<string>('controller')
+  const [selectedNodes, setSelectedNodes] = useState<string[]>(['controller'])
   const [hosts, setHosts] = useState<string[]>(['controller'])
   // Producer source toggles — default mirrors the legacy CC-only flow.
   // Either may be true; both true runs them concurrently into the same
@@ -424,6 +425,7 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
         crt_tld: sourceCrtSh ? crtTld.trim() : undefined,
         crt_domain: sourceCrtSh ? crtDomain.trim() : undefined,
         subdomain_only: subdomainOnly,
+        nodes: ['controller', ...selectedNodes.filter(n => n !== 'controller')],
       })
       await refresh()
     } catch (e) {
@@ -749,6 +751,36 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
               <span>Subdomain only (drop apex / eTLD+1 entries)</span>
             </label>
           </div>
+          {/* Distributed nodes selector */}
+          {fleet && fleet.length > 0 && (
+            <div className="kv__row">
+              <span className="kv__label">Nodes</span>
+              <div style={{ display: 'flex', gap: '.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                {/* Controller is always included */}
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '.35rem', cursor: 'default', fontSize: '.85rem', opacity: 0.7 }}>
+                  <input type="checkbox" checked disabled />
+                  <span>controller</span>
+                </label>
+                {fleet.map(node => {
+                  const nodeId = node.host ?? node.id
+                  const label = node.label ? `${node.label} (${nodeId})` : nodeId
+                  const checked = selectedNodes.includes(nodeId)
+                  return (
+                    <label key={nodeId} style={{ display: 'inline-flex', alignItems: 'center', gap: '.35rem', cursor: 'pointer', fontSize: '.85rem' }}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={e => setSelectedNodes(prev =>
+                          e.target.checked ? [...prev, nodeId] : prev.filter(n => n !== nodeId)
+                        )}
+                      />
+                      <span>{label}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -865,6 +897,65 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
         <p className={`settings-hint ${r2Error ? 'tg-hint--err' : ''}`} style={{ marginTop: '.75rem' }}>
           {error || r2Error}
         </p>
+      )}
+
+      {r2Key && (
+        <div className="kv" style={{ marginTop: '.75rem' }}>
+          <div className="kv__row">
+            <span className="kv__label muted">Saved to R2</span>
+            <span className="mono" style={{ fontSize: '.82rem', wordBreak: 'break-all' }}>{r2Key}</span>
+          </div>
+          {status?.r2_live_key && (
+            <div className="kv__row" style={{ marginTop: '.5rem', fontSize: '.82rem' }}>
+              <span className="kv__label muted">Live snapshot</span>
+              <span className="mono" style={{ fontSize: '.78rem', color: 'var(--accent)', opacity: 0.85 }}>
+                {status.r2_live_key}
+                {status.r2_live_uploaded_at && (
+                  <span className="muted" style={{ marginLeft: '.5rem' }}>
+                    @ {new Date(status.r2_live_uploaded_at).toLocaleTimeString()}
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+      {!r2Key && status?.r2_live_key && (
+        <div className="kv" style={{ marginTop: '.75rem' }}>
+          <div className="kv__row" style={{ fontSize: '.82rem' }}>
+            <span className="kv__label muted">Live snapshot</span>
+            <span className="mono" style={{ fontSize: '.78rem', color: 'var(--accent)', opacity: 0.85 }}>
+              {status.r2_live_key}
+              {status.r2_live_uploaded_at && (
+                <span className="muted" style={{ marginLeft: '.5rem' }}>
+                  @ {new Date(status.r2_live_uploaded_at).toLocaleTimeString()}
+                </span>
+              )}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {status?.dist_nodes && status.dist_nodes.length > 0 && (
+        <div style={{ marginTop: '1rem' }}>
+          <p className="muted" style={{ fontSize: '.78rem', marginBottom: '.4rem' }}>Distributed nodes</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '.5rem' }}>
+            {status.dist_nodes.map(nd => (
+              <div key={nd.id} style={{
+                background: 'rgba(255,255,255,.04)',
+                border: '1px solid var(--hairline)',
+                borderRadius: '.4rem',
+                padding: '.4rem .6rem',
+                fontSize: '.78rem',
+              }}>
+                <div className="mono" style={{ color: 'var(--text)' }}>{nd.id}</div>
+                <div className="muted">{nd.status ?? '—'}</div>
+                {nd.max_domains && <div className="muted">target: {nd.max_domains.toLocaleString()}</div>}
+                {nd.error && <div style={{ color: 'var(--danger)', fontSize: '.72rem' }}>{nd.error}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       <div style={{ marginTop: '1rem' }}>

