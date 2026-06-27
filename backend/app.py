@@ -2795,10 +2795,17 @@ def api_warc_start():
                 nd_proc = None
                 try:
                     nd_log_h = open(nd_log, 'wb')
-                    nd_proc = subprocess.Popen(
-                        nd_cmd, stdout=nd_log_h, stderr=subprocess.STDOUT,
-                        cwd=nd_run_dir, start_new_session=True,
-                    )
+                    _sd = ['systemd-run', '--scope', f'--unit=reconx-warc-{nd_run_id}', '--']
+                    try:
+                        nd_proc = subprocess.Popen(
+                            _sd + nd_cmd, stdout=nd_log_h, stderr=subprocess.STDOUT,
+                            cwd=nd_run_dir,
+                        )
+                    except FileNotFoundError:
+                        nd_proc = subprocess.Popen(
+                            nd_cmd, stdout=nd_log_h, stderr=subprocess.STDOUT,
+                            cwd=nd_run_dir, start_new_session=True,
+                        )
                     nd_log_h.close()
                     controller_pid = nd_proc.pid
                     controller_proc = nd_proc
@@ -2852,12 +2859,12 @@ def api_warc_start():
 
                     remote_cmd = (
                         f'cd {remote_dir} && '
-                        f'nohup ./reconx-warc -max-domains {per_node_max} '
+                        f'nohup setsid ./reconx-warc -max-domains {per_node_max} '
                         f'-output live_domains.txt '
                         f'-extract-workers {extract_workers} '
                         f'-test-workers {test_workers}'
                         f'{snap_flag}{src_flag}{crt_flag} '
-                        f'> warc.log 2>&1 & echo $!'
+                        f'> warc.log 2>&1 </dev/null & echo $!'
                     )
                     out = mgr.ssh_exec(nd, remote_cmd, 20)
                     remote_pid = None
@@ -3096,13 +3103,27 @@ def api_warc_start():
 
     try:
         log_handle = open(log_path, 'wb')
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            cwd=run_dir,
-            start_new_session=True,
-        )
+        # Wrap in systemd-run --scope so the WARC process lives in its own
+        # transient cgroup, completely independent of the gunicorn cgroup.
+        # This means gunicorn restarts (systemctl restart/reload) can never
+        # SIGTERM the WARC subprocess regardless of KillMode setting.
+        _sd_run = ['systemd-run', '--scope', f'--unit=reconx-warc-{run_id}', '--']
+        try:
+            proc = subprocess.Popen(
+                _sd_run + cmd,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                cwd=run_dir,
+            )
+        except FileNotFoundError:
+            # systemd-run not available (non-systemd host) — fall back
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                cwd=run_dir,
+                start_new_session=True,
+            )
     except Exception as e:
         return jsonify({'error': f'failed to spawn warc: {e}'}), 500
 
