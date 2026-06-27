@@ -3248,7 +3248,7 @@ def api_warc_status():
     domains_found = 0
     log_tail: list = []
 
-    if run_on != 'controller':
+    if run_on not in ('controller', 'distributed'):
         # ── Worker path: read from SSHManager cache, not inline SSH ─────
         # The monitor thread refreshes liveness + domain count + log tail
         # every ~30 s with one batched SSH call. Reading from RAM keeps
