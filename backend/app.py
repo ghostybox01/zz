@@ -2842,6 +2842,8 @@ def api_warc_start():
                 remote_output = f'{remote_dir}/live_domains.txt'
 
                 try:
+                    # Kill any stale reconx-warc on this worker before uploading
+                    mgr.ssh_exec(nd, 'pkill -x reconx-warc 2>/dev/null; sleep 1; true', 8)
                     mgr.ssh_exec(nd, f'mkdir -p {remote_dir} && rm -f {remote_binary}', 10)
                     if not mgr.scp_upload(nd, WARC_BINARY, remote_binary):
                         node_results.append({'id': nd, 'error': 'SCP binary upload failed', 'status': 'failed'})
@@ -2857,16 +2859,20 @@ def api_warc_start():
                         if crt_domain:
                             crt_flag += f' -crt-domain {crt_domain}'
 
+                    # Write PID to file as backup; read it back for reliability
                     remote_cmd = (
                         f'cd {remote_dir} && '
-                        f'nohup setsid ./reconx-warc -max-domains {per_node_max} '
+                        f'nohup ./reconx-warc -max-domains {per_node_max} '
                         f'-output live_domains.txt '
                         f'-extract-workers {extract_workers} '
                         f'-test-workers {test_workers}'
                         f'{snap_flag}{src_flag}{crt_flag} '
-                        f'> warc.log 2>&1 </dev/null & echo $!'
+                        f'> warc.log 2>&1 & PID=$!; echo $PID > warc.pid; echo $PID'
                     )
-                    out = mgr.ssh_exec(nd, remote_cmd, 20)
+                    out = mgr.ssh_exec(nd, remote_cmd, 35)
+                    if not (out or '').strip():
+                        # Fallback: read warc.pid written by the command above
+                        out = mgr.ssh_exec(nd, f'cat {remote_dir}/warc.pid 2>/dev/null', 8)
                     remote_pid = None
                     for ln in (out or '').splitlines():
                         for t in reversed(ln.strip().split()):
