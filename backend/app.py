@@ -2799,7 +2799,6 @@ def api_warc_start():
                         nd_cmd, stdout=nd_log_h, stderr=subprocess.STDOUT,
                         cwd=nd_run_dir, start_new_session=True,
                     )
-                    nd_log_h.close()
                     controller_pid = nd_proc.pid
                     controller_proc = nd_proc
                     node_results.append({'id': 'controller', 'pid': nd_proc.pid, 'max_domains': per_node_max, 'status': 'started'})
