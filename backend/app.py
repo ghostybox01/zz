@@ -2665,10 +2665,20 @@ def api_warc_start():
         if _warc_proc is not None and _warc_proc.poll() is None:
             return jsonify({'error': 'WARC already running', 'pid': _warc_proc.pid}), 409
         # Gunicorn-restart scenario: Popen was lost but the process is still
-        # alive. Block a second start so we don't run two harvesters in parallel.
+        # alive. Block a second controller start so we don't run two harvesters
+        # in parallel. Worker starts are allowed even if a controller is running
+        # — the caller is adding a parallel worker, not replacing the controller.
+        _quick_data = request.get_json(force=True, silent=True) or {}
+        _new_run_on = _quick_data.get('run_on', 'controller')
+        _new_nodes  = _quick_data.get('nodes', [])
+        _is_worker_add = (
+            _new_run_on not in (None, 'controller', '') or
+            (_new_nodes and _new_nodes != ['controller'])
+        )
         _orphan_pid = _warc_state.get('pid')
         if _orphan_pid and _warc_proc is None and _warc_state.get('finished_at') is None \
-                and _warc_state.get('run_on', 'controller') == 'controller':
+                and _warc_state.get('run_on', 'controller') in ('controller', 'distributed') \
+                and not _is_worker_add:
             try:
                 os.kill(int(_orphan_pid), 0)
                 return jsonify({'error': 'WARC already running (orphaned from prior session)',
@@ -2757,32 +2767,18 @@ def api_warc_start():
 
     # ── Distributed multi-node mode ──────────────────────────────────────────
     if nodes and len(nodes) > 1:
-        # 1. Fetch CC snapshot list from the CC index
-        total_snaps_wanted = max(snapshots if snapshots else 20, len(nodes) * 3)
-        snap_ids = _fetch_cc_snapshot_ids(total_snaps_wanted)
-        if not snap_ids:
-            # Fallback: let each node auto-select (may overlap, but still works)
-            snap_ids = []
-
-        # 2. Divide snapshots between nodes; if no snap list, skip assignment
-        node_snap_map = {}
-        if snap_ids:
-            per_node = max(1, len(snap_ids) // len(nodes))
-            for i, nd in enumerate(nodes):
-                start = i * per_node
-                end = start + per_node if i < len(nodes) - 1 else len(snap_ids)
-                node_snap_map[nd] = ','.join(snap_ids[start:end])
-
-        # 3. Split max_domains evenly
+        # Each node runs independently with the same snapshot count — they
+        # will each select random (potentially overlapping) CC snapshots.
+        # This is simpler and more robust than pre-sharding snapshot IDs
+        # (which caused the controller to crash silently with -snapshot-list).
+        per_node_snaps = max(1, (snapshots or 20) // len(nodes))
         per_node_max = max(1000, max_domains // len(nodes))
 
         run_id_dist = uuid.uuid4().hex[:8]
         node_results = []
         controller_pid = None
-        controller_proc = None
 
         for i, nd in enumerate(nodes):
-            assigned_snaps = node_snap_map.get(nd, '')
 
             if nd == 'controller':
                 # ── Start locally ────────────────────────────────────────────
@@ -2798,11 +2794,8 @@ def api_warc_start():
                     '-output', nd_output,
                     '-extract-workers', str(extract_workers),
                     '-test-workers', str(test_workers),
+                    '-snapshots', str(per_node_snaps),
                 ]
-                if assigned_snaps:
-                    nd_cmd.extend(['-snapshot-list', assigned_snaps])
-                elif snapshots > 0:
-                    nd_cmd.extend(['-snapshots', str(snapshots // len(nodes) + 1)])
                 if source_list != ['cc']:
                     nd_cmd.extend(['-source', ','.join(source_list)])
                 if crtsh_enabled:
