@@ -2551,31 +2551,50 @@ def _upload_warc_live_snapshot(output_path: str, run_id: str) -> None:
         print(f'[warc] R2 live snapshot failed: {e}', flush=True)
 
 
-def _warc_watch_and_upload(proc: 'subprocess.Popen', snapshot: dict) -> None:
+def _warc_watch_and_upload(proc_or_pid, snapshot: dict) -> None:
     """Wait for the warc process to exit, push the result to R2 (if
-    configured), and clear the local run dir."""
+    configured), and clear the local run dir.
+
+    proc_or_pid may be a subprocess.Popen object (legacy) or an int PID
+    (nohup-launched controller that is fully detached from gunicorn).
+    """
     output_path = snapshot.get('output_path')
     run_id = snapshot.get('run_id')
     run_dir = os.path.dirname(output_path) if output_path else None
 
+    _is_pid = isinstance(proc_or_pid, int)
+
+    def _alive():
+        if _is_pid:
+            try:
+                os.kill(proc_or_pid, 0)
+                return True
+            except (ProcessLookupError, OSError):
+                return False
+        return proc_or_pid.poll() is None
+
     # Periodic live snapshot thread — uploads every 5 min while process runs
     def _do_periodic():
-        while proc.poll() is None:
-            # Sleep in small increments so we exit promptly on process end
+        while _alive():
             for _ in range(60):  # 60 × 5s = 5 min
-                if proc.poll() is not None:
+                if not _alive():
                     return
                 time.sleep(5)
-            if proc.poll() is None and output_path:
+            if _alive() and output_path:
                 _upload_warc_live_snapshot(output_path, run_id)
     _periodic_t = threading.Thread(target=_do_periodic, daemon=True)
     _periodic_t.start()
 
-    try:
-        exit_code = proc.wait()
-    except Exception as e:
-        exit_code = -1
-        print(f'[warc] wait failed: {e}')
+    if _is_pid:
+        while _alive():
+            time.sleep(10)
+        exit_code = None  # can't waitpid on reparented process
+    else:
+        try:
+            exit_code = proc_or_pid.wait()
+        except Exception as e:
+            exit_code = -1
+            print(f'[warc] wait failed: {e}')
 
     r2_key = None
     r2_error = None
@@ -2792,22 +2811,27 @@ def api_warc_start():
                     if crt_domain:
                         nd_cmd.extend(['-crt-domain', crt_domain])
 
-                nd_proc = None
+                nd_pid = None
                 try:
-                    nd_log_h = open(nd_log, 'wb')
-                    nd_proc = subprocess.Popen(
-                        nd_cmd, stdout=nd_log_h, stderr=subprocess.STDOUT,
-                        cwd=nd_run_dir, start_new_session=True,
+                    import shlex as _shlex
+                    nd_pid_file = os.path.join(nd_run_dir, 'warc.pid')
+                    nd_shell = (
+                        f'nohup {_shlex.join(nd_cmd)} < /dev/null > {_shlex.quote(nd_log)} 2>&1 '
+                        f'& disown; PID=$!; echo $PID > {_shlex.quote(nd_pid_file)}; echo $PID'
                     )
-                    controller_pid = nd_proc.pid
-                    controller_proc = nd_proc
-                    node_results.append({'id': 'controller', 'pid': nd_proc.pid, 'max_domains': per_node_max, 'status': 'started'})
+                    nd_result = subprocess.run(
+                        ['bash', '-c', nd_shell],
+                        capture_output=True, text=True, cwd=nd_run_dir,
+                    )
+                    nd_pid = int(nd_result.stdout.strip())
+                    controller_pid = nd_pid
+                    node_results.append({'id': 'controller', 'pid': nd_pid, 'max_domains': per_node_max, 'status': 'started'})
                 except Exception as e:
                     node_results.append({'id': 'controller', 'error': str(e), 'status': 'failed'})
 
                 snap_dict = {
                     'started_at': datetime.now().isoformat(),
-                    'pid': nd_proc.pid if nd_proc else None,
+                    'pid': nd_pid,
                     'run_id': nd_run_id,
                     'output_path': nd_output,
                     'log_path': nd_log,
@@ -2815,10 +2839,10 @@ def api_warc_start():
                     'run_on': 'controller',
                     'remote_pid': None,
                 }
-                if nd_proc:
+                if nd_pid:
                     threading.Thread(
                         target=_warc_watch_and_upload,
-                        args=(nd_proc, dict(snap_dict)),
+                        args=(nd_pid, dict(snap_dict)),
                         daemon=True,
                     ).start()
 
@@ -2883,7 +2907,7 @@ def api_warc_start():
 
         # Update state to track distributed run
         with _warc_lock:
-            _warc_proc = controller_proc
+            _warc_proc = None  # controller is nohup-detached; track by PID
             _warc_state.update({
                 'started_at': datetime.now().isoformat(),
                 'pid': controller_pid,
@@ -3099,21 +3123,28 @@ def api_warc_start():
     if subdomain_only:
         cmd.append('-subdomain-only')
 
+    # Launch via nohup+disown so the WARC process is fully detached from
+    # gunicorn's process tree. This means systemd service restarts (for
+    # deploys or failures) cannot kill the running scan. We track liveness
+    # via os.kill(pid, 0) rather than proc.poll().
+    import shlex as _shlex
+    pid_file = os.path.join(run_dir, 'warc.pid')
+    shell_cmd = (
+        f'nohup {_shlex.join(cmd)} < /dev/null > {_shlex.quote(log_path)} 2>&1 '
+        f'& disown; PID=$!; echo $PID > {_shlex.quote(pid_file)}; echo $PID'
+    )
     try:
-        log_handle = open(log_path, 'wb')
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            cwd=run_dir,
-            start_new_session=True,
+        result = subprocess.run(
+            ['bash', '-c', shell_cmd],
+            capture_output=True, text=True, cwd=run_dir,
         )
+        warc_pid = int(result.stdout.strip())
     except Exception as e:
         return jsonify({'error': f'failed to spawn warc: {e}'}), 500
 
     snapshot = {
         'started_at': datetime.now().isoformat(),
-        'pid': proc.pid,
+        'pid': warc_pid,
         'run_id': run_id,
         'output_path': output_path,
         'log_path': log_path,
@@ -3122,9 +3153,8 @@ def api_warc_start():
         'remote_pid': None,
     }
     with _warc_lock:
-        _warc_proc = proc
+        _warc_proc = None  # detached; liveness tracked via os.kill(pid, 0)
         _warc_state.update(snapshot)
-        # Reset terminal state from any previous run
         _warc_state['finished_at'] = None
         _warc_state['r2_key'] = None
         _warc_state['r2_uploaded_at'] = None
@@ -3134,9 +3164,9 @@ def api_warc_start():
         _warc_state['last_exit_code'] = None
     _save_warc_state()
 
-    threading.Thread(target=_warc_watch_and_upload, args=(proc, dict(snapshot)), daemon=True).start()
+    threading.Thread(target=_warc_watch_and_upload, args=(warc_pid, dict(snapshot)), daemon=True).start()
 
-    return jsonify({'success': True, 'pid': proc.pid, 'run_id': run_id, 'max_domains': max_domains})
+    return jsonify({'success': True, 'pid': warc_pid, 'run_id': run_id, 'max_domains': max_domains})
 
 
 @app.route('/api/warc/stop', methods=['POST'])
