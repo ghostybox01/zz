@@ -2569,6 +2569,8 @@ def _warc_watch_and_upload(proc_or_pid, snapshot: dict) -> None:
             try:
                 os.kill(proc_or_pid, 0)
                 return True
+            except PermissionError:
+                return True  # process alive, owned by different uid
             except (ProcessLookupError, OSError):
                 return False
         return proc_or_pid.poll() is None
@@ -2620,6 +2622,9 @@ def _warc_watch_and_upload(proc_or_pid, snapshot: dict) -> None:
             r2_error = r2_err or f'R2 unavailable ({r2_state})'
 
     with _warc_lock:
+        if _warc_state.get('run_id') != run_id:
+            # A newer run has started; don't overwrite its state.
+            return
         _warc_state['finished_at'] = datetime.now().isoformat()
         _warc_state['last_exit_code'] = exit_code
         _warc_state['r2_key'] = r2_key
@@ -3409,7 +3414,9 @@ def api_warc_status():
                 try:
                     os.kill(int(saved_pid), 0)
                     running = True
-                except (ProcessLookupError, PermissionError, OSError):
+                except PermissionError:
+                    running = True  # alive, different uid
+                except (ProcessLookupError, OSError):
                     pass
         if output_path and os.path.exists(output_path):
             try:
