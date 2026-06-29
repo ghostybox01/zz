@@ -3408,7 +3408,11 @@ def api_warc_status():
         # Gunicorn-restart recovery: _warc_proc is None after a service
         # restart but the process may still be alive. Fall back to a
         # kill-0 existence check on the PID stored in persistent state.
-        if not running and state.get('finished_at') is None:
+        # Intentionally skip the `finished_at is None` guard: a stale
+        # _warc_watch_and_upload thread can set finished_at on a run that
+        # is still live. Always probe; if alive, clear the spurious
+        # finished_at so the display stays consistent.
+        if not running:
             saved_pid = state.get('pid')
             if saved_pid:
                 try:
@@ -3418,6 +3422,12 @@ def api_warc_status():
                     running = True  # alive, different uid
                 except (ProcessLookupError, OSError):
                     pass
+                if running and state.get('finished_at') is not None:
+                    with _warc_lock:
+                        if _warc_state.get('pid') == saved_pid:
+                            _warc_state['finished_at'] = None
+                            _warc_state['last_exit_code'] = None
+                    _save_warc_state()
         if output_path and os.path.exists(output_path):
             try:
                 with open(output_path, 'rb') as f:
