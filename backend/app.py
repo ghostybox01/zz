@@ -3427,6 +3427,8 @@ def api_warc_status():
                         if _warc_state.get('pid') == saved_pid:
                             _warc_state['finished_at'] = None
                             _warc_state['last_exit_code'] = None
+                    state['finished_at'] = None
+                    state['last_exit_code'] = None
                     _save_warc_state()
         if output_path and os.path.exists(output_path):
             try:
