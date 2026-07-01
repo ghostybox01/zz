@@ -2784,145 +2784,167 @@ def api_warc_start():
         run_id_dist = uuid.uuid4().hex[:8]
         node_results = []
         controller_pid = None
+        snap_dict = {}
 
-        for i, nd in enumerate(nodes):
+        # ── Start controller synchronously ───────────────────────────────────
+        if 'controller' in nodes:
+            nd_run_id = run_id_dist
+            nd_run_dir = f'/tmp/reconx_warc_{nd_run_id}'
+            os.makedirs(nd_run_dir, exist_ok=True)
+            nd_output = os.path.join(nd_run_dir, 'live_domains.txt')
+            nd_log = os.path.join(nd_run_dir, 'warc.log')
 
-            if nd == 'controller':
-                # ── Start locally ────────────────────────────────────────────
-                nd_run_id = run_id_dist if i == 0 else uuid.uuid4().hex[:8]
-                nd_run_dir = f'/tmp/reconx_warc_{nd_run_id}'
-                os.makedirs(nd_run_dir, exist_ok=True)
-                nd_output = os.path.join(nd_run_dir, 'live_domains.txt')
-                nd_log = os.path.join(nd_run_dir, 'warc.log')
+            nd_cmd = [
+                WARC_BINARY,
+                '-max-domains', str(per_node_max),
+                '-output', nd_output,
+                '-extract-workers', str(extract_workers),
+                '-test-workers', str(test_workers),
+                '-snapshots', str(per_node_snaps),
+            ]
+            if source_list != ['cc']:
+                nd_cmd.extend(['-source', ','.join(source_list)])
+            if crtsh_enabled:
+                if crt_tld:
+                    nd_cmd.extend(['-crt-tld', crt_tld])
+                if crt_domain:
+                    nd_cmd.extend(['-crt-domain', crt_domain])
 
-                nd_cmd = [
-                    WARC_BINARY,
-                    '-max-domains', str(per_node_max),
-                    '-output', nd_output,
-                    '-extract-workers', str(extract_workers),
-                    '-test-workers', str(test_workers),
-                    '-snapshots', str(per_node_snaps),
-                ]
-                if source_list != ['cc']:
-                    nd_cmd.extend(['-source', ','.join(source_list)])
-                if crtsh_enabled:
-                    if crt_tld:
-                        nd_cmd.extend(['-crt-tld', crt_tld])
-                    if crt_domain:
-                        nd_cmd.extend(['-crt-domain', crt_domain])
+            nd_pid = None
+            try:
+                import shlex as _shlex
+                nd_pid_file = os.path.join(nd_run_dir, 'warc.pid')
+                nd_shell = (
+                    f'nohup {_shlex.join(nd_cmd)} < /dev/null > {_shlex.quote(nd_log)} 2>&1 '
+                    f'& disown; PID=$!; echo $PID > {_shlex.quote(nd_pid_file)}; echo $PID'
+                )
+                nd_result = subprocess.run(
+                    ['bash', '-c', nd_shell],
+                    capture_output=True, text=True, cwd=nd_run_dir,
+                )
+                nd_pid = int(nd_result.stdout.strip())
+                controller_pid = nd_pid
+                node_results.append({'id': 'controller', 'pid': nd_pid, 'max_domains': per_node_max, 'status': 'started'})
+            except Exception as e:
+                node_results.append({'id': 'controller', 'error': str(e), 'status': 'failed'})
 
-                nd_pid = None
-                try:
-                    import shlex as _shlex
-                    nd_pid_file = os.path.join(nd_run_dir, 'warc.pid')
-                    nd_shell = (
-                        f'nohup {_shlex.join(nd_cmd)} < /dev/null > {_shlex.quote(nd_log)} 2>&1 '
-                        f'& disown; PID=$!; echo $PID > {_shlex.quote(nd_pid_file)}; echo $PID'
-                    )
-                    nd_result = subprocess.run(
-                        ['bash', '-c', nd_shell],
-                        capture_output=True, text=True, cwd=nd_run_dir,
-                    )
-                    nd_pid = int(nd_result.stdout.strip())
-                    controller_pid = nd_pid
-                    node_results.append({'id': 'controller', 'pid': nd_pid, 'max_domains': per_node_max, 'status': 'started'})
-                except Exception as e:
-                    node_results.append({'id': 'controller', 'error': str(e), 'status': 'failed'})
+            snap_dict = {
+                'started_at': datetime.now().isoformat(),
+                'pid': nd_pid,
+                'run_id': nd_run_id,
+                'output_path': nd_output,
+                'log_path': nd_log,
+                'max_domains': per_node_max,
+                'run_on': 'controller',
+                'remote_pid': None,
+            }
+            if nd_pid:
+                threading.Thread(
+                    target=_warc_watch_and_upload,
+                    args=(nd_pid, dict(snap_dict)),
+                    daemon=True,
+                ).start()
 
-                snap_dict = {
-                    'started_at': datetime.now().isoformat(),
-                    'pid': nd_pid,
-                    'run_id': nd_run_id,
-                    'output_path': nd_output,
-                    'log_path': nd_log,
-                    'max_domains': per_node_max,
-                    'run_on': 'controller',
-                    'remote_pid': None,
-                }
-                if nd_pid:
-                    threading.Thread(
-                        target=_warc_watch_and_upload,
-                        args=(nd_pid, dict(snap_dict)),
-                        daemon=True,
-                    ).start()
+        # ── Queue remote workers as "starting"; set up each in background ────
+        worker_nodes = [nd for nd in nodes if nd != 'controller']
+        for nd in worker_nodes:
+            node_results.append({'id': nd, 'status': 'starting', 'max_domains': per_node_max})
 
-            else:
-                # ── Start on remote fleet worker ─────────────────────────────
+        # Capture loop vars for the closure
+        _src_flag_val = ','.join(source_list) if source_list != ['cc'] else ''
+        _crt_tld_val = crt_tld or ''
+        _crt_domain_val = crt_domain or ''
+        _crtsh_val = crtsh_enabled
+
+        def _start_worker(nd, run_id, per_max, per_snaps, ext_w, test_w,
+                          src_flag, crt_tld_flag, crt_domain_flag, crtsh_flag):
+            remote_dir = '/root/python_job'
+            remote_binary = f'{remote_dir}/reconx-warc'
+            result = {'id': nd, 'max_domains': per_max}
+            try:
                 mgr = get_ssh_manager()
                 if not mgr:
-                    node_results.append({'id': nd, 'error': 'SSH manager unavailable', 'status': 'failed'})
-                    continue
+                    result.update({'status': 'failed', 'error': 'SSH manager unavailable'})
+                    return
 
-                remote_dir = '/root/python_job'
-                remote_binary = f'{remote_dir}/reconx-warc'
-                remote_output = f'{remote_dir}/live_domains.txt'
+                mgr.ssh_exec(nd, 'pkill -x reconx-warc 2>/dev/null; sleep 1; true', 8)
+                mgr.ssh_exec(nd, f'mkdir -p {remote_dir}', 5)
 
+                local_size = os.path.getsize(WARC_BINARY) if os.path.exists(WARC_BINARY) else 0
+                remote_size_out = mgr.ssh_exec(nd, f'stat -c%s {remote_binary} 2>/dev/null || echo 0', 5)
                 try:
-                    # Kill any stale reconx-warc on this worker before starting
-                    mgr.ssh_exec(nd, 'pkill -x reconx-warc 2>/dev/null; sleep 1; true', 8)
-                    mgr.ssh_exec(nd, f'mkdir -p {remote_dir}', 5)
+                    remote_size = int((remote_size_out or '0').strip())
+                except (ValueError, TypeError):
+                    remote_size = 0
+                if remote_size != local_size:
+                    if not mgr.scp_upload(nd, WARC_BINARY, remote_binary):
+                        result.update({'status': 'failed', 'error': 'SCP binary upload failed'})
+                        return
+                mgr.ssh_exec(nd, f'chmod +x {remote_binary}', 5)
 
-                    # Skip SCP if remote binary already matches local size
-                    local_size = os.path.getsize(WARC_BINARY) if os.path.exists(WARC_BINARY) else 0
-                    remote_size_out = mgr.ssh_exec(nd, f'stat -c%s {remote_binary} 2>/dev/null || echo 0', 5)
-                    try:
-                        remote_size = int((remote_size_out or '0').strip())
-                    except (ValueError, TypeError):
-                        remote_size = 0
-                    if remote_size != local_size:
-                        if not mgr.scp_upload(nd, WARC_BINARY, remote_binary):
-                            node_results.append({'id': nd, 'error': 'SCP binary upload failed', 'status': 'failed'})
-                            continue
-                    mgr.ssh_exec(nd, f'chmod +x {remote_binary}', 5)
+                snap_flag = f' -snapshots {per_snaps}' if per_snaps > 0 else ''
+                s_flag = f' -source {src_flag}' if src_flag else ''
+                c_flag = ''
+                if crtsh_flag:
+                    if crt_tld_flag:
+                        c_flag += f' -crt-tld {crt_tld_flag}'
+                    if crt_domain_flag:
+                        c_flag += f' -crt-domain {crt_domain_flag}'
 
-                    snap_flag = f' -snapshots {per_node_snaps}' if per_node_snaps > 0 else ''
-                    src_flag = f" -source {','.join(source_list)}" if source_list != ['cc'] else ''
-                    crt_flag = ''
-                    if crtsh_enabled:
-                        if crt_tld:
-                            crt_flag += f' -crt-tld {crt_tld}'
-                        if crt_domain:
-                            crt_flag += f' -crt-domain {crt_domain}'
-
-                    # Write PID to file as backup; read it back for reliability
-                    remote_cmd = (
-                        f'cd {remote_dir} && '
-                        f'nohup ./reconx-warc -max-domains {per_node_max} '
-                        f'-output live_domains.txt '
-                        f'-extract-workers {extract_workers} '
-                        f'-test-workers {test_workers}'
-                        f'{snap_flag}{src_flag}{crt_flag} '
-                        f'> warc.log 2>&1 & PID=$!; echo $PID > warc.pid; echo $PID'
-                    )
-                    out = mgr.ssh_exec(nd, remote_cmd, 35)
-                    if not (out or '').strip():
-                        # Fallback: read warc.pid written by the command above
-                        out = mgr.ssh_exec(nd, f'cat {remote_dir}/warc.pid 2>/dev/null', 8)
-                    remote_pid = None
-                    for ln in (out or '').splitlines():
-                        for t in reversed(ln.strip().split()):
-                            if t.isdigit():
-                                remote_pid = int(t)
-                                break
-                        if remote_pid:
+                remote_cmd = (
+                    f'cd {remote_dir} && '
+                    f'nohup ./reconx-warc -max-domains {per_max} '
+                    f'-output live_domains.txt '
+                    f'-extract-workers {ext_w} '
+                    f'-test-workers {test_w}'
+                    f'{snap_flag}{s_flag}{c_flag} '
+                    f'> warc.log 2>&1 & PID=$!; echo $PID > warc.pid; echo $PID'
+                )
+                out = mgr.ssh_exec(nd, remote_cmd, 60)
+                if not (out or '').strip():
+                    out = mgr.ssh_exec(nd, f'cat {remote_dir}/warc.pid 2>/dev/null', 8)
+                remote_pid = None
+                for ln in (out or '').splitlines():
+                    for t in reversed(ln.strip().split()):
+                        if t.isdigit():
+                            remote_pid = int(t)
                             break
-
                     if remote_pid:
-                        node_results.append({'id': nd, 'remote_pid': remote_pid, 'max_domains': per_node_max, 'status': 'started'})
-                    else:
-                        node_results.append({'id': nd, 'error': f'PID parse failed from: {out!r}', 'status': 'failed'})
-                except Exception as e:
-                    node_results.append({'id': nd, 'error': str(e), 'status': 'failed'})
+                        break
 
-        # Update state to track distributed run
+                if remote_pid:
+                    result.update({'status': 'started', 'remote_pid': remote_pid})
+                else:
+                    result.update({'status': 'failed', 'error': f'PID parse failed from: {out!r}'})
+            except Exception as exc:
+                result.update({'status': 'failed', 'error': str(exc)})
+            finally:
+                with _warc_lock:
+                    nodes_list = _warc_state.get('dist_nodes', [])
+                    for j, n in enumerate(nodes_list):
+                        if n.get('id') == nd:
+                            nodes_list[j] = result
+                            break
+                _save_warc_state()
+
+        for nd in worker_nodes:
+            threading.Thread(
+                target=_start_worker,
+                args=(nd, run_id_dist, per_node_max, per_node_snaps,
+                      extract_workers, test_workers,
+                      _src_flag_val, _crt_tld_val, _crt_domain_val, _crtsh_val),
+                daemon=True,
+            ).start()
+
+        # Update state immediately — workers update their entries when done
         with _warc_lock:
             _warc_proc = None  # controller is nohup-detached; track by PID
             _warc_state.update({
                 'started_at': datetime.now().isoformat(),
                 'pid': controller_pid,
                 'run_id': run_id_dist,
-                'output_path': snap_dict.get('output_path') if 'snap_dict' in dir() else None,
-                'log_path': snap_dict.get('log_path') if 'snap_dict' in dir() else None,
+                'output_path': snap_dict.get('output_path'),
+                'log_path': snap_dict.get('log_path'),
                 'max_domains': max_domains,
                 'run_on': 'distributed',
                 'remote_pid': None,
@@ -2952,6 +2974,7 @@ def api_warc_start():
             'run_id': run_id_dist,
             'nodes': node_results,
             'started': len(started),
+            'workers_starting': len(worker_nodes),
             'max_domains': max_domains,
         })
     # ── END distributed mode ─────────────────────────────────────────────────
