@@ -2858,12 +2858,21 @@ def api_warc_start():
                 remote_output = f'{remote_dir}/live_domains.txt'
 
                 try:
-                    # Kill any stale reconx-warc on this worker before uploading
+                    # Kill any stale reconx-warc on this worker before starting
                     mgr.ssh_exec(nd, 'pkill -x reconx-warc 2>/dev/null; sleep 1; true', 8)
-                    mgr.ssh_exec(nd, f'mkdir -p {remote_dir} && rm -f {remote_binary}', 10)
-                    if not mgr.scp_upload(nd, WARC_BINARY, remote_binary):
-                        node_results.append({'id': nd, 'error': 'SCP binary upload failed', 'status': 'failed'})
-                        continue
+                    mgr.ssh_exec(nd, f'mkdir -p {remote_dir}', 5)
+
+                    # Skip SCP if remote binary already matches local size
+                    local_size = os.path.getsize(WARC_BINARY) if os.path.exists(WARC_BINARY) else 0
+                    remote_size_out = mgr.ssh_exec(nd, f'stat -c%s {remote_binary} 2>/dev/null || echo 0', 5)
+                    try:
+                        remote_size = int((remote_size_out or '0').strip())
+                    except (ValueError, TypeError):
+                        remote_size = 0
+                    if remote_size != local_size:
+                        if not mgr.scp_upload(nd, WARC_BINARY, remote_binary):
+                            node_results.append({'id': nd, 'error': 'SCP binary upload failed', 'status': 'failed'})
+                            continue
                     mgr.ssh_exec(nd, f'chmod +x {remote_binary}', 5)
 
                     snap_flag = f' -snapshot-list "{assigned_snaps}"' if assigned_snaps else (f' -snapshots {snapshots // len(nodes) + 1}' if snapshots > 0 else '')
