@@ -3890,6 +3890,100 @@ def api_r2_objects():
     return jsonify(payload)
 
 
+@app.route('/api/r2/merge-warc', methods=['POST'])
+def api_r2_merge_warc():
+    """Download every warc/* object from R2, merge + deduplicate all lines,
+    and upload the result as warc/merged_all_<timestamp>.txt.
+
+    Optional body: {"prefix": "warc/", "account": "<id>"}
+    Returns: {ok, merged_key, total_lines, source_count, sources}
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    prefix = data.get('prefix', 'warc/')
+    explicit_id = (data.get('account') or '').strip() or None
+
+    accounts = _load_r2_accounts()
+    if not accounts:
+        return jsonify({'ok': False, 'error': 'no R2 accounts configured'}), 200
+
+    targets = [a for a in accounts if a.get('id') == explicit_id] if explicit_id else accounts
+    if explicit_id and not targets:
+        return jsonify({'ok': False, 'error': f'unknown account id: {explicit_id}'}), 404
+
+    # Collect all keys across accounts
+    all_keys: list = []  # (acct, client, bucket, key, size)
+    for acct in targets:
+        client, bucket, state, err, _ = _build_r2_client(acct)
+        if state != 'connected' or not client or not bucket:
+            continue
+        try:
+            paginator = client.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for o in page.get('Contents', []) or []:
+                    key = o.get('Key', '')
+                    # Skip if it's the merged file itself to avoid re-merging
+                    if 'merged_all_' in key:
+                        continue
+                    all_keys.append((acct, client, bucket, key, o.get('Size', 0)))
+        except Exception as e:
+            print(f'[merge-warc] list failed for {acct.get("label")}: {e}')
+
+    if not all_keys:
+        return jsonify({'ok': False, 'error': 'no warc objects found', 'sources': []}), 200
+
+    # Download and merge — accumulate into a set for O(1) dedup
+    seen: set = set()
+    sources: list = []
+    for acct, client, bucket, key, size in all_keys:
+        try:
+            resp = client.get_object(Bucket=bucket, Key=key)
+            raw = resp['Body'].read()
+            lines_added = 0
+            for line in raw.decode('utf-8', errors='replace').splitlines():
+                line = line.strip()
+                if line and line not in seen:
+                    seen.add(line)
+                    lines_added += 1
+            sources.append({'key': key, 'size': size, 'lines_added': lines_added})
+        except Exception as e:
+            sources.append({'key': key, 'size': size, 'error': str(e)})
+
+    if not seen:
+        return jsonify({'ok': False, 'error': 'all objects empty or unreadable', 'sources': sources}), 200
+
+    # Upload the merged result to the first writable account
+    ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
+    merged_key = f'warc/merged_all_{ts}.txt'
+    merged_bytes = '\n'.join(sorted(seen)).encode('utf-8') + b'\n'
+
+    upload_client, upload_bucket = None, None
+    for acct in targets:
+        c, b, st, _, _ = _build_r2_client(acct)
+        if st == 'connected' and c and b:
+            upload_client, upload_bucket = c, b
+            break
+
+    if not upload_client:
+        return jsonify({'ok': False, 'error': 'no writable R2 account'}), 200
+
+    try:
+        import io as _io
+        upload_client.upload_fileobj(
+            _io.BytesIO(merged_bytes), upload_bucket, merged_key,
+            ExtraArgs={'ContentType': 'text/plain'},
+        )
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'upload failed: {e}', 'sources': sources}), 500
+
+    return jsonify({
+        'ok': True,
+        'merged_key': merged_key,
+        'total_lines': len(seen),
+        'source_count': len(all_keys),
+        'sources': sources,
+    })
+
+
 @app.route('/api/r2/cors-setup', methods=['POST'])
 def api_r2_cors_setup():
     """One-click CORS rule install. ?account=<id> targets one bucket;
