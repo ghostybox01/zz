@@ -2875,7 +2875,7 @@ def api_warc_start():
                             continue
                     mgr.ssh_exec(nd, f'chmod +x {remote_binary}', 5)
 
-                    snap_flag = f' -snapshot-list "{assigned_snaps}"' if assigned_snaps else (f' -snapshots {snapshots // len(nodes) + 1}' if snapshots > 0 else '')
+                    snap_flag = f' -snapshots {per_node_snaps}' if per_node_snaps > 0 else ''
                     src_flag = f" -source {','.join(source_list)}" if source_list != ['cc'] else ''
                     crt_flag = ''
                     if crtsh_enabled:
