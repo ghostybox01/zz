@@ -2914,6 +2914,16 @@ def api_warc_start():
                     if remote_pid:
                         break
 
+                # Fallback: if echo/warc.pid gave no PID (can happen when
+                # paramiko closes the exec channel before the shell echo
+                # flushes), pgrep the process we just launched.
+                if not remote_pid:
+                    pg = mgr.ssh_exec(nd, 'pgrep -n reconx-warc 2>/dev/null', 5)
+                    for t in (pg or '').strip().split():
+                        if t.isdigit():
+                            remote_pid = int(t)
+                            break
+
                 if remote_pid:
                     result.update({'status': 'started', 'remote_pid': remote_pid})
                 else:
