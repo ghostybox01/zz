@@ -652,6 +652,24 @@ export const r2 = {
     }
     return (await res.json()) as { ok: boolean; deleted?: string }
   },
+  /** Get a presigned GET URL for one object (default 1 h expiry). */
+  downloadUrl: (key: string, accountId?: string, expiresIn = 3600) => {
+    const params = new URLSearchParams({ key, expires: String(expiresIn) })
+    if (accountId) params.set('account', accountId)
+    return getJson<{ ok: boolean; url?: string; key?: string; expires_in?: number; error?: string }>(
+      `/r2/download-url?${params.toString()}`,
+    )
+  },
+  /** Merge + deduplicate every warc/* object into one file in R2. */
+  mergeWarc: (prefix = 'warc/') =>
+    postJson<{
+      ok: boolean
+      merged_key?: string
+      total_lines?: number
+      source_count?: number
+      sources?: Array<{ key: string; size: number; lines_added?: number; error?: string }>
+      error?: string
+    }>('/r2/merge-warc', { prefix }),
 }
 
 /* ── WARC harvest control plane ──────────────────────────────────────── */

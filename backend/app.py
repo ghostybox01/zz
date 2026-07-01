@@ -3984,6 +3984,55 @@ def api_r2_merge_warc():
     })
 
 
+@app.route('/api/r2/download-url', methods=['GET'])
+def api_r2_download_url():
+    """Generate a presigned GET URL for a single R2 object.
+
+    ?key=<object-key>  (required)
+    ?account=<id>      (optional — narrows to one account)
+    ?expires=<seconds> (optional, default 3600)
+
+    Returns {ok, url, key, expires_in}.
+    """
+    key = (request.args.get('key') or '').strip()
+    if not key:
+        return jsonify({'ok': False, 'error': 'key is required'}), 400
+    explicit_id = (request.args.get('account') or '').strip() or None
+    try:
+        expires = max(60, min(86400, int(request.args.get('expires') or 3600)))
+    except (TypeError, ValueError):
+        expires = 3600
+
+    accounts = _load_r2_accounts()
+    if not accounts:
+        return jsonify({'ok': False, 'error': 'no R2 accounts configured'}), 200
+
+    targets = [a for a in accounts if a.get('id') == explicit_id] if explicit_id else accounts
+
+    for acct in targets:
+        client, bucket, state, err, _ = _build_r2_client(acct)
+        if state != 'connected' or not client or not bucket:
+            continue
+        try:
+            url = client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket, 'Key': key},
+                ExpiresIn=expires,
+            )
+            return jsonify({
+                'ok': True,
+                'url': url,
+                'key': key,
+                'expires_in': expires,
+                'account_id': acct.get('id'),
+                'account_label': acct.get('label'),
+            })
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'presign failed: {e}'}), 500
+
+    return jsonify({'ok': False, 'error': 'object not found or no accessible account'}), 404
+
+
 @app.route('/api/r2/cors-setup', methods=['POST'])
 def api_r2_cors_setup():
     """One-click CORS rule install. ?account=<id> targets one bucket;

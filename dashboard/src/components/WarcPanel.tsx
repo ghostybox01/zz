@@ -275,6 +275,9 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
   // duplicates without leaving the cockpit.
   const [r2Objects, setR2Objects] = useState<R2Object[]>([])
   const [r2Listing, setR2Listing] = useState(false)
+  const [r2Merging, setR2Merging] = useState(false)
+  const [r2MergeResult, setR2MergeResult] = useState<{ key: string; total: number } | null>(null)
+  const [r2MergeError, setR2MergeError] = useState<string | null>(null)
   const [sysMem, setSysMem] = useState<{ total_mb: number; available_mb: number } | null>(null)
   const pollTimer = useRef<number | null>(null)
 
@@ -333,6 +336,44 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
       await refresh()
     } else {
       notify?.('R2 delete failed', res.error ?? 'unknown error', 'error')
+    }
+  }
+
+  async function onDownloadR2(key: string, accountId?: string) {
+    try {
+      const res = await r2.downloadUrl(key, accountId)
+      if (res.ok && res.url) {
+        const a = document.createElement('a')
+        a.href = res.url
+        a.download = key.split('/').pop() ?? key
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+      } else {
+        notify?.('Download failed', res.error ?? 'could not get URL', 'error')
+      }
+    } catch (e) {
+      notify?.('Download failed', (e as Error).message, 'error')
+    }
+  }
+
+  async function onMergeAll() {
+    setR2Merging(true)
+    setR2MergeError(null)
+    setR2MergeResult(null)
+    try {
+      const res = await r2.mergeWarc()
+      if (res.ok && res.merged_key) {
+        setR2MergeResult({ key: res.merged_key, total: res.total_lines ?? 0 })
+        notify?.('Merge complete', `${(res.total_lines ?? 0).toLocaleString()} unique domains → ${res.merged_key}`, 'info')
+        await refreshR2Objects()
+      } else {
+        setR2MergeError(res.error ?? 'merge failed')
+      }
+    } catch (e) {
+      setR2MergeError((e as Error).message)
+    } finally {
+      setR2Merging(false)
     }
   }
 
@@ -963,16 +1004,47 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
           <div className="muted" style={{ fontSize: '.78rem' }}>
             R2 exports {r2Objects.length > 0 ? `(${r2Objects.length})` : ''}
           </div>
-          <button
-            type="button"
-            className="btn-glass btn-glass--xs"
-            onClick={() => void refreshR2Objects()}
-            disabled={r2Listing}
-            title="Re-list objects in the warc/ prefix"
-          >
-            {r2Listing ? '…' : '↻'}
-          </button>
+          <div style={{ display: 'flex', gap: '.4rem' }}>
+            <button
+              type="button"
+              className="btn-glass btn-glass--xs"
+              onClick={() => void onMergeAll()}
+              disabled={r2Merging || r2Objects.length === 0}
+              title="Merge + deduplicate all warc/ lists into one file in R2"
+            >
+              {r2Merging ? '⏳ Merging…' : '⊕ Merge All'}
+            </button>
+            <button
+              type="button"
+              className="btn-glass btn-glass--xs"
+              onClick={() => void refreshR2Objects()}
+              disabled={r2Listing}
+              title="Re-list objects in the warc/ prefix"
+            >
+              {r2Listing ? '…' : '↻'}
+            </button>
+          </div>
         </div>
+        {r2MergeError && (
+          <p style={{ color: 'var(--color-danger, #f66)', fontSize: '.72rem', marginTop: '.3rem' }}>
+            Merge failed: {r2MergeError}
+          </p>
+        )}
+        {r2MergeResult && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem', marginTop: '.35rem' }}>
+            <span className="muted" style={{ fontSize: '.72rem' }}>
+              ✓ {r2MergeResult.total.toLocaleString()} unique domains merged
+            </span>
+            <button
+              type="button"
+              className="btn-glass btn-glass--xs"
+              onClick={() => void onDownloadR2(r2MergeResult.key)}
+              title={`Download ${r2MergeResult.key}`}
+            >
+              ↓ Download merged
+            </button>
+          </div>
+        )}
         {r2Objects.length === 0 ? (
           <p className="muted" style={{ fontSize: '.72rem', marginTop: '.3rem' }}>
             {r2State === 'connected' ? 'No exports yet.' : 'Connect R2 in Settings to see exports.'}
@@ -1008,15 +1080,26 @@ export function WarcPanel({ notify, fleet = [] }: Props = {}) {
                   <td className="mono" style={{ textAlign: 'right' }}>{(o.size / 1024).toFixed(1)} KB</td>
                   <td className="muted">{o.modified ? new Date(o.modified).toLocaleString() : '—'}</td>
                   <td>
-                    <button
-                      type="button"
-                      className="btn-danger-outline"
-                      style={{ fontSize: '.7rem', padding: '.15rem .5rem' }}
-                      onClick={() => void onDeleteR2(o.key, o.account_id, o.account_label)}
-                      title={`Delete ${o.key} from R2${o.account_label ? ` (${o.account_label})` : ''}`}
-                    >
-                      Delete
-                    </button>
+                    <div style={{ display: 'flex', gap: '.35rem' }}>
+                      <button
+                        type="button"
+                        className="btn-glass btn-glass--xs"
+                        style={{ fontSize: '.7rem' }}
+                        onClick={() => void onDownloadR2(o.key, o.account_id)}
+                        title={`Download ${o.key}`}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-danger-outline"
+                        style={{ fontSize: '.7rem', padding: '.15rem .5rem' }}
+                        onClick={() => void onDeleteR2(o.key, o.account_id, o.account_label)}
+                        title={`Delete ${o.key} from R2${o.account_label ? ` (${o.account_label})` : ''}`}
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
