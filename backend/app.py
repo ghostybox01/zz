@@ -2370,6 +2370,8 @@ _warc_state: dict = {
     'r2_live_uploaded_at': None,
     # Saved on every start so the watchdog can replay it on auto-restart.
     'last_settings': None,
+    # List of {id, status, pid/remote_pid, max_domains, error} per node.
+    'dist_nodes': [],
 }
 
 # Persisted snapshot of _warc_state so a gunicorn restart doesn't make the
