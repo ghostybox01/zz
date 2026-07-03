@@ -8351,9 +8351,13 @@ threading.Thread(target=_recurring_fp_cleanup, daemon=True, name='fp-cleanup').s
 def _warc_watchdog_loop() -> None:
     """Checks every 5 min whether the WARC scan is alive. If it died
     without a clean finished_at, alerts Telegram and restarts with the
-    same settings that were used for the last run."""
+    same settings that were used for the last run.
+
+    For runs with max_domains set, a clean exit also triggers auto-restart
+    so the scanner keeps accumulating domains until manually stopped."""
     import urllib.request as _ur
-    _restart_count: dict = {}  # run_id → restart attempts (reset on new run)
+    _restart_count: dict = {}  # run_id → crash restart attempts (reset on new run)
+    _clean_restarted: set = set()  # run_ids already auto-restarted on clean exit
 
     while True:
         time.sleep(300)
@@ -8367,7 +8371,41 @@ def _warc_watchdog_loop() -> None:
                 continue  # never started — nothing to guard
 
             if state.get('finished_at') is not None:
-                continue  # clean finish; don't resurrect
+                # Auto-continue if max_domains target was set (user wants to keep scanning)
+                run_id = state.get('run_id', 'unknown')
+                if run_id in _clean_restarted:
+                    continue  # already fired for this run; new run will have a new run_id
+                max_domains = last_settings.get('max_domains') or 0
+                if not max_domains:
+                    _clean_restarted.add(run_id)
+                    continue  # no target; don't auto-restart
+                nodes = last_settings.get('nodes') or ['controller']
+                node_str = ' + '.join(str(n) for n in nodes)
+                _tg_send(
+                    f'🔄 <b>WARC auto-continuing</b>\n'
+                    f'Run <code>{run_id}</code> finished — restarting for more domains.\n'
+                    f'Nodes: {node_str}'
+                )
+                payload = json.dumps(last_settings).encode()
+                req = _ur.Request(
+                    'http://127.0.0.1:5000/api/warc/start',
+                    data=payload,
+                    headers={'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                try:
+                    with _ur.urlopen(req, timeout=120) as resp:
+                        result = json.loads(resp.read().decode() or '{}')
+                    new_id = result.get('run_id') or '?'
+                    _clean_restarted.add(run_id)
+                    _tg_send(
+                        f'✅ <b>WARC restarted</b>\n'
+                        f'New run: <code>{new_id}</code>\n'
+                        f'Nodes: {node_str}'
+                    )
+                except Exception as e:
+                    _tg_send(f'❌ <b>WARC restart FAILED</b>\n{e}')
+                continue
 
             pid = state.get('pid')
             if not pid:
