@@ -2372,6 +2372,8 @@ _warc_state: dict = {
     'last_settings': None,
     # List of {id, status, pid/remote_pid, max_domains, error} per node.
     'dist_nodes': [],
+    # Set by /api/warc/stop so the watchdog doesn't auto-restart a manual stop.
+    'manually_stopped': False,
 }
 
 # Persisted snapshot of _warc_state so a gunicorn restart doesn't make the
@@ -2965,6 +2967,7 @@ def api_warc_start():
                 'r2_uploaded_at': None, 'r2_live_uploaded_at': None,
                 'r2_error': None, 'r2_account_id': None, 'r2_account_label': None,
                 'last_exit_code': None,
+                'manually_stopped': False,
                 'dist_nodes': node_results,
                 'last_settings': {
                     'max_domains': max_domains,
@@ -3132,6 +3135,7 @@ def api_warc_start():
             _warc_state['r2_account_id'] = None
             _warc_state['r2_account_label'] = None
             _warc_state['last_exit_code'] = None
+            _warc_state['manually_stopped'] = False
         _save_warc_state()
 
         # Deliberately NOT spawning _warc_watch_and_upload — the worker
@@ -3238,9 +3242,11 @@ def api_warc_stop():
     global _warc_proc
     _reload_warc_state_if_changed()
     with _warc_lock:
+        _warc_state['manually_stopped'] = True
         proc = _warc_proc
         run_on = _warc_state.get('run_on') or 'controller'
         remote_pid = _warc_state.get('remote_pid')
+    _save_warc_state()
 
     # Stop remote nodes in distributed mode
     dist_nodes = _warc_state.get('dist_nodes', [])
@@ -8373,8 +8379,8 @@ def _warc_watchdog_loop() -> None:
             if state.get('finished_at') is not None:
                 # Auto-continue if max_domains target was set (user wants to keep scanning)
                 run_id = state.get('run_id', 'unknown')
-                if run_id in _clean_restarted:
-                    continue  # already fired for this run; new run will have a new run_id
+                if run_id in _clean_restarted or state.get('manually_stopped'):
+                    continue  # already fired, or user explicitly stopped — don't resurrect
                 max_domains = last_settings.get('max_domains') or 0
                 if not max_domains:
                     _clean_restarted.add(run_id)
