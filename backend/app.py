@@ -8409,6 +8409,20 @@ def _warc_watchdog_loop() -> None:
                         f'New run: <code>{new_id}</code>\n'
                         f'Nodes: {node_str}'
                     )
+                    # Merge all R2 files so the cumulative list stays current
+                    try:
+                        merge_req = _ur.Request(
+                            'http://127.0.0.1:5000/api/r2/merge-warc',
+                            data=b'{}',
+                            headers={'Content-Type': 'application/json'},
+                            method='POST',
+                        )
+                        with _ur.urlopen(merge_req, timeout=300) as mr:
+                            mr_data = json.loads(mr.read().decode() or '{}')
+                        total = mr_data.get('total_lines', '?')
+                        _tg_send(f'📦 <b>R2 merged</b> — {total:,} unique domains total' if isinstance(total, int) else f'📦 <b>R2 merged</b>')
+                    except Exception as me:
+                        print(f'[warc-watchdog] auto-merge failed: {me}', flush=True)
                 except Exception as e:
                     _tg_send(f'❌ <b>WARC restart FAILED</b>\n{e}')
                 continue
@@ -8431,17 +8445,14 @@ def _warc_watchdog_loop() -> None:
                 _restart_count.clear()
                 continue
 
-            # Dead — cap restarts to avoid infinite loops on broken binary
+            # Crashed — restart unconditionally; alert every 10 attempts
             run_id = state.get('run_id', 'unknown')
             attempts = _restart_count.get(run_id, 0)
-            if attempts >= 10:
+            if attempts > 0 and attempts % 10 == 0:
                 _tg_send(
-                    f'🛑 <b>WARC watchdog gave up</b>\n'
-                    f'Run <code>{run_id}</code> has crashed 10 times in a row.\n'
-                    f'Manual intervention required.'
+                    f'⚠️ <b>WARC crash loop</b>\n'
+                    f'Run <code>{run_id}</code> has crashed {attempts} times — still restarting.'
                 )
-                _restart_count[run_id] = attempts + 1  # keep counting so we don't spam
-                continue
 
             domains = state.get('domains_found', 0) or 0
             nodes = last_settings.get('nodes') or ['controller']
