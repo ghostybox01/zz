@@ -2381,6 +2381,8 @@ _warc_state: dict = {
 # api_warc_status's existing kill -0 probe naturally re-syncs liveness once
 # the dict is loaded.
 WARC_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'warc_state.json')
+# Single growing master list — all runs accumulate here; uploaded to R2 as warc/Scan.txt
+WARC_PERSISTENT_FILE = '/opt/reconx/Scan.txt'
 
 
 def _save_warc_state() -> None:
@@ -2604,23 +2606,50 @@ def _warc_watch_and_upload(proc_or_pid, snapshot: dict) -> None:
             exit_code = -1
             print(f'[warc] wait failed: {e}')
 
+    # ── Accumulate into persistent master file, upload as warc/Scan.txt ────────
     r2_key = None
     r2_error = None
     r2_account_id = None
     r2_account_label = None
     if output_path and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        try:
+            os.makedirs(os.path.dirname(WARC_PERSISTENT_FILE), exist_ok=True)
+            # Load existing master set
+            existing: set = set()
+            if os.path.exists(WARC_PERSISTENT_FILE):
+                with open(WARC_PERSISTENT_FILE, 'r', errors='replace') as _f:
+                    for _ln in _f:
+                        _ln = _ln.strip()
+                        if _ln:
+                            existing.add(_ln)
+            # Merge new run output
+            added = 0
+            with open(output_path, 'r', errors='replace') as _f:
+                for _ln in _f:
+                    _ln = _ln.strip()
+                    if _ln and _ln not in existing:
+                        existing.add(_ln)
+                        added += 1
+            # Write back sorted
+            tmp_persist = WARC_PERSISTENT_FILE + '.tmp'
+            with open(tmp_persist, 'w') as _f:
+                _f.write('\n'.join(sorted(existing)) + '\n')
+            os.replace(tmp_persist, WARC_PERSISTENT_FILE)
+            print(f'[warc] persistent file: {len(existing):,} total (+{added:,} new)', flush=True)
+        except Exception as _pe:
+            print(f'[warc] persistent accumulate failed: {_pe}', flush=True)
+
+        # Upload master as warc/Scan.txt (overwrites previous)
         client, bucket, r2_state, r2_err, r2_account_id = _get_r2_client()
         if client and bucket:
-            # Resolve the label once so we can stamp it into _warc_state
-            # for the cockpit display.
             r2_account_label = next(
                 (a.get('label') for a in _load_r2_accounts() if a.get('id') == r2_account_id),
                 None,
             )
             try:
-                ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
-                r2_key = f'warc/live_domains_{ts}_{run_id}.txt'
-                client.upload_file(output_path, bucket, r2_key, ExtraArgs={'ContentType': 'text/plain'})
+                r2_key = 'warc/Scan.txt'
+                client.upload_file(WARC_PERSISTENT_FILE, bucket, r2_key,
+                                   ExtraArgs={'ContentType': 'text/plain'})
             except Exception as e:
                 r2_error = f'R2 upload failed: {e}'
                 r2_key = None
@@ -8465,20 +8494,14 @@ def _warc_watchdog_loop() -> None:
                         f'New run: <code>{new_id}</code>\n'
                         f'Nodes: {node_str}'
                     )
-                    # Merge all R2 files so the cumulative list stays current
+                    # Report persistent total from master file
                     try:
-                        merge_req = _ur.Request(
-                            'http://127.0.0.1:5000/api/r2/merge-warc',
-                            data=b'{}',
-                            headers={'Content-Type': 'application/json'},
-                            method='POST',
-                        )
-                        with _ur.urlopen(merge_req, timeout=300) as mr:
-                            mr_data = json.loads(mr.read().decode() or '{}')
-                        total = mr_data.get('total_lines', '?')
-                        _tg_send(f'📦 <b>R2 merged</b> — {total:,} unique domains total' if isinstance(total, int) else f'📦 <b>R2 merged</b>')
+                        if os.path.exists(WARC_PERSISTENT_FILE):
+                            with open(WARC_PERSISTENT_FILE) as _pf:
+                                total = sum(1 for ln in _pf if ln.strip())
+                            _tg_send(f'📦 <b>Scan.txt</b> — {total:,} unique domains accumulated')
                     except Exception as me:
-                        print(f'[warc-watchdog] auto-merge failed: {me}', flush=True)
+                        print(f'[warc-watchdog] total count failed: {me}', flush=True)
                 except Exception as e:
                     _tg_send(f'❌ <b>WARC restart FAILED</b>\n{e}')
                 continue
