@@ -3962,7 +3962,26 @@ def api_r2_objects():
     return jsonify(payload)
 
 
-_merge_warc_status: dict = {'running': False, 'result': None}
+MERGE_STATUS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'merge_status.json')
+_merge_warc_status: dict = {'running': False, 'result': None, 'progress': None}
+
+
+def _merge_status_write(data: dict) -> None:
+    try:
+        tmp = MERGE_STATUS_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, MERGE_STATUS_FILE)
+    except Exception:
+        pass
+
+
+def _merge_status_read() -> dict:
+    try:
+        with open(MERGE_STATUS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {'running': False, 'result': None, 'progress': None}
 
 
 def _do_merge_warc(prefix: str, explicit_id, dest_key: str | None = None) -> dict:
@@ -3996,7 +4015,10 @@ def _do_merge_warc(prefix: str, explicit_id, dest_key: str | None = None) -> dic
 
     seen: set = set()
     sources: list = []
-    for acct, client, bucket, key, size in all_keys:
+    total = len(all_keys)
+    for i, (acct, client, bucket, key, size) in enumerate(all_keys):
+        _merge_status_write({'running': True, 'result': None,
+                             'progress': {'done': i, 'total': total, 'pct': round(i * 100 / total)}})
         try:
             resp = client.get_object(Bucket=bucket, Key=key)
             raw = resp['Body'].read()
@@ -4060,16 +4082,17 @@ def api_r2_merge_warc():
     run_async = bool(data.get('async', False))
 
     if run_async:
-        if _merge_warc_status.get('running'):
+        current = _merge_status_read()
+        if current.get('running'):
             return jsonify({'ok': False, 'error': 'merge already running'}), 409
-        _merge_warc_status['running'] = True
-        _merge_warc_status['result'] = None
+        _merge_status_write({'running': True, 'result': None, 'progress': {'done': 0, 'total': 0, 'pct': 0}})
 
         def _bg():
             try:
-                _merge_warc_status['result'] = _do_merge_warc(prefix, explicit_id, dest_key)
-            finally:
-                _merge_warc_status['running'] = False
+                result = _do_merge_warc(prefix, explicit_id, dest_key)
+                _merge_status_write({'running': False, 'result': result, 'progress': None})
+            except Exception as e:
+                _merge_status_write({'running': False, 'result': {'ok': False, 'error': str(e)}, 'progress': None})
 
         threading.Thread(target=_bg, daemon=True, name='merge-warc').start()
         return jsonify({'ok': True, 'async': True, 'message': 'merge started — poll /api/r2/merge-warc/status'}), 202
@@ -4081,9 +4104,11 @@ def api_r2_merge_warc():
 
 @app.route('/api/r2/merge-warc/status', methods=['GET'])
 def api_r2_merge_warc_status():
+    s = _merge_status_read()
     return jsonify({
-        'running': _merge_warc_status.get('running', False),
-        'result': _merge_warc_status.get('result'),
+        'running': s.get('running', False),
+        'progress': s.get('progress'),
+        'result': s.get('result'),
     })
 
 
