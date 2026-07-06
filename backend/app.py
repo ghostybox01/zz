@@ -3962,28 +3962,20 @@ def api_r2_objects():
     return jsonify(payload)
 
 
-@app.route('/api/r2/merge-warc', methods=['POST'])
-def api_r2_merge_warc():
-    """Download every warc/* object from R2, merge + deduplicate all lines,
-    and upload the result as warc/merged_all_<timestamp>.txt.
+_merge_warc_status: dict = {'running': False, 'result': None}
 
-    Optional body: {"prefix": "warc/", "account": "<id>"}
-    Returns: {ok, merged_key, total_lines, source_count, sources}
-    """
-    data = request.get_json(force=True, silent=True) or {}
-    prefix = data.get('prefix', 'warc/')
-    explicit_id = (data.get('account') or '').strip() or None
 
+def _do_merge_warc(prefix: str, explicit_id, dest_key: str | None = None) -> dict:
+    """Core merge logic — runs synchronously, safe to call from a thread."""
     accounts = _load_r2_accounts()
     if not accounts:
-        return jsonify({'ok': False, 'error': 'no R2 accounts configured'}), 200
+        return {'ok': False, 'error': 'no R2 accounts configured'}
 
     targets = [a for a in accounts if a.get('id') == explicit_id] if explicit_id else accounts
     if explicit_id and not targets:
-        return jsonify({'ok': False, 'error': f'unknown account id: {explicit_id}'}), 404
+        return {'ok': False, 'error': f'unknown account id: {explicit_id}'}
 
-    # Collect all keys across accounts
-    all_keys: list = []  # (acct, client, bucket, key, size)
+    all_keys: list = []
     for acct in targets:
         client, bucket, state, err, _ = _build_r2_client(acct)
         if state != 'connected' or not client or not bucket:
@@ -3993,17 +3985,15 @@ def api_r2_merge_warc():
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                 for o in page.get('Contents', []) or []:
                     key = o.get('Key', '')
-                    # Skip if it's the merged file itself to avoid re-merging
-                    if 'merged_all_' in key:
+                    if 'merged_all_' in key or key == dest_key:
                         continue
                     all_keys.append((acct, client, bucket, key, o.get('Size', 0)))
         except Exception as e:
             print(f'[merge-warc] list failed for {acct.get("label")}: {e}')
 
     if not all_keys:
-        return jsonify({'ok': False, 'error': 'no warc objects found', 'sources': []}), 200
+        return {'ok': False, 'error': 'no warc objects found', 'sources': []}
 
-    # Download and merge — accumulate into a set for O(1) dedup
     seen: set = set()
     sources: list = []
     for acct, client, bucket, key, size in all_keys:
@@ -4021,11 +4011,10 @@ def api_r2_merge_warc():
             sources.append({'key': key, 'size': size, 'error': str(e)})
 
     if not seen:
-        return jsonify({'ok': False, 'error': 'all objects empty or unreadable', 'sources': sources}), 200
+        return {'ok': False, 'error': 'all objects empty or unreadable', 'sources': sources}
 
-    # Upload the merged result to the first writable account
     ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')
-    merged_key = f'warc/merged_all_{ts}.txt'
+    merged_key = dest_key or f'warc/merged_all_{ts}.txt'
     merged_bytes = '\n'.join(sorted(seen)).encode('utf-8') + b'\n'
 
     upload_client, upload_bucket = None, None
@@ -4036,7 +4025,7 @@ def api_r2_merge_warc():
             break
 
     if not upload_client:
-        return jsonify({'ok': False, 'error': 'no writable R2 account'}), 200
+        return {'ok': False, 'error': 'no writable R2 account'}
 
     try:
         import io as _io
@@ -4045,14 +4034,56 @@ def api_r2_merge_warc():
             ExtraArgs={'ContentType': 'text/plain'},
         )
     except Exception as e:
-        return jsonify({'ok': False, 'error': f'upload failed: {e}', 'sources': sources}), 500
+        return {'ok': False, 'error': f'upload failed: {e}', 'sources': sources}
 
-    return jsonify({
+    return {
         'ok': True,
         'merged_key': merged_key,
         'total_lines': len(seen),
         'source_count': len(all_keys),
         'sources': sources,
+    }
+
+
+@app.route('/api/r2/merge-warc', methods=['POST'])
+def api_r2_merge_warc():
+    """Download every warc/* object from R2, merge + deduplicate all lines,
+    and upload the result as warc/merged_all_<timestamp>.txt (or dest_key if given).
+
+    Optional body: {"prefix": "warc/", "account": "<id>", "dest_key": "warc/Scan.txt", "async": true}
+    Async mode returns 202 immediately; poll /api/r2/merge-warc/status for result.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    prefix = data.get('prefix', 'warc/')
+    explicit_id = (data.get('account') or '').strip() or None
+    dest_key = (data.get('dest_key') or '').strip() or None
+    run_async = bool(data.get('async', False))
+
+    if run_async:
+        if _merge_warc_status.get('running'):
+            return jsonify({'ok': False, 'error': 'merge already running'}), 409
+        _merge_warc_status['running'] = True
+        _merge_warc_status['result'] = None
+
+        def _bg():
+            try:
+                _merge_warc_status['result'] = _do_merge_warc(prefix, explicit_id, dest_key)
+            finally:
+                _merge_warc_status['running'] = False
+
+        threading.Thread(target=_bg, daemon=True, name='merge-warc').start()
+        return jsonify({'ok': True, 'async': True, 'message': 'merge started — poll /api/r2/merge-warc/status'}), 202
+
+    result = _do_merge_warc(prefix, explicit_id, dest_key)
+    status_code = 200 if result.get('ok') else 500
+    return jsonify(result), status_code
+
+
+@app.route('/api/r2/merge-warc/status', methods=['GET'])
+def api_r2_merge_warc_status():
+    return jsonify({
+        'running': _merge_warc_status.get('running', False),
+        'result': _merge_warc_status.get('result'),
     })
 
 
